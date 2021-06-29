@@ -1,0 +1,5 @@
+* Tool Name: alpha-beta-CROWN
+
+* Manual Setup or Licenses: Gurobi license is needed. You will be prompted to provide a license when you run install_tool.sh (academic license works on AWS).
+
+* Use CPU/GPU AWS Instance? GPU (p3.2xlarge)
