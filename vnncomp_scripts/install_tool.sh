@@ -54,6 +54,11 @@ onnxruntime==1.8.0
 git+git://github.com/Sarimuko/onnx2pytorch@master#egg=onnx2pytorch
 EOF
 ${VNNCOMP_PYTHON_PATH}/python -m pip install -r ${HOME}/vnncomp_requirements.txt
+
+# Force update onnx2pytorch library if it is already installed.
+${VNNCOMP_PYTHON_PATH}/python -m pip uninstall -y onnx2pytorch
+${VNNCOMP_PYTHON_PATH}/python -m pip install git+git://github.com/Sarimuko/onnx2pytorch
+
 # Install our auto_LiRPA library.
 cd ${TOOL_DIR}
 ${VNNCOMP_PYTHON_PATH}/python setup.py develop
@@ -72,7 +77,7 @@ echo "Checking if pytorch works... (returns 1.0 == works, it might take a while.
 ${VNNCOMP_PYTHON_PATH}/python -c 'import torch; a=torch.ones(1, device="cuda"); print(a.item())'
 
 # Activate Gurobi with academic license.
-echo "Please enter Gurobi licence:"
+echo "Please enter Gurobi licence (press ctrl+C to skip if gurobi license is already installed):"
 read gurobi_key
 ${VNNCOMP_PYTHON_PATH}/grbgetkey --path ${HOME} -q ${gurobi_key}
 
