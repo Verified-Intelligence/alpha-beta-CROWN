@@ -93,6 +93,7 @@ def incomplete_verifier(model_ori, data, norm, args, y, data_ub=None, data_lb=No
         c = None
     model = LiRPAConvNet(model_ori, y, None, solve_slope=args.solve_slope, device=args.device,
                 in_size=data.shape, deterministic=args.deterministic, simplify=False,  c=c)
+    print('Model prediction is:', model.net(data))
     if list(model.net.parameters())[0].is_cuda:
         data = data.cuda()
         data_lb, data_ub = data_lb.cuda(), data_ub.cuda()
@@ -170,6 +171,7 @@ def bab(model_ori, data, target, norm, args, y, data_ub=None, data_lb=None, lowe
     # LiRPA wrapper
     model = LiRPAConvNet(model_ori, y, target, solve_slope=args.solve_slope, device=args.device, in_size=data.shape,
                          deterministic=args.deterministic, conv_mode=args.conv_mode)
+    print('Model prediction is:', model.net(data))
     if list(model.net.parameters())[0].is_cuda:
         data = data.cuda()
         data_lb, data_ub = data_lb.cuda(), data_ub.cuda()
