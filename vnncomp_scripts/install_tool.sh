@@ -41,15 +41,19 @@ sudo systemctl stop unattended-upgrades.service docker.service containerd.servic
 sudo systemctl disable unattended-upgrades.service docker.service containerd.service docker.socket snapd.service snapd.socket
 
 # Fixup permission problems, remove residual files.
+echo "Fixing up permissions..."
 sudo rm -rf ${VNNCOMP_PYTHON_PATH}/../lib/python3.7/site-packages/\~nnx2pytorch*  # This folder wasn't delete successfully due to permission issues.
 sudo chown -R ubuntu:ubuntu ${VNNCOMP_PYTHON_PATH}/../../  # Some packages were mistakenly installed by sudo. Change their permission back.
+sudo rm -rf ${HOME}/.local/share/auto_LiRPA/
+sudo chown -R ubuntu:ubuntu ${HOME}
 
 # Force uninstall the onnx2pytorch library if it is already installed.
 ${VNNCOMP_PYTHON_PATH}/python -m pip uninstall -y onnx2pytorch
 
 # Install requirements.
+sudo rm ${HOME}/vnncomp_requirements.txt
 cat << 'EOF' > ${HOME}/vnncomp_requirements.txt
-numpy>=1.16
+numpy>=1.16,<1.20
 packaging>=20.0
 pytest>=5.0
 appdirs>=1.4
