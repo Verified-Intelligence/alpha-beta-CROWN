@@ -1100,8 +1100,10 @@ class BoundBatchNormalization(Bound):
         # self.num_batches_tracked = 0 # not support yet
         self.to(device)
         self.training = training
+        self.input_shape = None
 
     def forward(self, x, w, b, m, v):
+        self.input_shape = x.shape
         if self.training:
             dim = [0] + list(range(2, x.ndim))
             self.current_mean = x.mean(dim)
@@ -1137,7 +1139,9 @@ class BoundBatchNormalization(Bound):
                     patches = last_A.patches
                     patches = patches * tmp_weight.view(-1, 1, 1)
                     next_A = Patches(patches, last_A.stride, last_A.padding, last_A.shape, identity=0)
-                    sum_bias = (last_A.patches.sum((-1, -2)) * tmp_bias).sum(-1).transpose(-1, -2)
+                    bias = tmp_bias.view(1,-1,1,1).expand(self.input_shape)  # A.patches may contain padding; we must unfold it for normalization layer.
+                    bias = F.unfold(bias, last_A.patches.size(-1), padding=last_A.padding, stride=last_A.stride).transpose(-1,-2).view(([self.input_shape[0], self.input_shape[-1]*self.input_shape[-2]] if last_A.shape[1] == 1 else list(last_A.shape[:2])) + [1] + list(last_A.shape[3:]))
+                    sum_bias = (last_A.patches * bias).sum((-1,-2,-3)).transpose(-1, -2)
                     sum_bias = sum_bias.view(sum_bias.size(0), sum_bias.size(1), int(math.sqrt(sum_bias.size(2))), int(math.sqrt(sum_bias.size(2)))).transpose(0, 1)
                 else:
                     # we should create a real identity Patch
