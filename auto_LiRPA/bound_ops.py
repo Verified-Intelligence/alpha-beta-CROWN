@@ -3,15 +3,17 @@ import os
 import time
 from itertools import chain
 import numpy as np
+from numpy.lib.arraysetops import isin
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import MaxPool2d, \
     AdaptiveAvgPool2d, AvgPool2d, Tanh
 import math
+from collections import OrderedDict
 
 from auto_LiRPA.perturbations import Perturbation, PerturbationLpNorm, PerturbationSynonym, PerturbationL0Norm
-from auto_LiRPA.utils import eyeC, OneHotC, LinearBound, user_data_dir, lockutils, isnan, Patches, logger, Benchmarking, prod, batched_index_select, patchesToMatrix
+from auto_LiRPA.utils import eyeC, OneHotC, LinearBound, user_data_dir, isnan, Patches, logger, Benchmarking, prod, batched_index_select, patchesToMatrix, check_padding
 
 torch._C._jit_set_profiling_executor(False)
 torch._C._jit_set_profiling_mode(False)
@@ -122,12 +124,36 @@ class Interval(tuple):
 
 
 class Bound(nn.Module):
+    r"""
+    Base class for supporting the bound computation of an operator.
+
+    Args:
+        input_name (list): The name of input nodes.
+
+        name (str): The name of this node.
+
+        ori_name (str): Name in the original model.
+
+        attr (dict): Attributes of the operator.
+
+        inputs (list): A list of input nodes.
+
+        output_index (int): The index in the output if the operator has multiple outputs. Usually output_index=0.
+
+        options (dict): Bound options.
+
+        device (str or torch.device): Device of the bounded module.
+
+    Be sure to run `super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)`
+    first in the `__init__` function.
+    """
+
     def __init__(self, input_name, name, ori_name, attr={}, inputs=[], output_index=0, options={}, device=None):
         super().__init__()
         self.output_name = []
         self.input_name, self.name, self.ori_name, self.attr, self.inputs, self.output_index, self.options, self.device = \
             input_name, name, ori_name, attr, inputs, output_index, options, device
-        self.fv = None
+        self.forward_value = None
         self.from_input = False
         self.bounded = False
         self.IBP_rets = None
@@ -146,9 +172,33 @@ class Bound(nn.Module):
         return self.inputs[i].perturbed
 
     def forward(self, *x):
+        r"""
+        Function for standard/clean forward. 
+
+        Args: 
+            x: A list of input values. The length of the list is equal to the number of input nodes.
+
+        Returns:
+            output (Tensor): The standard/clean output of this node.
+        """
         return not_implemented_op(self, 'forward')
 
     def interval_propagate(self, *v):
+        r"""
+        Function for interval bound propagation (IBP) computation.
+
+        There is a default function `self.default_interval_propagate(*v)` in the base class, 
+        which can be used if the operator is *monotonic*. To use it, set `self.use_default_ibp = True`
+        in the `__init__` function, and the implementation of this function can be skipped.
+
+        Args: 
+            v: A list of the interval bound of input nodes. 
+            Generally, for each element `v[i]`, `v[i][0]` is the lower interval bound,
+            and `v[i][1]` is the upper interval bound.
+
+        Returns:
+            bound: The interval bound of this node, in a same format as v[i].
+        """        
         if self.use_default_ibp:
             return self.default_interval_propagate(*v)
         else:
@@ -171,17 +221,54 @@ class Bound(nn.Module):
         else:
             raise NotImplementedError('default_interval_propagate only supports no more than 1 input node')
 
-    def bound_forward(self, dim_in, last):
+
+    def bound_forward(self, dim_in, *x):
+        r"""
+        Function for forward mode bound propagation. Forward mode LiRPA computs a `LinearBound`
+        instance representing the linear bound for each involved node. Major attributes of `LinearBound` include
+        `lw`, `uw`, `lb`, `ub`, `lower`, and `upper`.
+
+        `lw` and `uw` are coefficients of linear bounds w.r.t. model input. 
+        Their shape is `(batch_size, dim_in, *standard_shape)`, where `dim_in` is the total dimension 
+        of perturbed input nodes of the model, and `standard_shape` is the shape of the standard/clean output.
+        `lb` and `ub` are bias terms of linear bounds, and their shape is equal to the shape of standard/clean output.
+        `lower` and `upper` are concretized lower and upper bounds that will be computed later in BoundedModule.
+
+        Args: 
+            dim_in (int): Total dimension of perturbed input nodes of the model.
+            
+            x: A list of the linear bound of input nodes. Each element in x is a `LinearBound` instance.
+
+        Returns:
+            bound (LinearBound): The linear bound of this node.
+        """                
         return not_implemented_op(self, 'bound_forward')
 
     def bound_backward(self, last_lA, last_uA, *x):
+        r"""
+        Function for backward mode bound propagation.
+
+        Args: 
+            last_lA (Tensor): `A` matrix for lower bound computation propagated to this node. It can be `None` if lower bound is not needed.
+            
+            last_uA (Tensor): `A` matrix for upper bound computation propagated to this node. It can be `None` if upper bound is not needed.
+            
+            x: A list of input nodes, with x[i].lower and x[i].upper that can be used as pre-activation bounds.
+
+        Returns:
+            A: A list of A matrices for the input nodes. Each element is a tuple (lA, uA).
+
+            lbias (Tensor): The bias term for lower bound computation, introduced by the linear relaxation of this node. .
+
+            ubias (Tensor): The bias term for upper bound computation, introduced by the linear relaxation of this node. 
+        """        
         return not_implemented_op(self, 'bound_backward')
 
     def infer_batch_dim(self, batch_size, *x):
         return not_implemented_op(self.type, 'infer_batch_dim')
 
     def broadcast_backward(self, A, x):
-        shape = x.default_shape
+        shape = x.output_shape
         batch_dim = max(self.batch_dim, 0)
                 
         if isinstance(A, torch.Tensor):
@@ -280,7 +367,8 @@ class Bound(nn.Module):
             
             if self.batch_dim != -1:
                 batch_size = bias.shape[0]
-                bias = F.unfold(bias, kernel_size=A.patches.size(-1), stride=A.stride, padding=A.padding).transpose(-2, -1).unsqueeze(-2)
+                bias, padding = check_padding(bias, A.padding)
+                bias = F.unfold(bias, kernel_size=A.patches.size(-1), padding=padding, stride=A.stride).transpose(-2, -1).unsqueeze(-2)
                 # Here the size of bias is [batch_size, L, 1, in_c * K * K]
                 L = bias.size(1)
 
@@ -316,6 +404,21 @@ class Bound(nn.Module):
         Aneg = A.clamp(max=0)
         return pos.contiguous() * Apos + neg.contiguous() * Aneg, Apos, Aneg
 
+    """save input and output shapes uniformly by the decorator"""
+    @staticmethod
+    def save_io_shape(func):
+        def wrapper(self, *args, **kwargs):
+            if len(args) > 0:
+                self.input_shape = args[0].shape  # x should always be the first input
+
+            output = func(self, *args, **kwargs)
+
+            if isinstance(output, torch.Tensor):
+                self.output_shape = output.shape
+            return output
+
+        return wrapper
+
 
     """Some operations are non-deterministic and deterministic mode will fail. So we temporary disable it."""
     def non_deter_wrapper(self, op, *args, **kwargs):
@@ -336,12 +439,13 @@ class BoundReshape(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, x, shape):
         shape = list(shape)
         for i in range(len(shape)):
             if shape[i] == -1:
                 shape[i] = prod(x.shape) // int(prod(shape[:i]) * prod(shape[(i + 1):]))
-        self.input_shape, self.shape = x.size(), shape
+        self.shape = shape
         return x.reshape(shape)
 
     def bound_backward(self, last_lA, last_uA, x, shape):
@@ -499,6 +603,7 @@ class BoundInput(Bound):
                     destination[
                         '.'.join(prefix.split('.')[:-2]) + '.' + self.ori_name] = buf if keep_vars else buf.detach()
 
+    @Bound.save_io_shape
     def forward(self):
         return self.value
 
@@ -514,7 +619,7 @@ class BoundInput(Bound):
             self.name))
 
     def infer_batch_dim(self, batch_size, *x):
-        shape = self.fv.shape
+        shape = self.forward_value.shape
         for i in range(len(shape)):
             if shape[i] == batch_size:
                 return i
@@ -541,6 +646,7 @@ class BoundParams(BoundInput):
     def init(self, initializing=False):
         self.initializing = initializing
 
+    @Bound.save_io_shape
     def forward(self):
         if self.initializing:
             return self.param_init
@@ -556,6 +662,7 @@ class BoundBuffers(BoundInput):
         super().__init__(input_name, name, ori_name, None, perturbation)
         self.register_buffer('buffer', value.clone().detach())
 
+    @Bound.save_io_shape
     def forward(self):
         return self.buffer
 
@@ -598,14 +705,14 @@ class BoundLinear(Bound):
                 c = self.beta * c
         return a, b, c
 
+    @Bound.save_io_shape
     def forward(self, x, w, b=None):
         x, w, b = self._preprocess(x, w, b)
-        self.input_shape = self.x_shape = x.shape  # FIXME: all Bound object should have the same input_shape and output_shape properties.
+        self.input_shape = self.x_shape = x.shape
         self.y_shape = w.t().shape
         res = x.matmul(w.t())
         if b is not None:
             res += b
-        self.output_shape = res.shape[1:]
         return res
 
     """Multiply weight matrix with a diagonal matrix with selected rows."""
@@ -723,7 +830,7 @@ class BoundLinear(Bound):
         return [(lA_x, uA_x), (lA_y, uA_y), (lA_bias, uA_bias)], lbias, ubias
 
     def _reshape(self, x_l, x_u, y_l, y_u):
-        x_shape, y_shape = self.x_shape, self.y_shape
+        x_shape, y_shape = self.input_shape, self.y_shape
 
         # (x_1, x_2, ..., x_{n-1}, y_2, x_n)
         x_l = x_l.unsqueeze(-2)
@@ -751,16 +858,14 @@ class BoundLinear(Bound):
 
         alpha_l, alpha_u = alpha_l.unsqueeze(0), alpha_u.unsqueeze(0)
         beta_l, beta_u = beta_l.unsqueeze(0), beta_u.unsqueeze(0)
-        self.x_shape = input_lb[0].size()
-        self.y_shape = input_lb[1].size()
-        gamma_l = torch.sum(gamma_l, dim=-1).reshape(self.x_shape[0], -1, 1)
-        gamma_u = torch.sum(gamma_u, dim=-1).reshape(self.x_shape[0], -1, 1)
+        x_shape, y_shape = input_lb[0].size(), input_lb[1].size()
+        gamma_l = torch.sum(gamma_l, dim=-1).reshape(x_shape[0], -1, 1)
+        gamma_u = torch.sum(gamma_u, dim=-1).reshape(x_shape[0], -1, 1)
 
-        if len(x.default_shape) != 2 and len(x.default_shape) == len(y.default_shape):
-            # assert (self.x_shape[0] == self.y_shape[0] == 1)
+        if len(x.output_shape) != 2 and len(x.output_shape) == len(y.output_shape):
             dim_y = [-3]
-        elif len(y.default_shape) == 2:
-            dim_y = list(range(2, 2 + len(self.x_shape) - 2))
+        elif len(y.output_shape) == 2:
+            dim_y = list(range(2, 2 + len(x_shape) - 2))
         else:
             raise NotImplementedError
 
@@ -892,7 +997,7 @@ class BoundLinear(Bound):
                 ub = C.matmul(ub) if not isinstance(ub, float) else ub
 
         # interval_propagate() of the Linear layer may encounter input with different norms.
-        norm, eps = Interval.get_perturbation(v[0])
+        norm, eps = Interval.get_perturbation(v[0])[:2]
         if norm == np.inf:
             interval = BoundLinear._propagate_Linf(v[0], w)
             if isinstance(interval, Interval):
@@ -1100,10 +1205,9 @@ class BoundBatchNormalization(Bound):
         # self.num_batches_tracked = 0 # not support yet
         self.to(device)
         self.training = training
-        self.input_shape = None
 
+    @Bound.save_io_shape
     def forward(self, x, w, b, m, v):
-        self.input_shape = x.shape
         if self.training:
             dim = [0] + list(range(2, x.ndim))
             self.current_mean = x.mean(dim)
@@ -1121,6 +1225,10 @@ class BoundBatchNormalization(Bound):
         # x[0]: input, x[1]: weight, x[2]: bias, x[3]: running_mean, x[4]: running_var
         weight, bias = x[1].param, x[2].param
 
+        if not self.training:
+            self.current_mean = x[3].value
+            self.current_var = x[4].value
+
         tmp_bias = bias - self.current_mean / torch.sqrt(self.current_var + self.eps) * weight
         tmp_weight = weight / torch.sqrt(self.current_var + self.eps)
 
@@ -1137,18 +1245,26 @@ class BoundBatchNormalization(Bound):
                 # TODO Only 4-dim BN supported in the Patches mode
                 if last_A.identity == 0:
                     patches = last_A.patches
+
                     patches = patches * tmp_weight.view(-1, 1, 1)
                     next_A = Patches(patches, last_A.stride, last_A.padding, last_A.shape, identity=0)
-                    bias = tmp_bias.view(1,-1,1,1).expand(self.input_shape)  # A.patches may contain padding; we must unfold it for normalization layer.
-                    bias = F.unfold(bias, last_A.patches.size(-1), padding=last_A.padding, stride=last_A.stride).transpose(-1,-2).view(([self.input_shape[0], self.input_shape[-1]*self.input_shape[-2]] if last_A.shape[1] == 1 else list(last_A.shape[:2])) + [1] + list(last_A.shape[3:]))
+                    
+                    bias = tmp_bias.view(1,-1,1,1).expand(self.input_shape)
+                    tmp_shape = [self.input_shape[0], self.input_shape[-1]*self.input_shape[-2]] if last_A.shape[1] == 1 else list(last_A.shape[:2])
+                    bias = F.unfold(bias, last_A.patches.size(-1), padding=last_A.padding, stride=last_A.stride).transpose(-1,-2).view(tmp_shape + [1] + list(last_A.shape[3:]))
                     sum_bias = (last_A.patches * bias).sum((-1,-2,-3)).transpose(-1, -2)
                     sum_bias = sum_bias.view(sum_bias.size(0), sum_bias.size(1), int(math.sqrt(sum_bias.size(2))), int(math.sqrt(sum_bias.size(2)))).transpose(0, 1)
                 else:
                     # we should create a real identity Patch
                     num_channel = tmp_weight.view(-1).size(0)
+                    batch_size = last_A.shape[0]
+                    w = int(math.sqrt(last_A.shape[1]))
                     patches = (torch.eye(num_channel, device=tmp_weight.device) * tmp_weight.view(-1)).unsqueeze(0).unsqueeze(0).unsqueeze(4).unsqueeze(5) # now [1 * 1 * in_C * in_C * 1 * 1]
-                    next_A = Patches(patches, 1, 0, [1, 1, num_channel, 1, 1])
-                    sum_bias = tmp_bias.unsqueeze(1).unsqueeze(2).unsqueeze(3) # squeezing batch dim, now [C * 1 * 1 * 1]
+                    patches = patches.expand(batch_size, w*w, num_channel, num_channel, 1, 1)
+                    
+                    next_A = Patches(patches, 1, 0, last_A.shape)
+                    
+                    sum_bias = tmp_bias.unsqueeze(1).unsqueeze(2).unsqueeze(3).expand(num_channel, batch_size, w, w) # squeezing batch dim, now [C * 1 * 1 * 1]
             else:
                 raise NotImplementedError()
             return next_A, sum_bias
@@ -1170,7 +1286,7 @@ class BoundBatchNormalization(Bound):
 
         # Use `mid` in IBP to compute mean and variance for BN.
         # In this case, `forward` should not have been called.
-        if self.bn_mode == 'ibp' and not hasattr(self, 'fv'):
+        if self.bn_mode == 'ibp' and not hasattr(self, 'forward_value'):
             m, v, w, b = tuple(self.inputs[i].forward() for i in range(1, 5))
             self.forward(mid, m, v, w, b)
 
@@ -1209,12 +1325,11 @@ class BoundConv(Bound):
         self.to(device)
         self.mode = options.get("conv_mode", "matrix")
 
+    @Bound.save_io_shape
     def forward(self, *x):
         # x[0]: input, x[1]: weight, x[2]: bias if self.has_bias
         bias = x[2] if self.has_bias else None
         output = F.conv2d(x[0], x[1], bias, self.stride, self.padding, self.dilation, self.groups)
-        self.output_shape = output.size()[1:]
-        self.input_shape = x[0].size()[1:]
         return output
 
     def bound_backward(self, last_lA, last_uA, *x):
@@ -1234,9 +1349,9 @@ class BoundConv(Bound):
             if type(last_A) == torch.Tensor:
                 shape = last_A.size()
                 # when (W−F+2P)%S != 0, construct the output_padding
-                output_padding0 = int(self.input_shape[1]) - (int(self.output_shape[1]) - 1) * self.stride[0] + 2 * \
+                output_padding0 = int(self.input_shape[2]) - (int(self.output_shape[2]) - 1) * self.stride[0] + 2 * \
                                 self.padding[0] - 1 - (int(weight.size()[2] - 1) * self.dilation[0])
-                output_padding1 = int(self.input_shape[2]) - (int(self.output_shape[2]) - 1) * self.stride[1] + 2 * \
+                output_padding1 = int(self.input_shape[3]) - (int(self.output_shape[3]) - 1) * self.stride[1] + 2 * \
                                 self.padding[1] - 1 - (int(weight.size()[3] - 1) * self.dilation[0])
                 next_A = F.conv_transpose2d(last_A.reshape(shape[0] * shape[1], *shape[2:]), weight, None,
                                             stride=self.stride, padding=self.padding, dilation=self.dilation,
@@ -1276,21 +1391,24 @@ class BoundConv(Bound):
                     else:
                         sum_bias = 0
                 elif last_A.identity == 1:
-                    pieces = weight.view(1, 1, weight.size(0), weight.size(1), weight.size(2), weight.size(3)).expand(last_A.shape[0], 1, weight.size(0), weight.size(1), weight.size(2), weight.size(3))
+                    pieces = weight.view(1, 1, weight.size(0), weight.size(1), weight.size(2), weight.size(3)).expand(last_A.shape[0], last_A.shape[1], weight.size(0), weight.size(1), weight.size(2), weight.size(3))
                     # Here we should transpose sum_bias to set the batch dim to 1, which is aimed to keep consistent with the matrix version
                     sum_bias = x[2].lower.unsqueeze(0).unsqueeze(2).unsqueeze(3).transpose(0, 1)
                 else:
                     raise NotImplementedError()
-                padding = last_A.padding if last_A is not None else 0  # FIXME: support asymmetric padding.
+                padding = last_A.padding if last_A is not None else (0, 0, 0, 0)  # (left, right, top, bottom)
                 stride = last_A.stride if last_A is not None else 1
 
-                padding = padding * self.stride[0] + self.padding[0]
+                if type(padding) == int:
+                    padding = padding * self.stride[0] + self.padding[0]
+                else:
+                    padding = tuple(p * self.stride[0] + self.padding[0] for p in padding)
                 stride *= self.stride[0]
 
                 if pieces.shape[-1] > self.input_shape[-1]: # the patches is too large and from now on, we will use matrix mode instead of patches mode.
                     # This is our desired matrix: the input will be flattend to (batch_size, input_channel*input_x * input_y) and multiplies on this matrix.
                     # After multiplication, the desired output is (batch_size, out_channel, output_x*output_y) where total_patches=output_x*output_y
-                    A_matrix = patchesToMatrix(pieces, self.input_shape, stride, padding)
+                    A_matrix = patchesToMatrix(pieces, self.input_shape[1:], stride, padding)
                     if type(sum_bias) == torch.Tensor:
                         sum_bias = sum_bias.transpose(0, 1)
                         sum_bias = sum_bias.view(sum_bias.size(0), -1).transpose(0,1)
@@ -1318,22 +1436,22 @@ class BoundConv(Bound):
         weight = F.conv2d(eye, weight, None, self.stride, self.padding, self.dilation, self.groups)
         weight = weight.view(input_dim, -1)
         output_dim = weight.shape[-1]
-        bias = bias.view(1, -1, 1).repeat(1, 1, output_dim // bias.shape[0]).view(*self.output_shape)
+        bias = bias.view(1, -1, 1).repeat(1, 1, output_dim // bias.shape[0]).view(*self.output_shape[1:])
         batch_size = x.lb.shape[0]
 
         lw = (x.lw.reshape(batch_size, dim_in, -1).matmul(weight.clamp(min=0)) + 
             x.uw.reshape(batch_size, dim_in, -1).matmul(weight.clamp(max=0)))\
-            .reshape(batch_size, dim_in, *self.output_shape) 
+            .reshape(batch_size, dim_in, *self.output_shape[1:])
         uw = (x.uw.reshape(batch_size, dim_in, -1).matmul(weight.clamp(min=0)) + 
             x.lw.reshape(batch_size, dim_in, -1).matmul(weight.clamp(max=0)))\
-            .reshape(batch_size, dim_in, *self.output_shape) 
+            .reshape(batch_size, dim_in, *self.output_shape[1:])
         
         lb = (x.lb.reshape(batch_size, -1).matmul(weight.clamp(min=0)) + 
             x.ub.reshape(batch_size, -1).matmul(weight.clamp(max=0)))\
-            .reshape(batch_size, *self.output_shape) + bias
+            .reshape(batch_size, *self.output_shape[1:]) + bias
         ub = (x.ub.reshape(batch_size, -1).matmul(weight.clamp(min=0)) + 
             x.lb.reshape(batch_size, -1).matmul(weight.clamp(max=0)))\
-            .reshape(batch_size, *self.output_shape) + bias
+            .reshape(batch_size, *self.output_shape[1:]) + bias
 
         return LinearBound(lw, lb, uw, ub)
 
@@ -1446,130 +1564,6 @@ class BoundConv(Bound):
     def infer_batch_dim(self, batch_size, *x):
         assert x[0] == 0
         return x[0]
-
-
-class BoundMaxPool(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
-        assert ('pads' not in attr) or (attr['pads'][0] == attr['pads'][2])
-        assert ('pads' not in attr) or (attr['pads'][1] == attr['pads'][3])
-
-        self.nonlinear = True
-        self.kernel_size = attr['kernel_shape']
-        self.stride = attr['strides']
-        self.padding = [attr['pads'][0], attr['pads'][1]]
-        assert self.padding[0] == 0 and self.padding[1] == 0 # currently only support padding=0
-        self.ceil_mode = False
-        self.max_index = None
-        self.use_default_ibp = True
-        self.slope = None
-
-    def forward(self, x):
-        self.input_shape = x.shape[1:]
-        output, self.max_index = F.max_pool2d(x, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
-        self.output_shape = output.shape[1:]
-        return output
-
-    def project_simplex(self, patches):
-        # import pdb; pdb.set_trace()
-        sorted = torch.flatten(patches, -2)
-        sorted, _ = torch.sort(sorted, -1, descending=True)
-        rho_sum = torch.cumsum(sorted, -1)
-        rho_value = 1 - rho_sum
-        rho_value = (sorted + rho_value/torch.tensor(range(1, sorted.size(-1)+1), dtype=torch.float, device=sorted.device)) > 0
-        # print(rho_sum * rho_value)
-        # tmp = rho_sum * rho_value
-        _, rho_index = torch.max(torch.cumsum(rho_value, -1), -1)
-        # import pdb; pdb.set_trace()
-        rho_sum = torch.gather(rho_sum, -1, rho_index.unsqueeze(-1)).squeeze()
-        lbd = 1/(rho_index+1)* (1-rho_sum)
-
-        # index = torch.flatten(torch.clamp(patches + lbd.unsqueeze(-1).unsqueeze(-1), min=0), -2).sum(-1) > 2.0
-        # print(rho_value[index], tmp[index])
-        return torch.clamp(patches + lbd.unsqueeze(-1).unsqueeze(-1), min=0)
-
-    def _init_slope(self, x):
-        batch_size, channel, h, w = x.shape
-        o_h, o_w = self.output_shape[-2:]
-        self.slope = torch.ones((batch_size, channel, o_h, o_w, self.kernel_size[0], self.kernel_size[1]), dtype=torch.float, device=x.device)
-        self.slope.requires_grad_(True)
-
-
-    def bound_backward(self, last_lA, last_uA, x):
-        # batch_size, input_c, x, y
-        upper_d = torch.zeros(([last_lA.shape[1]] + list(self.input_shape))).to(last_lA.device)
-        lower_d = torch.zeros(([last_lA.shape[1]] + list(self.input_shape))).to(last_lA.device)
-
-        # batch_size, output_c, x, y
-        upper_b = torch.zeros(([last_lA.shape[1]] + list(self.output_shape))).to(last_lA.device)
-        lower_b = torch.zeros(([last_lA.shape[1]] + list(self.output_shape))).to(last_lA.device)
-
-        # 1. find the index i where li > uj for all j, then set upper_d = lower_d = 1
-        max_lower, max_lower_index = F.max_pool2d(x.lower, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
-        delete_upper = torch.scatter(torch.flatten(x.upper, -2), -1, torch.flatten(max_lower_index, -2), -np.inf).view(x.upper.shape)
-        max_upper, _ = F.max_pool2d(delete_upper, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
-        
-        values = torch.zeros_like(max_lower)
-        values[max_lower >= max_upper] = 1.0
-        upper_d = torch.scatter(torch.flatten(upper_d, -2), -1, torch.flatten(max_lower_index, -2), torch.flatten(values, -2)).view(upper_d.shape)
-
-        if self.options.get('maxpool') == 'optimized':
-            if self.slope is None:
-                lower_d = torch.scatter(torch.flatten(lower_d, -2), -1, torch.flatten(max_lower_index, -2), 1.0).view(upper_d.shape)
-                lower_d_unfold = F.unfold(lower_d, self.kernel_size, 1, self.padding, self.stride)
-                self.slope = lower_d_unfold.view(lower_d.shape[0], lower_d.shape[1], self.kernel_size[0], self.kernel_size[1], self.output_shape[-2], self.output_shape[-1])
-                self.slope = self.slope.permute((0,1,4,5,2,3)).clone().detach()
-                self.slope.requires_grad_(True)
-            else:
-                self.slope.data = self.project_simplex(self.slope.data).clone().detach()
-                slope = self.slope.permute((0,1,4,5,2,3))
-                slope_shape = slope.shape
-                slope = slope.view((slope_shape[0], -1, slope_shape[-2]*slope_shape[-1]))
-                lower_d = F.fold(slope, self.input_shape[-2:], self.kernel_size, 1, self.padding, self.stride)
-        else:
-            lower_d = torch.scatter(torch.flatten(lower_d, -2), -1, torch.flatten(max_lower_index, -2), 1.0).view(upper_d.shape)
-
-        values[:] = 0.0
-        max_upper_, _ = F.max_pool2d(x.upper, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
-        values[max_upper > max_lower] = max_upper_[max_upper > max_lower]
-        upper_b = values
-
-        assert type(last_lA) == torch.Tensor, type(last_uA) == torch.Tensor
-        def _bound_oneside(last_A, d_pos, d_neg, b_pos, b_neg):
-            if last_A is None:
-                return None, 0
-            pos_A = last_A.clamp(min=0)
-            neg_A = last_A.clamp(max=0)
-
-            bias = 0
-            if b_pos is not None:
-                bias = bias + self.get_bias(pos_A, b_pos)
-            if b_neg is not None:
-                bias = bias + self.get_bias(neg_A, b_neg)
-
-            shape = last_A.size()
-            pos_A = F.interpolate(pos_A.view(shape[0] * shape[1], *shape[2:]), scale_factor=self.kernel_size)
-            pos_A = F.pad(pos_A, (0, self.input_shape[-2] - pos_A.shape[-2], 0, self.input_shape[-1] - pos_A.shape[-1]))
-            pos_A = pos_A.view(shape[0], shape[1], *pos_A.shape[1:])
-
-            neg_A = F.interpolate(neg_A.view(shape[0] * shape[1], *shape[2:]), scale_factor=self.kernel_size)
-            neg_A = F.pad(neg_A, (0, self.input_shape[-2] - neg_A.shape[-2], 0, self.input_shape[-1] - neg_A.shape[-1]))
-            neg_A = neg_A.view(shape[0], shape[1], *neg_A.shape[1:])
-
-            next_A = torch.zeros((list(last_A.shape[:2]) + list(self.input_shape))).to(last_A.device)
-            next_A = pos_A * d_pos + neg_A * d_neg
-            return next_A, bias
-
-        uA, ubias = _bound_oneside(last_uA, upper_d, lower_d, upper_b, lower_b)
-        lA, lbias = _bound_oneside(last_lA, lower_d, upper_d, lower_b, upper_b)
-
-        return [(lA, uA)], lbias, ubias
-
-    def infer_batch_dim(self, batch_size, *x):
-        assert x[0] == 0
-        return 0
-
-
 class BoundAveragePool(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         # assumptions: ceil_mode=False, count_include_pad=True
@@ -1585,8 +1579,8 @@ class BoundAveragePool(Bound):
         self.count_include_pad = True
         self.use_default_ibp = True
 
+    @Bound.save_io_shape
     def forward(self, x):
-        self.input_shape = x.size()[1:]
         return F.avg_pool2d(x, self.kernel_size, self.stride,
                             self.padding, self.ceil_mode, self.count_include_pad)
 
@@ -1615,9 +1609,9 @@ class BoundGlobalAveragePool(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, x):
-        self.input_shape = x.size()[1:]
-        output = AdaptiveAvgPool2d((1, 1)).forward(x) # adaptiveAveragePool with output size (1, 1)
+        output = AdaptiveAvgPool2d((1, 1)).forward(x)  # adaptiveAveragePool with output size (1, 1)
         return output
 
     def bound_backward(self, last_lA, last_uA, x):
@@ -1645,6 +1639,7 @@ class BoundConcat(Bound):
         self.axis = attr['axis']
         self.IBP_rets = None
 
+    @Bound.save_io_shape
     def forward(self, *x):  # x is a list of tensors
         x = [(item if isinstance(item, torch.Tensor) else torch.tensor(item)) for item in x]
         self.input_size = [item.shape[self.axis] for item in x]
@@ -1697,7 +1692,7 @@ class BoundConcat(Bound):
 
     def bound_backward(self, last_lA, last_uA, *x):
         if self.axis < 0:
-            self.axis = len(self.default_shape) + self.axis
+            self.axis = len(self.output_shape) + self.axis
         assert (self.axis > 0)
 
         def _bound_oneside(last_A):
@@ -1734,6 +1729,7 @@ class BoundAdd(Bound):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.mode = options.get("conv_mode", "matrix")
 
+    @Bound.save_io_shape
     def forward(self, x, y):
         self.x_shape = x.shape
         self.y_shape = y.shape
@@ -1752,8 +1748,8 @@ class BoundAdd(Bound):
         return [(lA_x, uA_x), (lA_y, uA_y)], 0, 0
 
     def bound_forward(self, dim_in, x, y):
-        x_lw, x_lb, x_uw, x_ub = Bound.broadcast_forward(dim_in, x, self.default_shape)
-        y_lw, y_lb, y_uw, y_ub = Bound.broadcast_forward(dim_in, y, self.default_shape)
+        x_lw, x_lb, x_uw, x_ub = Bound.broadcast_forward(dim_in, x, self.output_shape)
+        y_lw, y_lb, y_uw, y_ub = Bound.broadcast_forward(dim_in, y, self.output_shape)
         lw, lb = x_lw + y_lw, x_lb + y_lb
         uw, ub = x_uw + y_uw, x_ub + y_ub
         return LinearBound(lw, lb, uw, ub)
@@ -1778,6 +1774,7 @@ class BoundSub(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, x, y):
         self.x_shape = x.shape
         self.y_shape = y.shape
@@ -1796,8 +1793,8 @@ class BoundSub(Bound):
         return [(lA_x, uA_x), (lA_y, uA_y)], 0, 0
 
     def bound_forward(self, dim_in, x, y):
-        x_lw, x_lb, x_uw, x_ub = Bound.broadcast_forward(dim_in, x, self.default_shape)
-        y_lw, y_lb, y_uw, y_ub = Bound.broadcast_forward(dim_in, y, self.default_shape)
+        x_lw, x_lb, x_uw, x_ub = Bound.broadcast_forward(dim_in, x, self.output_shape)
+        y_lw, y_lb, y_uw, y_ub = Bound.broadcast_forward(dim_in, y, self.output_shape)
         lw, lb = x_lw - y_uw, x_lb - y_ub
         uw, ub = x_uw - y_lw, x_ub - y_lb
         return LinearBound(lw, lb, uw, ub)
@@ -1827,6 +1824,7 @@ class BoundPad(Bound):
         assert self.padding == [0, 0, 0, 0]
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, x, pad, value=0.0):
         # TODO: padding for 3-D or more dimensional inputs.
         assert x.ndim == 4
@@ -1849,7 +1847,10 @@ class BoundPad(Bound):
                 return None
             assert type(last_A) is Patches or last_A.ndim == 5
             if type(last_A) is Patches:
-                new_padding = (last_A.padding + left, last_A.padding + right, last_A.padding + top, last_A.padding + bottom)   # FIXME: fully support different padding size on each side.
+                if isinstance(last_A.padding, tuple):
+                    new_padding = (last_A.padding[0] + left, last_A.padding[1] + right, last_A.padding[2] + top, last_A.padding[3] + bottom)
+                else:
+                    new_padding = (last_A.padding + left, last_A.padding + right, last_A.padding + top, last_A.padding + bottom)
                 return Patches(last_A.patches, last_A.stride, new_padding, last_A.shape, last_A.identity)
             else:
                 shape = last_A.size()
@@ -1868,21 +1869,15 @@ class BoundActivation(Bound):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.nonlinear = True
         self.relaxed = False
-        self.optimize = self.optimizing = False
-        self.opt_init = False
 
-    def init_opt(self):
-        self.optimizing = False
-        self.opt_init = True
-
-    def _init_linear(self, x, dim_opt=None):
+    def _init_masks(self, x):
         self.mask_pos = torch.ge(x.lower, 0).to(torch.float)
         self.mask_neg = torch.le(x.upper, 0).to(torch.float)
         self.mask_both = 1 - self.mask_pos - self.mask_neg
-        if self.optimize and self.optimizing and dim_opt:
-            self.lw = torch.zeros(dim_opt, *x.lower.shape).to(x.lower)
-        else:
-            self.lw = torch.zeros_like(x.lower)
+
+    def _init_linear(self, x, dim_opt=None):
+        self._init_masks(x)
+        self.lw = torch.zeros_like(x.lower)
         self.lb = self.lw.clone()
         self.uw = self.lw.clone()
         self.ub = self.lw.clone()
@@ -1903,28 +1898,14 @@ class BoundActivation(Bound):
     def interval_propagate(self, *v):
         return self.default_interval_propagate(*v)    
 
-    def bound_backward(self, last_lA, last_uA, x, start_node=None, start_shape=None):
-        self._start = start_node
-
+    def bound_backward(self, last_lA, last_uA, x):
         if not self.relaxed:
-            self._init_linear(x, dim_opt=start_shape)
+            self._init_linear(x)
             self.bound_relax(x)
 
         def _bound_oneside(last_A, sign=-1):
             if last_A is None:
                 return None, 0
-
-            if self.optimizing:
-                assert self.batch_dim == 0
-                if sign == -1:
-                    _A = last_A.clamp(min=0) * self.lw + last_A.clamp(max=0) * self.uw
-                    _bias = last_A.clamp(min=0) * self.lb + last_A.clamp(max=0) * self.ub
-                elif sign == 1:
-                    _A = last_A.clamp(min=0) * self.uw + last_A.clamp(max=0) * self.lw
-                    _bias = last_A.clamp(min=0) * self.ub + last_A.clamp(max=0) * self.lb
-                if _bias.ndim > 2:
-                    _bias = torch.sum(_bias, list(range(2, _bias.ndim)))
-                return _A, _bias
 
             if self.batch_dim == 0:
                 if sign == -1:
@@ -1993,6 +1974,74 @@ class BoundActivation(Bound):
         return x[0]
 
 
+class BoundOptimizableActivation(BoundActivation):
+    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
+        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+        # Two stages: `init` (initializing parameters) and `opt` (optimizing parameters).
+        # If `None`, it means activation optimization is currently not used.
+        self.opt_stage = None
+
+    """ Enter the stage for initializing bound optimization. Optimized bounds are not used in 
+        this stage. """
+    def opt_init(self):
+        self.opt_stage = 'init'
+
+    """ Start optimizing bounds """
+    def opt_start(self):
+        self.opt_stage = 'opt'
+
+    """ start_nodes: a list of starting nodes [(node, size)] during 
+    CROWN backward bound propagation"""
+    def init_opt_parameters(self, start_nodes):
+        raise NotImplementedError
+
+    def _init_linear(self, x, dim_opt=None):
+        self._init_masks(x)
+        # The first dimension of size 2 is used for lA and uA respectively,
+        # when computing intermediate bounds.
+        if self.opt_stage == 'opt' and dim_opt:
+            self.lw = torch.zeros(2, dim_opt, *x.lower.shape).to(x.lower)     
+        else:
+            self.lw = torch.zeros_like(x.lower)
+        self.lb = self.lw.clone()
+        self.uw = self.lw.clone()
+        self.ub = self.lw.clone()        
+
+    def bound_backward(self, last_lA, last_uA, x, start_node=None, start_shape=None):
+        self._start = start_node
+
+        if self.opt_stage != 'opt':
+            return super().bound_backward(last_lA, last_uA, x)
+        assert self.batch_dim == 0            
+
+        if not self.relaxed:
+            self._init_linear(x, dim_opt=start_shape)
+            self.bound_relax(x)
+
+        def _bound_oneside(last_A, sign=-1):
+            if last_A is None:
+                return None, 0
+
+            if sign == -1:
+                _A = last_A.clamp(min=0) * self.lw[0] + last_A.clamp(max=0) * self.uw[0]
+                _bias = last_A.clamp(min=0) * self.lb[0] + last_A.clamp(max=0) * self.ub[0]
+            elif sign == 1:
+                _A = last_A.clamp(min=0) * self.uw[1] + last_A.clamp(max=0) * self.lw[1]
+                _bias = last_A.clamp(min=0) * self.ub[1] + last_A.clamp(max=0) * self.lb[1]
+            if _bias.ndim > 2:
+                _bias = torch.sum(_bias, list(range(2, _bias.ndim)))
+            return _A, _bias
+
+        lA, lbias = _bound_oneside(last_lA, sign=-1)
+        uA, ubias = _bound_oneside(last_uA, sign=+1)
+
+        return [(lA, uA)], lbias, ubias
+
+    def _no_bound_parameters(self):
+        raise AttributeError('Bound parameters have not been initialized.'
+                            'Please call `compute_bounds` with `method=CROWN-optimized`'
+                            ' at least once.')
+
 class BoundLeakyRelu(BoundActivation):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
@@ -2000,6 +2049,7 @@ class BoundLeakyRelu(BoundActivation):
         self.options = options.get('relu')
         self.alpha = attr['alpha']
 
+    @Bound.save_io_shape
     def forward(self, x):
         return F.leaky_relu(x, negative_slope=self.alpha)
 
@@ -2044,69 +2094,32 @@ class BoundLeakyRelu(BoundActivation):
         return [(lA, uA)], lbias, ubias
 
 
-class BoundRelu(BoundActivation):
+class BoundRelu(BoundOptimizableActivation):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.options = options
-        self.relu_options = options.get('relu')
-        # If this is set to true, we can get gradients for beta. Used for heuristics.
-        # self.get_beta_gradients = self.options.get('optimize_bound_args', {}).get('ob_get_heuristic', False)
-        # FIXME: using hierarchical options.
-
-        self.slope = None
-        self.relu_used_count = 1
-
-        self.beta = None
-        self.beta_mask = None
-        self.masked_beta = None
-
+        self.relu_options = options.get('relu', 'adaptive')
+        self.beta = self.beta_mask = self.masked_beta = self.sparse_beta = None
         self.split_beta_used = False
         self.history_beta_used = False
         self.flattened_nodes = None
         # Save patches size for each output node.
         self.patch_size = {}
 
-    def clean_slope(self):
-        self.slope = None
+    def init_opt_parameters(self, start_nodes):
+        self.alpha = OrderedDict()
+        ref = self.inputs[0].lower # a reference variable for getting the shape
+        for ns, size_s in start_nodes:
+            self.alpha[ns] = torch.empty([2, size_s, ref.size(0), *self.shape], 
+                dtype=torch.float, device=ref.device, requires_grad=True)
+        for k, v in self.alpha.items():
+            v.data.copy_(self.lower_d.data)  # Initial from adaptive lower bounds.    
 
-    def _init_slope(self, x, both_sides=False):
-        self.final_shape = self.options.get('final_shape')
-        if self.final_shape[-1] == 1:  # single output
-            # self.slope = torch.ones_like(x, dtype=torch.float).to(x.device)
-            # The second dimension 2 is for lower A and upper A. We use different slopes for lower and upper bounds.
-            # TODO: do not use self.relu_used_count. Instead, create a dictionary here with output node as the key and handle slope like intermediate_betas.
-            # self.relu_used_count is error prone. Do not use it. Need to eliminate it.
-            if both_sides:
-                self.slope = torch.ones([self.relu_used_count, 2, *x.shape], dtype=torch.float, device=x.device)
-            else:
-                self.slope = torch.ones([self.relu_used_count, *x.shape], dtype=torch.float, device=x.device)
-            self.slope.requires_grad_(True)
-        else:
-            assert len(self.final_shape) == 2
-            # initial multiple slopes when output dim > 1, we use a larger tensor with self.final_shape[-1] times expansion
-            if both_sides:
-                # TODO This is not true when C is not a Identity matrix, should change self.final_shape[-1] to C[1]
-                # self.slope = torch.ones([self.final_shape[-1], self.relu_used_count, 2, *x.shape], dtype=torch.float, device=x.device)
-                self.slope = torch.ones([self.relu_used_count, 2, *x.shape], dtype=torch.float, device=x.device)
-            else:
-                # self.slope = torch.ones([self.final_shape[-1], self.relu_used_count, *x.shape], dtype=torch.float, device=x.device)
-                self.slope = torch.ones([self.relu_used_count, *x.shape], dtype=torch.float, device=x.device)
-            # self.slope = []
-            # for i in range(self.relu_used_count):
-            #     if i == 0:
-            #         self.slope.append(torch.ones([self.final_shape[-1], *x.shape], dtype=torch.float).to(x.device))
-            #     else:
-            #         self.slope.append(torch.ones([1, *x.shape], dtype=torch.float).to(x.device))
-
+    @Bound.save_io_shape
     def forward(self, x):
-        # TODO: Do not use the name "random_evaluation". It's a wrong name. Use "optimized_slope" or something like that.
-        if self.relu_options == "random_evaluation" or self.relu_options == "optimized":
-            if self.slope is None:
-                self._init_slope(x, both_sides=self.relu_options == "optimized")
-            if self.flattened_nodes is None:
-                self.shape = x.shape[1:]
-                self.flattened_nodes = x[0].reshape(-1).shape[0]
-
+        self.shape = x.shape[1:]
+        if self.flattened_nodes is None:
+            self.flattened_nodes = x[0].reshape(-1).shape[0]
         return F.relu(x)
 
     # Linear relaxation for nonlinear functions
@@ -2134,8 +2147,11 @@ class BoundRelu(BoundActivation):
             lower_k = torch.zeros_like(upper_k)
         elif self.relu_options == "one-lb":
             lower_k = torch.ones_like(upper_k)
-        elif self.relu_options == "optimized":
-            lower_k = alpha = self.alpha['_forward']
+        elif self.opt_stage == 'opt':
+            # Each actual alpha in the forward mode has shape (batch_size, *relu_node_shape]. 
+            # But self.alpha has shape (2, output_shape, batch_size, *relu_node_shape]
+            # and we do not need its first two dimensions.
+            lower_k = alpha = self.alpha['_forward'][0, 0]
         else:
             # adaptive
             lower_k = torch.gt(torch.abs(x.upper), torch.abs(x.lower)).to(torch.float)
@@ -2189,77 +2205,25 @@ class BoundRelu(BoundActivation):
             lower_d = (upper_d > 0.0).float()
         elif self.relu_options == "reversed-adaptive":
             lower_d = (upper_d < 0.5).float()
-        elif self.relu_options == "random_evaluation":  # TODO: It's a wrong name. Change it to "optimize_single_side" or something like that.
-            # TODO: do not use self.relu_used_count. Instead, create a dictionary here with output node as the key and handle slope like intermediate_betas.
-            # self.relu_used_count is error prone. Do not use it. Need to eliminate it.
-            self.relu_used_count -= 1
-            idx = max(self.relu_used_count, 0)
-            # print('idx', idx)
-            if self.final_shape[-1] == 1:
-                lower_d = self.slope[idx].clamp(min=0.0, max=1.0)
-            elif idx == 0 and self.final_shape[-1] != 1:
-                # print(self.slope[idx].shape, last_lA.shape)
-                # if the output dim > 1, we use multiple slopes for each dim at the last CROWN backward
-                lower_d = self.slope[:, idx].clamp(min=0.0, max=1.0)
-            else:
-                # for the intermediate bounds, we share same slope, 0-dim here
-                lower_d = self.slope[0, idx].clamp(min=0.0, max=1.0)
-
-            # lower_d = self.slope.clone().clamp(min=0.0, max=1.0)
-            if x is not None:
-                lower = x.lower
-                upper = x.upper
-            else:
-                lower = self.lower
-                upper = self.upper
-            if idx == 0 and self.final_shape[-1] != 1:
-                lower_d[:, lower > 0] = 1.0
-                lower_d[:, upper < 0] = 0.0
-                flag_expand = True
-            else:
-                lower_d[lower > 0] = 1.0
-                lower_d[upper < 0] = 0.0
-        elif self.relu_options == "optimized":
-            # TODO: do not use self.relu_used_count. Instead, create a dictionary here with output node as the key and find the corresponding set of slopes based on the key.
-            # self.relu_used_count is error prone. Do not use it. Need to eliminate it. Handle slope like intermediate_betas.
-            self.relu_used_count -= 1
-            idx = max(self.relu_used_count, 0)
-            # print('idx', idx)
+        elif self.opt_stage == 'opt':
+            # Alpha-CROWN.
             lower_d = None
-            use_per_neuron_alpha = hasattr(self, 'alpha')
-            if use_per_neuron_alpha:
-                # Each alpha has shape (2, output_shape, batch_size, *relu_node_shape].
-                if unstable_idx is not None:
-                    if unstable_idx.ndim == 1:
-                        # Only unstable neurons of the start_node neurons are used.
-                        selected_alpha = self.non_deter_index_select(self.alpha[start_node.name], index=unstable_idx, dim=1)
-                    elif unstable_idx.ndim == 2:
-                        # Each element in the batch selects different neurons.
-                        selected_alpha = batched_index_select(self.alpha[start_node.name], index=unstable_idx, dim=1)
-                    else:
-                        raise ValueError
+            # Each alpha has shape (2, output_shape, batch_size, *relu_node_shape].
+            if unstable_idx is not None:
+                if unstable_idx.ndim == 1:
+                    # Only unstable neurons of the start_node neurons are used.
+                    selected_alpha = self.non_deter_index_select(self.alpha[start_node.name], index=unstable_idx, dim=1)
+                elif unstable_idx.ndim == 2:
+                    # Each element in the batch selects different neurons.
+                    selected_alpha = batched_index_select(self.alpha[start_node.name], index=unstable_idx, dim=1)
                 else:
-                    selected_alpha = self.alpha[start_node.name]
-                # print(f'{self.name} alpha {selected_alpha.size()} lA {"none" if last_lA is None else last_lA.size()} uA {"none" if last_uA is None else last_uA.size()} unstable {"none" if unstable_idx is None else unstable_idx.size()}')
-                # The first dimension is lower/upper intermediate bound.
-                lb_lower_d = selected_alpha[0].clamp(min=0.0, max=1.0)
-                ub_lower_d = selected_alpha[1].clamp(min=0.0, max=1.0)
+                    raise ValueError
             else:
-                if self.final_shape[-1] == 1:
-                    # The shape of self.slope is (max_relu_count, 2, batch_size, number_of_neurons_this_layer)
-                    # When per-neuron alpha is used,
-                    # The shape of self.slope is (max_relu_count, 2, batch_size, number_of_neurons_this_layer)
-                    lb_lower_d = self.slope[idx,0].clamp(min=0.0, max=1.0)
-                    ub_lower_d = self.slope[idx,1].clamp(min=0.0, max=1.0)
-                elif idx == 0 and self.final_shape[-1] != 1:
-                    # if the output dim > 1, we use multiple slopes for each dim at the last CROWN backward
-                    lb_lower_d = self.slope[idx, 0].clamp(min=0.0, max=1.0)  # TODO
-                    ub_lower_d = self.slope[idx, 1].clamp(min=0.0, max=1.0)
-                else:
-                    # for the intermediate bounds, we share same slope, 0-dim here
-                    lb_lower_d = self.slope[idx, 0].clamp(min=0.0, max=1.0)  # TODO
-                    ub_lower_d = self.slope[idx, 1].clamp(min=0.0, max=1.0)
-            # lower_d = self.slope.clone().clamp(min=0.0, max=1.0)
+                selected_alpha = self.alpha[start_node.name]
+            # print(f'{self.name} alpha {selected_alpha.size()} lA {"none" if last_lA is None else last_lA.size()} uA {"none" if last_uA is None else last_uA.size()} unstable {"none" if unstable_idx is None else unstable_idx.size()}')
+            # The first dimension is lower/upper intermediate bound.
+            lb_lower_d = selected_alpha[0].clamp(min=0.0, max=1.0)
+            ub_lower_d = selected_alpha[1].clamp(min=0.0, max=1.0)
             if x is not None:
                 lower = x.lower
                 upper = x.upper
@@ -2267,17 +2231,11 @@ class BoundRelu(BoundActivation):
                 lower = self.lower
                 upper = self.upper
 
-            if use_per_neuron_alpha: # or (idx == 0 and self.final_shape[-1] != 1):
-                lb_lower_d[:, lower > 0] = 1.0
-                lb_lower_d[:, upper < 0] = 0.0
-                ub_lower_d[:, lower > 0] = 1.0
-                ub_lower_d[:, upper < 0] = 0.0
-                flag_expand = True
-            else:
-                lb_lower_d[lower > 0] = 1.0
-                ub_lower_d[lower > 0] = 1.0
-                lb_lower_d[upper < 0] = 0.0
-                ub_lower_d[upper < 0] = 0.0
+            lb_lower_d[:, lower > 0] = 1.0
+            lb_lower_d[:, upper < 0] = 0.0
+            ub_lower_d[:, lower > 0] = 1.0
+            ub_lower_d[:, upper < 0] = 0.0
+            flag_expand = True
         else:
             # adaptive
             lower_d = (upper_d > 0.5).float()
@@ -2293,7 +2251,7 @@ class BoundRelu(BoundActivation):
         # Upper bound always needs an extra specification dimension, since they only depend on lb and ub.
         upper_d = upper_d.unsqueeze(0)
         if not flag_expand:
-            if self.relu_options == "optimized":
+            if self.opt_stage == 'opt':
                 # We have different slopes for lower and upper bounds propagation.
                 lb_lower_d = lb_lower_d.unsqueeze(0)
                 ub_lower_d = ub_lower_d.unsqueeze(0)
@@ -2329,8 +2287,10 @@ class BoundRelu(BoundActivation):
                     d_neg = d_neg.view(-1, *d_neg_shape[2:])
 
                     # unfold the slope matrix as patches
-                    d_pos_unfolded = F.unfold(d_pos, kernel_size=last_A.patches.size(-1), padding=last_A.padding, stride=last_A.stride)
-                    d_neg_unfolded = F.unfold(d_neg, kernel_size=last_A.patches.size(-1), padding=last_A.padding, stride=last_A.stride)
+                    d_pos, padding_p = check_padding(d_pos, last_A.padding)
+                    d_neg, padding_n = check_padding(d_neg, last_A.padding)
+                    d_pos_unfolded = F.unfold(d_pos, kernel_size=last_A.patches.size(-1), stride=last_A.stride, padding=padding_p)
+                    d_neg_unfolded = F.unfold(d_neg, kernel_size=last_A.patches.size(-1), stride=last_A.stride, padding=padding_n)
 
 
                     # Reshape the unfolded patches as [batch_size, L, spec_size, in_c, H, W]; here spec_size is out_c.
@@ -2371,18 +2331,12 @@ class BoundRelu(BoundActivation):
 
         self.masked_beta_lower = self.masked_beta_upper = None
         if self.options.get('optimize_bound_args', {}).get('ob_beta', False):
-            # print("True branch")
-            # old single node split. The beta is for a single specification, lower bound only.
-            if self.options.get('optimize_bound_args', {}).get('ob_get_heuristic', False) or \
-                    self.options.get('optimize_bound_args', {}).get('ob_single_node_split', False):
+            if self.options.get('optimize_bound_args', {}).get('ob_single_node_split', False):
+                # Beta-CROWN.
                 A = last_uA if last_uA is not None else last_lA
                 if type(A) is Patches:
                     # For patches mode, masked_beta will be used; sparse beta is not supported.
                     self.masked_beta = (self.beta[0] * self.beta_mask).requires_grad_()
-                    if self.options.get('optimize_bound_args', {}).get('ob_get_heuristic', False):
-                        self.masked_beta = self.masked_beta.requires_grad_()
-                        # We retain gradients for masked_beta for branching heuristics.
-                        self.masked_beta.retain_grad()
                     A_patches = A.patches
                     # unfold the beta as patches
                     masked_beta_unfolded = F.unfold(self.masked_beta, kernel_size=A_patches.size(-1), padding=A.padding, stride=A.stride)
@@ -2409,7 +2363,7 @@ class BoundRelu(BoundActivation):
                         lA = lA.view(prev_size)
                 else:
                     raise RuntimeError(f"Unknown type {type(A)} for A")
-            # bab general
+            # The code block below is for debugging and will be removed (until the end of this function).
             elif not self.options.get('optimize_bound_args', {}).get('ob_single_node_split', True):
                 A = uA if uA is not None else lA
                 if type(A) == torch.Tensor:
@@ -2418,8 +2372,7 @@ class BoundRelu(BoundActivation):
                     device = A.patches.device
                 print_time = False
 
-                if self.options.get('optimize_bound_args', {}).get('ob_get_heuristic', False) \
-                        or self.single_beta_used or self.split_beta_used or self.history_beta_used:
+                if self.single_beta_used or self.split_beta_used or self.history_beta_used:
                     start_time = time.time()
                     history_compute_time, split_compute_time, split_convert_time = 0, 0, 0
                     history_compute_time1, history_compute_time2 = 0, 0
@@ -2466,7 +2419,6 @@ class BoundRelu(BoundActivation):
                                 lA = lA.view(prev_size)
                         else:
                             self.masked_beta_lower = self.masked_beta_upper = self.masked_beta = self.beta * self.beta_mask
-                    # print(self.beta, self.beta_mask)
 
                     ############################
                     # sparse_coo version for history coeffs
@@ -2503,20 +2455,7 @@ class BoundRelu(BoundActivation):
                             # new_history_beta has shape (batch, m_max_history_beta)
                             self.masked_beta_lower = self.masked_beta_upper = torch.bmm(self.new_history_coeffs, (
                                         self.new_history_beta * self.new_history_c).unsqueeze(-1)).squeeze(-1)
-                        # history_compute_time = time.time()-history_compute_time
 
-                        # history_compute_time1 = time.time()
-                        # history_compute_time = time.time()-history_compute_time
-
-                        # history_compute_time1 = time.time()
-                        # tmp = (self.new_history_beta*self.new_history_c).unsqueeze(-1)
-                        # history_compute_time1 = time.time()-history_compute_time1
-                        # history_compute_time2 = time.time()
-                        # self.masked_beta = torch.bmm(self.new_history_coeffs, tmp).squeeze(-1)
-                        # history_compute_time2 = time.time()-history_compute_time2
-                    ############################
-
-                    ############################
                     # new split constraint
                     if self.split_beta_used:
                         split_convert_time = time.time()
@@ -2648,30 +2587,31 @@ class BoundRelu(BoundActivation):
 
         h_L, h_U = v[0][0], v[0][1]
 
-        if self.relu_options == "random_evaluation" or self.relu_options == "optimized":
-            if self.slope is None:
-                self._init_slope(h_U)
-
         return F.relu(h_L), F.relu(h_U)
 
     def bound_forward(self, dim_in, x):
-        # NOTE optimize and optimizing are not involved in backward
-        self.optimize = self.optimizing = (self.relu_options == 'optimized')
         return super().bound_forward(dim_in, x)
 
 
-class BoundTanh(BoundActivation):
+class BoundTanh(BoundOptimizableActivation):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.precompute_relaxation('tanh', torch.tanh, self.dtanh)
-        self.option = options.get('tanh')
-        self.optimize = self.option == 'optimzied'
-        self.optimizing = False
 
-    def init_opt(self):
-        super().init_opt()
+    def opt_init(self):
+        super().opt_init()
         self.tp_both_lower_init = {} 
         self.tp_both_upper_init = {}
+
+    def init_opt_parameters(self, start_nodes):
+        self.alpha = OrderedDict()
+        l, u = self.inputs[0].lower, self.inputs[0].upper
+        shape = l.shape
+        for ns, size_s in start_nodes:
+            self.alpha[ns] = torch.empty(4, 2, size_s, *shape, device=l.device)
+            self.alpha[ns].data[:2] = ((l + u) / 2).unsqueeze(0).expand(2, 2, size_s, *shape)
+            self.alpha[ns].data[2] = self.tp_both_lower_init[ns].expand(2, size_s, *shape)
+            self.alpha[ns].data[3] = self.tp_both_upper_init[ns].expand(2, size_s, *shape)
 
     def dtanh(self, x):
         # to avoid bp error when cosh is too large
@@ -2682,7 +2622,6 @@ class BoundTanh(BoundActivation):
 
     """Precompute relaxation parameters for tanh and sigmoid"""
 
-    @lockutils.synchronized('precompute_relaxation', external=True)
     @torch.no_grad()
     def precompute_relaxation(self, name, func, dfunc):
         self.x_limit = 500
@@ -2732,6 +2671,7 @@ class BoundTanh(BoundActivation):
 
         logger.debug('Done')
 
+    @Bound.save_io_shape
     def forward(self, x):
         return torch.tanh(x)
 
@@ -2739,19 +2679,19 @@ class BoundTanh(BoundActivation):
         # When self.x_limit is large enough, torch.tanh(self.x_limit)=1, 
         # and thus clipping is valid
         lower = x.lower.clamp(min=-self.x_limit)
-        # (upper - lower) cannot be too small (< 1e-8 may not work)
-        upper = torch.max(x.upper, lower + 1e-6).clamp(max=self.x_limit + 1e-6)
+        upper = x.upper.clamp(max=self.x_limit)
         y_l, y_u = func(lower), func(upper)
+
+        min_preact = 1e-6
+        mask_close = (upper - lower) < min_preact
+        k_direct = k = torch.where(mask_close, 
+            dfunc(upper), (y_u - y_l) / (upper - lower).clamp(min=min_preact))
 
         # Fixed bounds that cannot be optimized
         # upper bound for negative
-        k_direct = k = (y_u - y_l) / (upper - lower)
         self._add_linear(mask=self.mask_neg, type='upper', k=k, x0=lower, y0=y_l)
         # lower bound for positive
         self._add_linear(mask=self.mask_pos, type='lower', k=k, x0=lower, y0=y_l)
-
-        if self.optimize:
-            ns = self._start.name
 
         index = torch.max(
             torch.zeros(upper.numel(), dtype=torch.long, device=upper.device),
@@ -2765,14 +2705,19 @@ class BoundTanh(BoundActivation):
         ) + 1
         d_upper = torch.index_select(self.d_upper, 0, index).view(upper.shape)           
 
+        ns = self._start.name
+
         # bound with tangent lines can be optimized
-        if self.optimize and self.optimizing:
+        if self.opt_stage == 'opt':
+            if not hasattr(self, 'alpha'):
+                self._no_bound_parameters()
+
             # Clipping is done here rather than after `opt.step()` call
             # because it depends on pre-activation bounds   
-            self.alpha[ns].data[0] = torch.max(torch.min(self.alpha[ns][0], upper), lower)
-            self.alpha[ns].data[1] = torch.max(torch.min(self.alpha[ns][1], upper), lower)
-            self.alpha[ns].data[2] = torch.min(self.alpha[ns][2], d_lower)
-            self.alpha[ns].data[3] = torch.max(self.alpha[ns][3], d_upper)
+            self.alpha[ns].data[0, :] = torch.max(torch.min(self.alpha[ns][0, :], upper), lower)
+            self.alpha[ns].data[1, :] = torch.max(torch.min(self.alpha[ns][1, :], upper), lower)
+            self.alpha[ns].data[2, :] = torch.min(self.alpha[ns][2, :], d_lower)
+            self.alpha[ns].data[3, :] = torch.max(self.alpha[ns][3, :], d_upper)
 
             tp_pos = self.alpha[ns][0]
             tp_neg = self.alpha[ns][1]
@@ -2808,7 +2753,7 @@ class BoundTanh(BoundActivation):
 
             k = dfunc(d_lower)
             y0 = func(d_lower)
-            if self.optimize and self.opt_init:
+            if self.opt_stage == 'init':
                 self.tp_both_lower_init[ns] = d_lower.detach()
             mask_direct = self.mask_both * ( k_direct < dfunc(lower) )
             self._add_linear(mask=mask_direct, type='lower', k=k_direct, x0=lower, y0=y_l)                
@@ -2816,7 +2761,7 @@ class BoundTanh(BoundActivation):
 
             k = dfunc(d_upper)
             y0 = func(d_upper)
-            if self.optimize and self.opt_init:
+            if self.opt_stage == 'init':
                 self.tp_both_upper_init[ns] = d_upper.detach()  
                 self.tmp_lower = x.lower.detach()
                 self.tmp_upper = x.upper.detach()
@@ -2832,10 +2777,8 @@ class BoundSigmoid(BoundTanh):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super(BoundTanh, self).__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.precompute_relaxation('sigmoid', torch.sigmoid, self.dsigmoid)
-        self.option = options.get('sigmoid', False)
-        self.optimize = self.option == 'optimized'
-        self.optimizing = False
 
+    @Bound.save_io_shape
     def forward(self, x):
         return torch.sigmoid(x)
 
@@ -2851,6 +2794,7 @@ class BoundSoftplus(BoundActivation):
         super(BoundSoftplus, self).__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.softplus = nn.Softplus()
 
+    @Bound.save_io_shape
     def forward(self, x):
         return self.softplus(x) 
 
@@ -2861,6 +2805,7 @@ class BoundExp(BoundActivation):
         self.options = options.get('exp')
         self.max_input = 0
 
+    @Bound.save_io_shape
     def forward(self, x):
         if self.loss_fusion and self.options != 'no-max-input':
             self.max_input = torch.max(x, dim=-1, keepdim=True)[0].detach()
@@ -2963,10 +2908,11 @@ class BoundLog(BoundActivation):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.nonlinear = True
 
+    @Bound.save_io_shape
     def forward(self, x):
         # NOTE adhoc implementation for loss fusion
         if self.loss_fusion:
-            return torch.logsumexp(self.inputs[0].inputs[0].inputs[0].fv, dim=-1) 
+            return torch.logsumexp(self.inputs[0].inputs[0].inputs[0].forward_value, dim=-1) 
         return torch.log(x.clamp(min=epsilon))
 
     def bound_relax(self, x):
@@ -3007,6 +2953,7 @@ class BoundReciprocal(BoundActivation):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.nonlinear = True
 
+    @Bound.save_io_shape
     def forward(self, x):
         return torch.reciprocal(x)
 
@@ -3031,8 +2978,8 @@ class BoundUnsqueeze(Bound):
         self.axes = self.axes[0]
         self.use_default_ibp = True
 
+    @Bound.save_io_shape
     def forward(self, x):
-        self.input_shape = x.shape
         if self.axes < 0:
             self.axes = len(self.input_shape) + self.axes + 1
         return x.unsqueeze(self.axes) 
@@ -3070,6 +3017,7 @@ class BoundSqueeze(Bound):
         self.axes = self.axes[0]
         self.use_default_ibp = True
 
+    @Bound.save_io_shape
     def forward(self, x):
         return x.squeeze(self.axes) 
 
@@ -3095,6 +3043,7 @@ class BoundConstantOfShape(Bound):
         self.device = device
         self.value = attr['value'].to(self.device)
 
+    @Bound.save_io_shape
     def forward(self, x):
         self.x = x
         self.from_input = True
@@ -3119,7 +3068,7 @@ class BoundConstantOfShape(Bound):
 
     def bound_forward(self, dim_in, x):
         assert (len(self.x) >= 1)
-        lb = ub = torch.ones(self.default_shape, device=self.device) * self.value
+        lb = ub = torch.ones(self.output_shape, device=self.device) * self.value
         lw = uw = torch.zeros(self.x[0], dim_in, *self.x[1:], device=self.device)
         return LinearBound(lw, lb, uw, ub)
 
@@ -3142,6 +3091,7 @@ class BoundConstant(Bound):
         self.value = attr['value'].to(self.device)
         self.use_default_ibp = True
 
+    @Bound.save_io_shape
     def forward(self):
         return self.value.to(self.device)
 
@@ -3173,6 +3123,7 @@ class BoundConstant(Bound):
         lb = ub = self.value
         return LinearBound(lw, lb, uw, ub)
 
+
 class BoundShape(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
@@ -3187,7 +3138,7 @@ class BoundShape(Bound):
         return BoundShape.shape(x)
 
     def bound_forward(self, dim_in, x):
-        return self.fv
+        return self.forward_value
 
     def infer_batch_dim(self, batch_size, *x):
         return -1
@@ -3211,8 +3162,8 @@ class BoundGather(Bound):
         self.axis = attr['axis'] if 'axis' in attr else 0
         self.nonlinear = False  # input shape required
 
+    @Bound.save_io_shape
     def forward(self, x, indices):
-        self.input_shape = x.shape
         self.indices = indices
         x = x.to(self.indices.device)  # BoundShape.shape() will return value on cpu only
         if indices.ndim == 0:
@@ -3298,6 +3249,7 @@ class BoundGatherElements(Bound):
         super().__init__(input_name, name, ori_name, attr, input, output_index, options, device)
         self.axis = attr['axis']
 
+    @Bound.save_io_shape
     def forward(self, x, index):
         self.index = index
         return torch.gather(x, dim=self.axis, index=index)
@@ -3311,7 +3263,7 @@ class BoundGatherElements(Bound):
             if last_A is None:
                 return None
             A = torch.zeros(
-                last_A.shape[0], last_A.shape[1], *x.default_shape[1:], device=last_A.device)
+                last_A.shape[0], last_A.shape[1], *x.output_shape[1:], device=last_A.device)
             A.scatter_(
                 dim=dim + 1,
                 index=self.index.unsqueeze(0).repeat(A.shape[0], *([1] * (A.ndim - 1))),
@@ -3350,7 +3302,7 @@ class BoundGatherElements(Bound):
     def _get_dim(self):
         dim = self.axis
         if dim < 0:
-            dim = len(self.default_shape) + dim
+            dim = len(self.output_shape) + dim
         return dim
 
 
@@ -3359,6 +3311,7 @@ class BoundPrimConstant(Bound):
         super().__init__(input_name, name, ori_name, attr, input, output_index, options, device)
         self.value = attr['value']
 
+    @Bound.save_io_shape
     def forward(self):
         return torch.tensor([], device=self.device)
 
@@ -3369,6 +3322,7 @@ class BoundRNN(Bound):
         self.complex = True
         self.output_index = output_index
 
+    @Bound.save_io_shape
     def forward(self, x, weight_input, weight_recurrent, bias, sequence_length, initial_h):
         assert (torch.sum(torch.abs(initial_h)) == 0)
 
@@ -3428,8 +3382,8 @@ class BoundTranspose(Bound):
             self.perm_inv_inc_one[self.perm[i] + 1] = i + 1
         self.use_default_ibp = True            
 
+    @Bound.save_io_shape
     def forward(self, x):
-        self.input_shape = x.shape
         return x.permute(*self.perm)
 
     def bound_backward(self, last_lA, last_uA, x):
@@ -3463,6 +3417,7 @@ class BoundMul(Bound):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.nonlinear = True
 
+    @Bound.save_io_shape
     def forward(self, x, y):
         self.x_shape = x.shape
         self.y_shape = y.shape
@@ -3624,6 +3579,7 @@ class BoundDiv(Bound):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.nonlinear = True
 
+    @Bound.save_io_shape
     def forward(self, x, y):
         # ad-hoc implementation for layer normalization
         if isinstance(self.inputs[1], BoundSqrt):
@@ -3716,7 +3672,7 @@ class BoundDiv(Bound):
             # to make it compatible with previous code
             reciprocal = BoundReciprocal(self.input_name, self.name + '/reciprocal', None, {}, [], 0, None, self.device)
             mul = BoundMul(self.input_name, self.name + '/mul', None, {}, [], 0, None, self.device)
-        reciprocal.default_shape = mul.default_shape = self.default_shape
+        reciprocal.output_shape = mul.output_shape = self.output_shape
         reciprocal.batch_dim = mul.batch_dim = self.batch_dim
 
         y_r = copy.copy(y)
@@ -3735,6 +3691,7 @@ class BoundNeg(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, x):
         return -x
 
@@ -3760,6 +3717,7 @@ class BoundMatMul(BoundLinear):
         self.transB = 1  # MatMul assumes B is transposed.
         self.nonlinear = True
 
+    @Bound.save_io_shape
     def forward(self, x, y):
         self.x_shape = x.shape
         self.y_shape = y.shape
@@ -3815,6 +3773,7 @@ class BoundCast(Bound):
         assert self.type is not None
         self.use_default_ibp = True
 
+    @Bound.save_io_shape
     def forward(self, x):
         self.type_in = x.dtype
         return x.to(self.type)
@@ -3839,6 +3798,7 @@ class BoundSoftmaxImpl(nn.Module):
         self.axis = axis
         assert self.axis == int(self.axis)
 
+    @Bound.save_io_shape
     def forward(self, x):
         max_x = torch.max(x, dim=self.axis).values
         x = torch.exp(x - max_x.unsqueeze(self.axis))
@@ -3856,8 +3816,8 @@ class BoundSoftmax(Bound):
             self.complex = True
         else:
             self.max_input = 30
-            self.sigmoid = BoundSigmoid(self.name, None, None, {}, [], 0, {}, self.device)
 
+    @Bound.save_io_shape
     def forward(self, x):
         assert self.axis == int(self.axis)
         if self.option == 'complex':
@@ -3870,6 +3830,7 @@ class BoundSoftmax(Bound):
 
     def interval_propagate(self, *v):
         assert self.option != 'complex'
+        assert self.perturbed
         h_L, h_U = v[0]
         shift = h_U.max(dim=self.axis, keepdim=True).values
         exp_L, exp_U = torch.exp(h_L - shift), torch.exp(h_U - shift)
@@ -3898,8 +3859,8 @@ class BoundReduceMax(Bound):
         in Softmax of Transformers."""   
         self.fixed_max_index = options.get('fixed_reducemax_index', False)
 
+    @Bound.save_io_shape
     def forward(self, x):
-        self.input_shape = x.shape
         if self.axis < 0:
             self.axis += len(self.input_shape)
         assert self.axis > 0
@@ -3939,8 +3900,8 @@ class BoundReduceMean(Bound):
         self.keepdim = bool(attr['keepdims']) if 'keepdims' in attr else True
         self.use_default_ibp = True        
 
+    @Bound.save_io_shape
     def forward(self, x):
-        self.input_shape = x.shape
         return torch.mean(x, dim=self.axis, keepdim=self.keepdim)
 
     def bound_backward(self, last_lA, last_uA, x):
@@ -3995,8 +3956,8 @@ class BoundReduceSum(Bound):
         self.keepdim = bool(attr['keepdims'])
         self.use_default_ibp = True        
 
+    @Bound.save_io_shape
     def forward(self, x):
-        self.input_shape = x.shape
         if self.axis is not None:
             return torch.sum(x, dim=self.axis, keepdim=self.keepdim)
         else:
@@ -4047,6 +4008,7 @@ class BoundDropout(Bound):
         self.dropout = nn.Dropout(p=attr['ratio'])
         self.scale = 1 / (1 - attr['ratio'])
 
+    @Bound.save_io_shape
     def forward(self, x):
         res = self.dropout(x)
         self.mask = res == 0
@@ -4089,9 +4051,9 @@ class BoundSplit(Bound):
         self.split = attr['split']
         self.use_default_ibp = True
 
+    @Bound.save_io_shape
     def forward(self, x):
-        self.input_shape = x.shape
-        return torch.split(x, self.split, dim=self.axis)[self.output_index] 
+        return torch.split(x, self.split, dim=self.axis)[self.output_index]
 
     def bound_backward(self, last_lA, last_uA, x):
         assert (self.axis > 0)
@@ -4132,6 +4094,7 @@ class BoundEqual(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, x, y):
         return x == y
 
@@ -4144,6 +4107,7 @@ class BoundPow(Bound):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.nonlinear = True
 
+    @Bound.save_io_shape
     def forward(self, x, y):
         return torch.pow(x, y)
 
@@ -4183,6 +4147,7 @@ class BoundSqrt(BoundActivation):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.nonlinear = True
 
+    @Bound.save_io_shape
     def forward(self, x):
         return torch.sqrt(x)
 
@@ -4203,6 +4168,7 @@ class BoundExpand(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, x, y):
         y = y.clone()
         assert y.ndim == 1
@@ -4217,16 +4183,17 @@ class BoundExpand(Bound):
 
     def infer_batch_dim(self, batch_size, *x):
         # FIXME should avoid referring to batch_size
-        if self.fv.shape[0] != batch_size:
+        if self.forward_value.shape[0] != batch_size:
             return -1
         else:
-            raise NotImplementedError('fv shape {}'.format(self.fv.shape))
+            raise NotImplementedError('forward_value shape {}'.format(self.forward_value.shape))
 
 
 class BoundWhere(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, condition, x, y):
         return torch.where(condition.to(torch.bool), x, y)
 
@@ -4269,8 +4236,8 @@ class BoundWhere(Bound):
 class BoundNot(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
-        self.use_default_ibp = True 
 
+    @Bound.save_io_shape
     def forward(self, x):
         return x.logical_not()
 
@@ -4283,6 +4250,7 @@ class BoundCumSum(Bound):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
         self.use_default_ibp = True
 
+    @Bound.save_io_shape
     def forward(self, x, axis):
         self.axis = axis
         return torch.cumsum(x, axis)
@@ -4298,8 +4266,10 @@ class BoundSlice(Bound):
         self.start = attr["starts"][0] if "starts" in attr else None
         self.end = attr["ends"][0] if "ends" in attr else None
         self.axes = attr["axes"][0] if "axes" in attr else None
+        self.use_default_ibp = True
 
     # Older Pytorch version only passes steps as input.
+    @Bound.save_io_shape
     def forward(self, x, start=None, end=None, axes=None, steps=1):
         start = self.start if start is None else start
         end = self.end if end is None else end
@@ -4321,10 +4291,6 @@ class BoundSlice(Bound):
             final = torch.flip(final, dims=tuple(axes))
         return final
 
-    def interval_propagate(self, *v):
-        l, u = zip(*v)
-        return self.forward(*l), self.forward(*u)
-
     def infer_batch_dim(self, batch_size, *x):
         if x[0] == -1:
             return -1
@@ -4339,6 +4305,7 @@ class BoundSin(BoundActivation):
         self.max_point = math.pi / 2
         self.min_point = math.pi * 3 / 2
 
+    @Bound.save_io_shape
     def forward(self, x):
         return torch.sin(x)
 
@@ -4371,14 +4338,16 @@ class BoundCos(BoundSin):
         self.max_point = 0.0
         self.min_point = math.pi
 
+    @Bound.save_io_shape
     def forward(self, x):
         return torch.cos(x)
-
+        
 
 class BoundRange(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, start, end, step):
         if start.dtype == end.dtype == step.dtype == torch.int64:
             return torch.arange(start, end, step, dtype=torch.int64, device=self.device)
@@ -4390,33 +4359,12 @@ class BoundRange(Bound):
         return -1
 
 
-class BoundScatterND(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
-
-    def forward(self, x, indices, updates):
-        assert updates.ndim == x.ndim + indices.ndim - indices.shape[-1] - 1
-        # It looks like there is no directly available implementation of ScatterND in torch.
-        # Supporting a special case only here.
-        assert x.ndim == 2 and indices.ndim == 3
-        assert (updates == 0).all()
-        assert (indices[:, :, 0] == 1).all()
-        assert indices.shape[0] == 1 and indices.shape[1] == x.shape[1]
-        assert (indices[:, :, 1] == torch.arange(0, x.shape[1], device=self.device)).all()
-        res = x.clone()
-        res[1, :] = 0
-        return res
-
-    def infer_batch_dim(self, batch_size, *x):
-        assert x[0] == x[1] == x[2] == -1
-        return -1
-
-
 """All supported ONNX operations go below."""
 class BoundATenDiag(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, x, diagonal=0):
         return torch.diag(x, diagonal=diagonal)
 
@@ -4431,6 +4379,7 @@ class BoundATenDiagonal(Bound):
     def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
         super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
 
+    @Bound.save_io_shape
     def forward(self, x, offset=0, dim1=0, dim2=1):
         return torch.diagonal(x, offset=offset, dim1=dim1, dim2=dim2)
 
@@ -4448,8 +4397,8 @@ class BoundFlatten(Bound):
         self.use_default_ibp = True
         self.axis = attr['axis']
 
+    @Bound.save_io_shape
     def forward(self, x):
-        self.input_shape = x.size()
         return torch.flatten(x, self.axis)
 
     def infer_batch_dim(self, batch_size, *x):
@@ -4463,3 +4412,140 @@ class BoundFlatten(Bound):
 
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA)), (None, None)], 0, 0
 
+
+class BoundMaxPool(BoundOptimizableActivation):
+    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
+        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+        assert ('pads' not in attr) or (attr['pads'][0] == attr['pads'][2])
+        assert ('pads' not in attr) or (attr['pads'][1] == attr['pads'][3])
+
+        self.nonlinear = True
+        self.kernel_size = attr['kernel_shape']
+        self.stride = attr['strides']
+        self.padding = [attr['pads'][0], attr['pads'][1]]
+        # assert self.padding[0] == 0 and self.padding[1] == 0 # currently only support padding=0
+        self.ceil_mode = False
+        self.use_default_ibp = True
+        self.alpha = None
+        self.init = {}
+
+    @Bound.save_io_shape
+    def forward(self, x):
+        output, _ = F.max_pool2d(x, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
+        return output
+
+    def project_simplex(self, patches):
+        sorted = torch.flatten(patches, -2)
+        sorted, _ = torch.sort(sorted, -1, descending=True)
+        rho_sum = torch.cumsum(sorted, -1)
+        rho_value = 1 - rho_sum
+        rho_value = (sorted + rho_value/torch.tensor(range(1, sorted.size(-1)+1), dtype=torch.float, device=sorted.device)) > 0
+        _, rho_index = torch.max(torch.cumsum(rho_value, -1), -1)
+        rho_sum = torch.gather(rho_sum, -1, rho_index.unsqueeze(-1)).squeeze(-1)
+        lbd = 1/(rho_index+1)* (1-rho_sum)
+
+        return torch.clamp(patches + lbd.unsqueeze(-1).unsqueeze(-1), min=0)
+
+    def init_opt_parameters(self, start_nodes):
+        batch_size, channel, h, w = self.input_shape
+        o_h, o_w = self.output_shape[-2:]
+        # batch_size, out_c, out_h, out_w, k, k
+
+        self.alpha = OrderedDict()
+        ref = self.inputs[0].lower # a reference variable for getting the shape
+        for ns, size_s in start_nodes:
+            self.alpha[ns] = torch.empty([1, size_s, self.input_shape[0], self.input_shape[1], self.output_shape[-2], self.output_shape[-1], self.kernel_size[0], self.kernel_size[1]], 
+                dtype=torch.float, device=ref.device, requires_grad=True)
+            self.init[ns] = False
+
+
+
+    def bound_backward(self, last_lA, last_uA, x, start_node=None, start_shape=None):
+        paddings = tuple(self.padding + self.padding)
+
+        A_shape = last_lA.shape if last_lA is not None else last_uA.shape
+        # batch_size, input_c, x, y
+        upper_d = torch.zeros((list(self.input_shape)), device=x.device)
+        lower_d = torch.zeros((list(self.input_shape)), device=x.device)
+
+        upper_d = F.pad(upper_d, paddings)
+        lower_d = F.pad(lower_d, paddings)
+
+        # batch_size, output_c, x, y
+        upper_b = torch.zeros((list(self.output_shape)), device=x.device)
+        lower_b = torch.zeros((list(self.output_shape)), device=x.device)
+
+        # 1. find the index i where li > uj for all j, then set upper_d = lower_d = 1
+        max_lower, max_lower_index = F.max_pool2d(x.lower, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
+        delete_upper = torch.scatter(torch.flatten(F.pad(x.upper, paddings), -2), -1, torch.flatten(max_lower_index, -2), -np.inf).view(upper_d.shape)
+        max_upper, _ = F.max_pool2d(delete_upper, self.kernel_size, self.stride, 0, return_indices=True, ceil_mode=self.ceil_mode)
+        
+        values = torch.zeros_like(max_lower)
+        values[max_lower >= max_upper] = 1.0
+        upper_d = torch.scatter(torch.flatten(upper_d, -2), -1, torch.flatten(max_lower_index, -2), torch.flatten(values, -2)).view(upper_d.shape)
+
+        if self.opt_stage == 'opt':
+            alpha = self.alpha[start_node.name]
+            if self.init[start_node.name] == False:
+                lower_d = torch.scatter(torch.flatten(lower_d, -2), -1, torch.flatten(max_lower_index, -2), 1.0).view(upper_d.shape)
+                lower_d_unfold = F.unfold(lower_d, self.kernel_size, 1, stride=self.stride)
+
+                alpha_data = lower_d_unfold.view(lower_d.shape[0], lower_d.shape[1], self.kernel_size[0], self.kernel_size[1], self.output_shape[-2], self.output_shape[-1])
+                alpha.data.copy_(alpha_data.permute((0,1,4,5,2,3)).clone().detach())
+                self.init[start_node.name] = True
+                if self.padding[0] > 0:
+                    lower_d = lower_d[...,self.padding[0]:-self.padding[0], self.padding[0]:-self.padding[0]]
+
+            alpha.data = self.project_simplex(alpha.data).clone().detach()
+            alpha = alpha.permute((0,1,2,3,6,7,4,5))
+            alpha_shape = alpha.shape
+            alpha = alpha.reshape((alpha_shape[0]*alpha_shape[1]*alpha_shape[2], -1, alpha_shape[-2]*alpha_shape[-1]))
+            lower_d = F.fold(alpha, self.input_shape[-2:], self.kernel_size, 1, self.padding, self.stride)
+            lower_d = lower_d.view(alpha_shape[0], alpha_shape[1], alpha_shape[2], *lower_d.shape[1:])
+            lower_d = lower_d.squeeze(0)
+        else:
+            lower_d = torch.scatter(torch.flatten(lower_d, -2), -1, torch.flatten(max_lower_index, -2), 1.0).view(upper_d.shape)
+            if self.padding[0] > 0:
+                lower_d = lower_d[...,self.padding[0]:-self.padding[0], self.padding[0]:-self.padding[0]]
+
+        values[:] = 0.0
+        max_upper_, _ = F.max_pool2d(x.upper, self.kernel_size, self.stride, self.padding, return_indices=True, ceil_mode=self.ceil_mode)
+        values[max_upper > max_lower] = max_upper_[max_upper > max_lower]
+        upper_b = values
+
+        assert type(last_lA) == torch.Tensor or type(last_uA) == torch.Tensor
+        def _bound_oneside(last_A, d_pos, d_neg, b_pos, b_neg):
+            if last_A is None:
+                return None, 0
+            pos_A = last_A.clamp(min=0)
+            neg_A = last_A.clamp(max=0)
+
+            bias = 0
+            if b_pos is not None:
+                bias = bias + self.get_bias(pos_A, b_pos)
+            if b_neg is not None:
+                bias = bias + self.get_bias(neg_A, b_neg)
+
+            shape = last_A.size()
+            pos_A = F.interpolate(pos_A.view(shape[0] * shape[1], *shape[2:]), scale_factor=self.kernel_size)
+            pos_A = F.pad(pos_A, (0, self.input_shape[-2] - pos_A.shape[-2], 0, self.input_shape[-1] - pos_A.shape[-1]))
+            pos_A = pos_A.view(shape[0], shape[1], *pos_A.shape[1:])
+
+            neg_A = F.interpolate(neg_A.view(shape[0] * shape[1], *shape[2:]), scale_factor=self.kernel_size)
+            neg_A = F.pad(neg_A, (0, self.input_shape[-2] - neg_A.shape[-2], 0, self.input_shape[-1] - neg_A.shape[-1]))
+            neg_A = neg_A.view(shape[0], shape[1], *neg_A.shape[1:])
+
+            next_A = pos_A * d_pos + neg_A * d_neg
+            return next_A, bias
+
+        if self.padding[0] > 0:
+            upper_d = upper_d[...,self.padding[0]:-self.padding[0], self.padding[0]:-self.padding[0]]
+
+        uA, ubias = _bound_oneside(last_uA, upper_d, lower_d, upper_b, lower_b)
+        lA, lbias = _bound_oneside(last_lA, lower_d, upper_d, lower_b, upper_b)
+
+        return [(lA, uA)], lbias, ubias
+
+    def infer_batch_dim(self, batch_size, *x):
+        assert x[0] == 0
+        return 0

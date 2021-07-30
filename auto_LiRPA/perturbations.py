@@ -4,10 +4,22 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from auto_LiRPA.utils import logger, eyeC, LinearBound, Patches, BoundList
+from auto_LiRPA.utils import logger, eyeC, LinearBound, Patches, BoundList, patchesToMatrix, check_padding
 import torch.nn.functional as F
 
 class Perturbation:
+    r"""
+    Base class for a perturbation specification. 
+
+    Examples: 
+
+    * `PerturbationLpNorm`: Lp-norm (p>=1) perturbation.
+
+    * `PerturbationL0Norm`: L0-norm perturbation.
+
+    * `PerturbationSynonym`: Synonym substitution perturbation for NLP.
+    """
+
     def __init__(self):
         pass
 
@@ -15,12 +27,46 @@ class Perturbation:
         self.eps = eps
     
     def concretize(self, x, A, sign=-1, aux=None):
+        r"""
+        Concretize bounds according to the perturbation specification.
+
+        Args:
+            x (Tensor): Input before perturbation.
+
+            A (Tensor) : A matrix from LiRPA computation.
+
+            sign (-1 or +1): If -1, concretize for lower bound; if +1, concretize for upper bound.
+
+            aux (object, optional): Auxilary information for concretization.
+
+        Returns:
+            bound (Tensor): concretized bound with the shape equal to the clean output.
+        """
         raise NotImplementedError
 
     def init(self, x, aux=None, forward=False):
+        r"""
+        Initialize bounds before LiRPA computation.
+
+        Args:
+            x (Tensor): Input before perturbation.
+
+            aux (object, optional): Auxilary information.
+
+            forward (bool): It indicates whether forward mode LiRPA is involved. 
+
+        Returns:
+            bound (LinearBound): Initialized bounds.
+
+            center (Tensor): Center of perturbation. It can simply be `x`, or some other value.
+
+            aux (object, optional): Auxilary information. Bound initialization may modify or add auxilary information.
+        """
+
         raise NotImplementedError
 
 
+"""Perturbation constrained by the L_0 norm (assuming input data is in the range of 0-1)."""
 class PerturbationL0Norm(Perturbation):
     def __init__(self, eps, x_L = None, x_U = None, ratio = 1.0):
         self.eps = eps
@@ -52,6 +98,7 @@ class PerturbationL0Norm(Perturbation):
             A_diff[pos_mask] = original[pos_mask]
             A_diff[neg_mask] = original[neg_mask] - A[neg_mask]
 
+        # FIXME: this assumes the input pixel range is between 0 and 1!
         A_diff, _= torch.sort(A_diff, dim = 2, descending=True)
 
         bound = center + sign * A_diff[:, :, :eps].sum(dim = 2).unsqueeze(2) * self.ratio
@@ -159,12 +206,8 @@ class PerturbationLpNorm(Perturbation):
                 diff = (x_U - x_L) / 2.0
                 if not A.identity == 1:
                     # unfold the input as [batch_size, L, in_c * H * W]
-                    if isinstance(A.padding, tuple) and len(A.padding) == 4:
-                        # Asymmetric padding.
-                        padded_center = F.pad(center, A.padding)
-                        unfold_input = F.unfold(padded_center, kernel_size=A.patches.size(-1), padding = 0, stride = A.stride).transpose(-2, -1)
-                    else:
-                        unfold_input = F.unfold(center, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
+                    padded_center, padding = check_padding(center, A.padding)
+                    unfold_input = F.unfold(padded_center, kernel_size=A.patches.size(-1), padding = padding, stride = A.stride).transpose(-2, -1)
                     # reshape the input as [batch_size, L, 1, in_c, H, W]
                     unfold_input = unfold_input.view(unfold_input.size(0), unfold_input.size(1), -1, A.patches.size(-3), A.patches.size(-2), A.patches.size(-1))
 
@@ -202,11 +245,24 @@ class PerturbationLpNorm(Perturbation):
                     bound = center + sign * diff
                 return bound
             else:# Lp norm
-                x_L = x - self.eps if self.x_L is None else self.x_L
-                x_U = x + self.eps if self.x_U is None else self.x_U
+                # x_L = x - self.eps if self.x_L is None else self.x_L
+                # x_U = x + self.eps if self.x_U is None else self.x_U
 
-                # FIXME: implement other Lp norm for patches mode!
-                raise NotImplementedError()
+                input_shape = x.shape
+                x = x.reshape(x.shape[0], -1, 1)
+                if not A.identity:
+                    out_c = A.patches.size(2)
+                    L = A.patches.size(1)
+                    # Find the upper and lower bounds via dual norm.
+                    matrix = patchesToMatrix(A.patches, input_shape, A.stride, A.padding)
+                    matrix = matrix.reshape(matrix.shape[0], matrix.shape[1], -1)
+                    deviation = matrix.norm(self.dual_norm, -1) * self.eps
+                    bound = matrix.matmul(x) + sign * deviation.unsqueeze(-1)
+                    bound = bound.reshape(bound.size(0), out_c, int(math.sqrt(L)), int(math.sqrt(L)))
+                else:
+                    # A is an identity matrix. Its norm is all 1.
+                    bound = x + sign * self.eps
+                return bound
 
         if isinstance(A, eyeC) or isinstance(A, torch.Tensor):
             return concretize_matrix(A)

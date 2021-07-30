@@ -7,6 +7,7 @@ from torch.nn import ZeroPad2d
 
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.bound_ops import BoundRelu
+from auto_LiRPA.utils import reduction_max, stop_criterion_max
 from auto_LiRPA.perturbations import *
 from modules import Flatten
 
@@ -81,7 +82,7 @@ def add_single_prop(layers, gt, cls):
 class LiRPAConvNet:
 
     def __init__(self, model_ori, pred, test, solve_slope=False, device='cuda', simplify=True, in_size=(1, 3, 32, 32),
-                 use_beta_branching=False, conv_mode='patches', c=None):
+                 conv_mode='patches', c=None):
         """
         convert pytorch model to auto_LiRPA module
         """
@@ -97,7 +98,7 @@ class LiRPAConvNet:
             self.layers = layers
         self.solve_slope = solve_slope
         if solve_slope:
-            self.net = BoundedModule(net, torch.rand(in_size), bound_opts={'relu': 'optimized', 'conv_mode': conv_mode, 'ob_get_heuristic': use_beta_branching},
+            self.net = BoundedModule(net, torch.rand(in_size), bound_opts={'relu': 'adaptive', 'conv_mode': conv_mode},
                                      device=device)
         else:
             self.net = BoundedModule(net, torch.rand(in_size), bound_opts={'relu': 'adaptive', 'conv_mode': conv_mode}, device=device)
@@ -150,7 +151,6 @@ class LiRPAConvNet:
         #     new_candidate[self.name_dict[i]] = [torch.cat((l, lc), dim=0), torch.cat((uc, u), dim=0)]
 
         if shortcut:
-            self.net.set_relu_used_count(99)  # sum(change_idx <= x for x in self.pre_relu_indices)
             self.net.set_bound_opts({'optimize_bound_args': {'ob_beta': False, 'ob_single_node_split': True,
                                                              'ob_update_by_layer': True}})
             with torch.no_grad():
@@ -165,9 +165,9 @@ class LiRPAConvNet:
                 new_x.ptb.x_U.requires_grad_(True)
 
             self.net.set_bound_opts({'optimize_bound_args':
-                                         {'ob_start_idx': 99, 'ob_beta': False, 'ob_single_node_split': True,
-                                          'ob_update_by_layer': True, 'ob_iteration': iteration,
-                                          'ob_lr': lr_alpha, 'ob_input_grad': self.input_grad}})
+                                     {'ob_beta': False, 'ob_single_node_split': True,
+                                      'ob_update_by_layer': True, 'ob_iteration': iteration,
+                                      'ob_lr': lr_alpha, 'ob_input_grad': self.input_grad}})
             lb, ub = self.net.compute_bounds(x=(new_x,), IBP=False, C=C, method='CROWN-Optimized', return_A=False,
                                              bound_upper=False)
 
@@ -182,7 +182,6 @@ class LiRPAConvNet:
 
             self.net.set_bound_opts({'optimize_bound_args': {'ob_beta': False, 'ob_single_node_split': True,
                                                              'ob_update_by_layer': True}})
-            self.net.set_relu_used_count(99)  # sum(change_idx <= x for x in self.pre_relu_indices)
 
             with torch.no_grad():
                 # FULL CROWN
@@ -274,47 +273,28 @@ class LiRPAConvNet:
         return ret_mask, ret_lA
 
     def get_slope(self, model):
-        if hasattr(model.relus[0], 'alpha'):
-            # slope has size (2, spec, batch, *shape). When we save it, we make batch dimension the first.
-            # spec is some intermediate layer neurons, or output spec size.
-            batch_size = next(iter(model.relus[0].alpha.values())).size(2)
-            ret = [defaultdict(dict) for i in range(batch_size)]
-            for m in model.relus:
-                for spec_name, alpha in m.alpha.items():
-                    for i in range(batch_size):
-                        # each slope size is (2, spec, 1, *shape).
-                        ret[i][m.name][spec_name] = alpha[:,:,i:i+1,:].clone().detach()
-            return ret
-        else:
-            s = []
-            for m in model.relus:
-                # slope has size (idx, 2, batch, *shape). When we save it, we make batch dimension the first.
-                s.append(m.slope.transpose(0, 2).clone().detach())
-
-            ret = []
-            # reorganize the slope by batch element. Each element in ret is a list of number of relu neurons; each element is an alpha.
-            for i in range(s[0].size(0)):
-                ret.append([j[i:i+1] for j in s])
-            return ret
+        # slope has size (2, spec, batch, *shape). When we save it, we make batch dimension the first.
+        # spec is some intermediate layer neurons, or output spec size.
+        batch_size = next(iter(model.relus[0].alpha.values())).size(2)
+        ret = [defaultdict(dict) for i in range(batch_size)]
+        for m in model.relus:
+            for spec_name, alpha in m.alpha.items():
+                for i in range(batch_size):
+                    # each slope size is (2, spec, 1, *shape).
+                    ret[i][m.name][spec_name] = alpha[:,:,i:i+1,:].clone().detach()
+        return ret
 
     def set_slope(self, model, slope):
-        if isinstance(slope[0], dict):
-            for m in model.relus:
-                for spec_name in list(m.alpha.keys()):
-                    if spec_name in slope[0][m.name]:
-                        # Merge all slope vectors together in this batch. Size is (2, spec, batch, *shape).
-                        m.alpha[spec_name] = torch.cat([slope[i][m.name][spec_name] for i in range(len(slope))], dim=2)
-                        # Duplicate for the second half of the batch.
-                        m.alpha[spec_name] = m.alpha[spec_name].repeat(1, 1, 2, *([1] * (m.alpha[spec_name].ndim - 3)))
-                    else:
-                        # This layer's alpha is not used. For example, we can drop all intermediate layer alphas.
-                        del m.alpha[spec_name]
-        else:
-            idx = 0
-            for m in model.relus:
-                # Duplicate in the batch dimension, and transpose to (idx, 2, batch, *shape)
-                m.slope = slope[idx].repeat(2, *([1] * (slope[idx].ndim - 1))).transpose(0, 2).requires_grad_(True)
-                idx += 1
+        for m in model.relus:
+            for spec_name in list(m.alpha.keys()):
+                if spec_name in slope[0][m.name]:
+                    # Merge all slope vectors together in this batch. Size is (2, spec, batch, *shape).
+                    m.alpha[spec_name] = torch.cat([slope[i][m.name][spec_name] for i in range(len(slope))], dim=2)
+                    # Duplicate for the second half of the batch.
+                    m.alpha[spec_name] = m.alpha[spec_name].repeat(1, 1, 2, *([1] * (m.alpha[spec_name].ndim - 3)))
+                else:
+                    # This layer's alpha is not used. For example, we can drop all intermediate layer alphas.
+                    del m.alpha[spec_name]
 
     def fake_forward(self, x):
         for layer in self.layers:
@@ -334,7 +314,7 @@ class LiRPAConvNet:
 
         return x
 
-    def build_the_model(self, input_domain, x, decision_thresh=0, lr_init_alpha=0.5, per_neuron_slopes=True,
+    def build_the_model(self, input_domain, x, decision_thresh=0, lr_init_alpha=0.5,
                         share_slopes=False, input_grad=False,  shape=None,):
         self.x = x
         self.input_domain = input_domain
@@ -346,15 +326,17 @@ class LiRPAConvNet:
 
         # first get CROWN bounds
         if self.solve_slope:
-            self.net.init_slope((self.x, ), share_slopes=share_slopes, per_neuron_slopes=per_neuron_slopes, c=self.c)
+            self.net.init_slope((self.x, ), share_slopes=share_slopes,c=self.c)
             if self.input_grad:
                 x.ptb.x_L.requires_grad_(True)
                 x.ptb.x_U.requires_grad_(True)
             self.net.set_bound_opts({'optimize_bound_args': {'ob_iteration': 10, 'ob_beta': False, 'ob_alpha': True,
-                                     'ob_alpha_share_slopes': share_slopes, 'ob_alpha_per_neuron': per_neuron_slopes, 'ob_opt_choice': "adam",
-                                     'ob_decision_thresh': decision_thresh, 'ob_early_stop': False, 'ob_log': False,
-                                     'ob_start_idx': 99, 'ob_keep_best': True, 'ob_update_by_layer': True,
-                                     'ob_lr': lr_init_alpha, 'ob_get_heuristic': False, 'ob_loss_reduction_func': 'max',
+                                     'ob_alpha_share_slopes': share_slopes, 'ob_opt_choice': "adam",
+                                     'ob_early_stop': False, 'ob_verbose': 0,
+                                     'ob_keep_best': True, 'ob_update_by_layer': True,
+                                     'ob_lr': lr_init_alpha, 'ob_init': False,
+                                     'ob_loss_reduction_func': reduction_max,
+                                     'ob_stop_criterion_func': stop_criterion_max(0),
                                      'ob_input_grad': self.input_grad}})
             lb, ub = self.net.compute_bounds(x=(x,), IBP=False, C=self.c, method='CROWN-Optimized', return_A=False,
                                              bound_upper=False)

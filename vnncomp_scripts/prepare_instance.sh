@@ -7,6 +7,9 @@ if [[ -z "${VNNCOMP_PYTHON_PATH}" ]]; then
 fi
 echo $VNNCOMP_PYTHON_PATH
 
+# Avoid MKL slowdown on AMD CPUs. Requires mkl<=2020.0.
+grep AMD /proc/cpuinfo > /dev/null && export MKL_DEBUG_CPU_TYPE=5
+
 # check arguments
 if [ "$1" != ${VERSION_STRING} ]; then
 	echo "Expected first argument (version string) '$VERSION_STRING', got '$1'"
@@ -28,7 +31,7 @@ killall -q python3
 killall -q -9 python
 killall -q -9 python3
 # set GPU to persistent mode with fixed speed for less randomness.
-sudo nvidia-smi -pm 1 > /dev/null; sudo nvidia-smi -ac 877,1530 > /dev/null
+sudo -n true && (sudo nvidia-smi -pm 1 > /dev/null; nvidia-smi | grep V100 > /dev/null && sudo nvidia-smi -ac 877,1530 > /dev/null)
 
 if [ "$CATEGORY" = "nn4sys" ]; then
 	# For NN4sys model, we convert it here because the model is big.

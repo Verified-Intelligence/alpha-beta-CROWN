@@ -41,7 +41,7 @@ class ReLUDomain:
     """
 
     def __init__(self, lA=None, lb=-float('inf'), ub=float('inf'), lb_all=None, up_all=None, slope=None, beta=None,
-                 depth=None, split_history=None, history=None, gnn_decision=None, split_hint=None, intermediate_betas=None):
+                 depth=None, split_history=None, history=None, gnn_decision=None, intermediate_betas=None):
         if history is None:
             history = []
         if split_history is None:
@@ -64,8 +64,6 @@ class ReLUDomain:
         self.split = False
         self.depth = depth
         self.gnn_decision = gnn_decision
-        # Gradient based hints on which neuron to split next for this domain.
-        self.split_hint = split_hint
 
     def __lt__(self, other):
         return self.lower_bound < other.lower_bound
@@ -89,12 +87,9 @@ class ReLUDomain:
         self.lA = [lA.to(device='cpu', non_blocking=True) for lA in self.lA]
         self.lower_all = [lbs.to(device='cpu', non_blocking=True) for lbs in self.lower_all]
         self.upper_all = [ubs.to(device='cpu', non_blocking=True) for ubs in self.upper_all]
-        if isinstance(self.slope, dict):
-            for layer in self.slope:
-                for intermediate_layer in self.slope[layer]:
-                    self.slope[layer][intermediate_layer] = self.slope[layer][intermediate_layer].half().to(device='cpu', non_blocking=True)
-        else:
-            self.slope = [s.half().to(device='cpu', non_blocking=True) for s in self.slope]
+        for layer in self.slope:
+            for intermediate_layer in self.slope[layer]:
+                self.slope[layer][intermediate_layer] = self.slope[layer][intermediate_layer].half().to(device='cpu', non_blocking=True)
 
         if self.split_history:
             for lidx in range(len(self.split_history["beta"])):
@@ -127,12 +122,9 @@ class ReLUDomain:
             self.lA = [lA.to(device, non_blocking=True) for lA in self.lA]
             self.lower_all = [lbs.to(device, non_blocking=True) for lbs in self.lower_all]
             self.upper_all = [ubs.to(device, non_blocking=True) for ubs in self.upper_all]
-        if isinstance(self.slope, dict):
-            for layer in self.slope:
-                for intermediate_layer in self.slope[layer]:
-                    self.slope[layer][intermediate_layer] = self.slope[layer][intermediate_layer].to(device, non_blocking=True, dtype=torch.get_default_dtype())
-        else:
-            self.slope = [s.to(device, non_blocking=True, dtype=torch.get_default_dtype()) for s in self.slope]
+        for layer in self.slope:
+            for intermediate_layer in self.slope[layer]:
+                self.slope[layer][intermediate_layer] = self.slope[layer][intermediate_layer].to(device, non_blocking=True, dtype=torch.get_default_dtype())
         if self.split_history:
             for lidx in range(len(self.split_history["beta"])):
                 if self.split_history["single_beta"][lidx] is not None:
@@ -169,7 +161,7 @@ def add_domain(candidate, domains):
 
 def add_domain_parallel(lA, lb, ub, lb_all, up_all, domains, selected_domains, slope, beta, growth_rate=0,
                         split_history=None, branching_decision=None, save_tree=False, decision_thresh=0,
-                        next_split_hint=None, intermediate_betas=None, check_infeasibility=True):
+                        intermediate_betas=None, check_infeasibility=True):
     """
     Use binary search to add the new domain `candidate`
     to the candidate list `domains` so that `domains` remains a sorted list.
@@ -191,12 +183,6 @@ def add_domain_parallel(lA, lb, ub, lb_all, up_all, domains, selected_domains, s
                             break
 
                 if not infeasible:
-                    # only when two splits improved, we insert them to domains
-                    split_hint = None if next_split_hint is None else next_split_hint[i]
-                    """
-                    new_hist = sorted(selected_domains[i].history+branching_decision[i], key=lambda x: x[0][1])
-                    print('F adding', new_hist, 'split', split_hint)
-                    """
                     new_history = copy.deepcopy(selected_domains[i].history)
                     new_history[branching_decision[i][0]][0].append(branching_decision[i][1])  # first half batch: active neurons
                     new_history[branching_decision[i][0]][1].append(+1.0)  # first half batch: active neurons
@@ -210,7 +196,7 @@ def add_domain_parallel(lA, lb, ub, lb_all, up_all, domains, selected_domains, s
 
                     left = ReLUDomain(lA[i], lb[i], ub[i], lb_all[i], up_all[i], slope[i], beta[i],
                                       selected_domains[i].depth+1, split_history=split_history[i],
-                                      history=new_history, split_hint=split_hint,
+                                      history=new_history,
                                       intermediate_betas=intermediate_betas[i])
                     if save_tree:
                         selected_domains[i].left = left
@@ -238,18 +224,13 @@ def add_domain_parallel(lA, lb, ub, lb_all, up_all, domains, selected_domains, s
                             break
 
                 if not infeasible:
-                    split_hint = None if next_split_hint is None else next_split_hint[i+batch]
-                    """
-                    new_hist = sorted(selected_domains[i].history+branching_decision[i+batch], key=lambda x: x[0][1])
-                    print('B adding', new_hist, 'split', split_hint)
-                    """
                     new_history = copy.deepcopy(selected_domains[i].history)
                     new_history[branching_decision[i][0]][0].append(branching_decision[i][1])  # second half batch: inactive neurons
                     new_history[branching_decision[i][0]][1].append(-1.0)  # second half batch: inactive neurons
 
                     right = ReLUDomain(lA[i+batch], lb[i+batch], ub[i+batch], lb_all[i+batch], up_all[i+batch],
                                        slope[i+batch],  beta[i+batch], selected_domains[i].depth+1, split_history=split_history[i+batch],
-                                       history=new_history, split_hint=split_hint,
+                                       history=new_history,
                                        intermediate_betas=intermediate_betas[i + batch])
 
                     if save_tree:

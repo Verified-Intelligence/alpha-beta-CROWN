@@ -1140,6 +1140,24 @@ def load_dataset(args):
         # set data_max and data_min to be None if no clip
         data_max = torch.reshape((1. - test_data.mean) / test_data.std, (1, -1, 1, 1))
         data_min = torch.reshape((0. - test_data.mean) / test_data.std, (1, -1, 1, 1))
+    elif args.data == 'RESNET':
+        # dummy_input = torch.randn(1, 3, 32, 32)
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.225, 0.225, 0.225])
+        test_data = datasets.CIFAR10("../data", train=False, download=True,
+                                     transform=transforms.Compose([transforms.ToTensor(), normalize]))
+        test_data.mean = torch.tensor([0.485, 0.456, 0.406])
+        test_data.std = torch.tensor([0.225, 0.225, 0.225])
+        # set data_max and data_min to be None if no clip
+        data_max = torch.reshape((1. - test_data.mean) / test_data.std, (1, -1, 1, 1))
+        data_min = torch.reshape((0. - test_data.mean) / test_data.std, (1, -1, 1, 1))
+        X = torch.empty((1000, 3, 32, 32), dtype=torch.float32)  # we only sample first 1000 images
+        labels = torch.empty(1000, dtype=torch.int32)
+        eps_temp = torch.tensor(8 / 255 / 0.225).reshape(1, -1, 1, 1)
+        for i in range(1000):
+            x, y = test_data[i]
+            X[i] = x
+            labels[i] = y
+        return X, labels, data_max, data_min, eps_temp
     return test_data, data_max, data_min
 
 
@@ -1193,7 +1211,7 @@ def load_sdp_dataset(args, eps_temp=None):
         y = torch.from_numpy(y.astype(np.int))
         runnerup = torch.from_numpy(runnerup.astype(np.int))
 
-        if eps_temp is None: eps_temp = 0.3
+        if eps_temp is None: eps_temp = torch.tensor(0.3)
 
         data_max = torch.tensor(1.).reshape(1,-1,1,1)
         data_min = torch.tensor(0.).reshape(1,-1,1,1)
@@ -1351,9 +1369,9 @@ def convert_test_model(model_ori):
     modules = []
     for m in model_ori._modules.values():
         if isinstance(m, nn.Linear):
-            layer = nn.Linear(m.out_features, m.in_features)
-            layer.weight.data = m.weight.data.t().to(torch.float)
-            layer.bias.data = m.bias.data.to(torch.float)
+            layer = nn.Linear(m.in_features, m.out_features)  # Fix a bug in onnx converter for test models.
+            layer.weight.data = m.weight.data.to(torch.float)
+            layer.bias.data = m.bias.data.to(torch.float) if m.bias is not None else torch.zeros_like(layer.bias.data)
             modules.append(layer)
             # pdb.set_trace()
         else:

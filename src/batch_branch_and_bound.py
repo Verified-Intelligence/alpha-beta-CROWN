@@ -5,8 +5,9 @@ import torch
 from collections import defaultdict
 from sortedcontainers import SortedList
 
-from branch_and_bound import pick_out_batch, add_domain_parallel, ReLUDomain
-from babsr_score_conv import choose_node_parallel_FSB, choose_node_parallel_crown, choose_node_parallel_kFSB
+from auto_LiRPA.utils import stop_criterion_sum
+from branching_domains import pick_out_batch, add_domain_parallel, ReLUDomain
+from branching_heuristics import choose_node_parallel_FSB, choose_node_parallel_crown, choose_node_parallel_kFSB
 
 Visited, Flag_first_split = 0, True
 Use_optimized_split = False
@@ -14,7 +15,7 @@ all_node_split = False
 
 
 def batch_verification(d, net, batch, pre_relu_indices, no_LP, growth_rate, decision_thresh = 0, layer_set_bound=True,
-                       beta=True, use_beta_branching=False, branching_method='sb-min', lr_alpha=0.1, lr_beta=0.05, optimizer="adam",
+                       beta=True, branching_method='sb-min', lr_alpha=0.1, lr_beta=0.05, optimizer="adam",
                        iteration=20, beta_warmup=True, opt_coeffs=True, opt_bias=True, lp_test=None,
                        opt_intermediate_beta=True, intermediate_refinement_layers=None, branching_reduceop='min', branching_candidates=1):
     global Visited, Flag_first_split
@@ -35,7 +36,7 @@ def batch_verification(d, net, batch, pre_relu_indices, no_LP, growth_rate, deci
 
         if branching_method == 'babsr':
             branching_decision = choose_node_parallel_crown(orig_lbs, orig_ubs, mask, net, pre_relu_indices, lAs,
-                                                            batch=batch, branching_candidates=branching_candidates, branching_reduceop=branching_reduceop)
+                                                            batch=batch, branching_reduceop=branching_reduceop)
         elif branching_method == 'fsb':
             branching_decision = choose_node_parallel_FSB(orig_lbs, orig_ubs, mask, net, pre_relu_indices, lAs,
                                                           branching_candidates=branching_candidates, branching_reduceop=branching_reduceop, slopes=slopes, betas=betas, history=history)
@@ -63,49 +64,8 @@ def batch_verification(d, net, batch, pre_relu_indices, no_LP, growth_rate, deci
             split["coeffs"] = [[random.random() * 0.001 - 0.0005 for j in range(100)] for i in
                                range(len(branching_decision))]
         # Use_optimized_split = not Use_optimized_split
-
-        if use_beta_branching:
-            # For the very first split we try all unstable neurons in the last layer (strong branching).
-            if len(branching_decision) == 1 and Flag_first_split:
-                Flag_first_split = False
-                print('First split, trying to find the best directly')
-                print('original splitting decisions: {}'.format(branching_decision))
-                unstable_mask = [(i == -1).float() for i in mask]
-                unstable_list = []
-                for i, m in enumerate(unstable_mask):
-                    if i != len(unstable_mask) - 1:  # So far only split from the last layer.
-                        continue
-                    print((torch.nonzero(m.cpu()) + torch.tensor([i, 0])).size())
-                    unstable_list.extend((torch.nonzero(m.cpu()) + torch.tensor([i, 0])).numpy().tolist())
-                best_lb = [-np.inf]
-                for branching_decision in unstable_list:
-                    branching_decision = [branching_decision]
-                    print('splitting decisions: {}'.format(branching_decision))
-                    history = [sd.history for sd in selected_domains]
-                    ret = net.get_lower_bound(orig_lbs, orig_ubs, branching_decision, slopes=slopes, history=history, betas=[],
-                                              decision_thresh=decision_thresh, layer_set_bound=layer_set_bound, beta=beta,
-                                              lr_alpha=lr_alpha, lr_beta=lr_beta, optimizer=optimizer,
-                                              beta_warmup=beta_warmup, opt_coeffs=opt_coeffs, opt_bias=opt_bias, lp_test=lp_test,
-                                              opt_intermediate_beta=opt_intermediate_beta,
-                                              intermediate_refinement_layers=intermediate_refinement_layers)
-                    this_lb = ret[1]
-                    if min(this_lb) > min(best_lb):
-                        print(f'updating best from {best_lb} to {this_lb}')
-                        best_lb = this_lb
-                        best_branch = branching_decision
-                    print('dom_lb parallel: ', this_lb)
-
-                best_branch = best_branch  # [(3, 1793)]
-                print(f'best_branch is {best_branch}, bounds is {best_lb}')
-                branching_decision = best_branch
-            else:
-                # Use split hint if possible. Use BaBSR only when branching heursitic is not available.
-                print('BaBSR', branching_decision)
-                branching_decision = [s.split_hint if s.split_hint is not None and s.split_hint != (0, 0) else b for s, b in zip(selected_domains, branching_decision)]
-                print('BaBSR + Hints', branching_decision)
-        else:
-            print('splitting decisions: {}'.format(branching_decision[:10]))
-            # print("splitting coeffs: {}".format(split["coeffs"]))
+        print('splitting decisions: {}'.format(branching_decision[:10]))
+        # print("splitting coeffs: {}".format(split["coeffs"]))
 
         decision_time = time.time() - decision_time
 
@@ -114,20 +74,18 @@ def batch_verification(d, net, batch, pre_relu_indices, no_LP, growth_rate, deci
         print('single_node_split:', single_node_split)
         ret = net.get_lower_bound(orig_lbs, orig_ubs, split, slopes=slopes, history=history, split_history=split_history, iteration=iteration,
                                   decision_thresh=decision_thresh, layer_set_bound=layer_set_bound, beta=beta, betas=betas,
-                                  lr_alpha=lr_alpha, lr_beta=lr_beta, optimizer=optimizer, use_beta_branching=use_beta_branching,
+                                  lr_alpha=lr_alpha, lr_beta=lr_beta, optimizer=optimizer,
                                   beta_warmup=beta_warmup, opt_coeffs=opt_coeffs, opt_bias=opt_bias, lp_test=lp_test, single_node_split=single_node_split,
                                   opt_intermediate_beta=opt_intermediate_beta, intermediate_refinement_layers=intermediate_refinement_layers, intermediate_betas=intermediate_betas)
-        dom_ub, dom_lb, dom_ub_point, lAs, dom_lb_all, dom_ub_all, slopes, split_history, betas, split_hints, intermediate_betas = ret
+        dom_ub, dom_lb, dom_ub_point, lAs, dom_lb_all, dom_ub_all, slopes, split_history, betas, intermediate_betas = ret
         solve_time = time.time() - solve_time
         add_time = time.time()
-        if split_hints is not None and len(split_hints) != len(branching_decision) * 2:
-            raise RuntimeError(f'next_split_hint len {len(net.net.next_split_hint)}, expected {len(branching_decision)*2}')
         # If intermediate layers are not refined or updated, we do not need to check infeasibility when adding new domains.
         check_infeasibility = not (single_node_split and layer_set_bound)
         unsat_list = add_domain_parallel(lA=lAs, lb=dom_lb, ub=dom_ub, lb_all=dom_lb_all, up_all=dom_ub_all,
                                          domains=d, selected_domains=selected_domains, slope=slopes, beta=betas,
                                          growth_rate=growth_rate, branching_decision=branching_decision, decision_thresh=decision_thresh,
-                                         next_split_hint=split_hints, split_history=split_history, intermediate_betas=intermediate_betas,
+                                         split_history=split_history, intermediate_betas=intermediate_betas,
                                          check_infeasibility=check_infeasibility)
         Visited += (len(selected_domains) - len(unsat_list)) * 2  # one unstable neuron split to two nodes
         print('Current worst domains:', [i.lower_bound for i in d[:10]])
@@ -161,7 +119,6 @@ def relu_bab_parallel(net, domain, x, args, no_LP=False, use_neuron_set_strategy
     timeout = args.timeout
     lr_alpha = args.lr_alpha
     lr_beta = args.lr_beta
-    use_beta_branching = args.new_branching
     lr_init_alpha = args.lr_init_alpha
     branching_method = args.branching_method
     beta_warmup  =  args.beta_warmup
@@ -170,7 +127,6 @@ def relu_bab_parallel(net, domain, x, args, no_LP=False, use_neuron_set_strategy
     lp_test = args.lp_test
     opt_intermediate_beta = args.opt_intermediate_beta
     intermediate_refinement_layers = args.intermediate_refinement_layers
-    per_neuron_slopes = args.per_neuron_slopes
     share_slopes = args.share_slopes
     branching_candidates = args.branching_candidates
     branching_reduceop = args.branching_reduceop
@@ -179,19 +135,19 @@ def relu_bab_parallel(net, domain, x, args, no_LP=False, use_neuron_set_strategy
     Visited, Flag_first_split = 0, True
     if refined_lower_bounds is None or refined_upper_bounds is None:
         global_ub, global_lb, _, _, _, updated_mask, lA, lower_bounds, upper_bounds, pre_relu_indices, slope, history = net.build_the_model(
-            domain, x, no_lp=no_LP, decision_thresh=decision_thresh, use_beta_branching=use_beta_branching,
-            lr_init_alpha=lr_init_alpha, optimizer=optimizer, per_neuron_slopes=per_neuron_slopes, share_slopes=share_slopes)
+            domain, x, no_lp=no_LP, stop_criterion_func=stop_criterion_sum(decision_thresh),
+            lr_init_alpha=lr_init_alpha, optimizer=optimizer, share_slopes=share_slopes)
     else:
         global_ub, global_lb, _, _, _, updated_mask, lA, lower_bounds, upper_bounds, pre_relu_indices, slope, history = net.build_the_model_with_refined_bounds(
-            domain, x, refined_lower_bounds, refined_upper_bounds, no_lp=no_LP, decision_thresh=decision_thresh, use_beta_branching=use_beta_branching,
-            lr_init_alpha=lr_init_alpha, optimizer=optimizer, per_neuron_slopes=per_neuron_slopes, share_slopes=share_slopes)
+            domain, x, refined_lower_bounds, refined_upper_bounds, no_lp=no_LP, stop_criterion_func=stop_criterion_sum(decision_thresh),
+            lr_init_alpha=lr_init_alpha, optimizer=optimizer, share_slopes=share_slopes)
 
     if isinstance(global_lb, torch.Tensor): global_lb = global_lb.item()
     if lp_test in ["LP", "MIP"]:
         return global_lb, global_ub, [[time.time()-start, global_lb]], 0
     # return global_lb, global_ub, [[time.time()-start, global_lb]], 0
 
-    if not opt_intermediate_beta and per_neuron_slopes:
+    if not opt_intermediate_beta:
         # If we are not optimizing intermediate layer bounds, we do not need to save all the intermediate alpha.
         # We only keep the alpha for the last layer.
         new_slope = defaultdict(dict)
@@ -225,14 +181,14 @@ def relu_bab_parallel(net, domain, x, args, no_LP=False, use_neuron_set_strategy
             # neuron set  bounds cost more memory, we set a smaller batch here
             global_lb = batch_verification(domains, net, int(batch/2), pre_relu_indices, no_LP, 0, iteration=iteration,
                                            decision_thresh=decision_thresh, layer_set_bound=False, beta=beta,
-                                           use_beta_branching=use_beta_branching, lr_alpha=lr_alpha, lr_beta=lr_beta, optimizer=optimizer,
+                                           lr_alpha=lr_alpha, lr_beta=lr_beta, optimizer=optimizer,
                                            branching_method=branching_method, beta_warmup=beta_warmup,
                                            opt_coeffs=opt_coeffs, opt_bias=opt_bias, lp_test=lp_test,
                                            branching_candidates=branching_candidates, branching_reduceop=branching_reduceop,
                                            opt_intermediate_beta=opt_intermediate_beta, intermediate_refinement_layers=intermediate_refinement_layers)
         else:
             global_lb = batch_verification(domains, net, batch, pre_relu_indices, no_LP, 0, decision_thresh=decision_thresh, iteration=iteration,
-                                           beta=beta, use_beta_branching=use_beta_branching, lr_alpha=lr_alpha, lr_beta=lr_beta,
+                                           beta=beta, lr_alpha=lr_alpha, lr_beta=lr_beta,
                                            branching_method=branching_method, beta_warmup=beta_warmup,
                                            opt_coeffs=opt_coeffs, opt_bias=opt_bias, lp_test=lp_test,
                                            branching_candidates=branching_candidates, branching_reduceop=branching_reduceop, optimizer=optimizer,

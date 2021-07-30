@@ -50,12 +50,9 @@ class InputDomain:
 
         if self.slope is None:
             return self
-        if isinstance(self.slope, dict):
-            for layer in self.slope:
-                for intermediate_layer in self.slope[layer]:
-                    self.slope[layer][intermediate_layer] = self.slope[layer][intermediate_layer].half().to(device='cpu', non_blocking=True)
-        else:
-            self.slope = [s.half().to(device='cpu', non_blocking=True) for s in self.slope]
+        for layer in self.slope:
+            for intermediate_layer in self.slope[layer]:
+                self.slope[layer][intermediate_layer] = self.slope[layer][intermediate_layer].half().to(device='cpu', non_blocking=True)
 
         return self
 
@@ -73,12 +70,9 @@ class InputDomain:
 
         if self.slope is None:
             return self
-        if isinstance(self.slope, dict):
-            for layer in self.slope:
-                for intermediate_layer in self.slope[layer]:
-                    self.slope[layer][intermediate_layer] = self.slope[layer][intermediate_layer].to(device, non_blocking=True).float()
-        else:
-            self.slope = [s.to(device, non_blocking=True).float() for s in self.slope]
+        for layer in self.slope:
+            for intermediate_layer in self.slope[layer]:
+                self.slope[layer][intermediate_layer] = self.slope[layer][intermediate_layer].to(device, non_blocking=True).float()
         return self
 
 

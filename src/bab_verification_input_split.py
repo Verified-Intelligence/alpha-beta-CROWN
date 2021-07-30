@@ -5,10 +5,9 @@ import sys
 import time
 import gc
 import csv
-import psutil
 
-from model_beta_CROWN_input_split import LiRPAConvNet
-from relu_conv_parallel_input_split import relu_bab_parallel
+from beta_CROWN_solver_input_split import LiRPAConvNet
+from batch_branch_and_bound_input_split import relu_bab_parallel
 
 from utils import *
 
@@ -28,8 +27,7 @@ parser.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"
 parser.add_argument("--data", type=str, default="CIFAR", choices=["MNIST", "CIFAR", "ACASXU", "TEST"], help='dataset')
 parser.add_argument("--seed", type=int, default=100, help='random seed')
 parser.add_argument("--norm", type=float, default='inf', help='p norm for epsilon perturbation')
-parser.add_argument("--model", type=str, default="cresnet5_16_avg_bn",
-                    help='model name')
+parser.add_argument("--model", type=str, default="cresnet5_16_avg_bn", help='model name')
 parser.add_argument("--batch_size", type=int, default=500, help='batch size')
 parser.add_argument("--max_subproblems_list", type=int, default=200000, help='max length of sub-problems list')
 parser.add_argument("--timeout", type=float, default=360, help='timeout for one property')
@@ -41,7 +39,6 @@ parser.add_argument("--iteration", type=int, default=10, help='iteration of opti
 parser.add_argument("--conv_mode", default="patches", choices=["patches", "matrix"], help='conv mode in BoundedModule')
 parser.add_argument("--deterministic", action='store_true', help='Run code in CUDA deterministic mode, slower performance but better reproducibility.')
 parser.add_argument("--double_fp", action='store_true', help='Use double precision floating point. GPUs with good double precision support are needed (NVIDIA P100, V100, A100; AMD Radeon Instinc MI50, MI100)')
-parser.add_argument("--per_neuron_slopes", action='store_true', help='Use per-neuron slope for optimized CROWN bounds.')
 parser.add_argument("--share_slopes", action='store_true', help='When --per_neuron_alpha is True, use shared alpha.')
 parser.add_argument('--increase_TO', action='store_true', default=False, help='increase timeout when debugging')
 parser.add_argument('--single_prop', action='store_true', default=False, help='only verify single prop')
@@ -70,7 +67,7 @@ def bab(model_ori, data, target, norm, eps, decision_thresh, args, y, prop_mat, 
                                                                  iteration=args.iteration, shape=shape,
                                                                  timeout=args.timeout, lr_alpha=args.lr_alpha,
                                                                  lr_init_alpha=args.lr_init_alpha,
-                                                                 per_neuron_slopes=args.per_neuron_slopes, branching_candidates=args.branching_candidates,
+                                                                 branching_candidates=args.branching_candidates,
                                                                  share_slopes=args.share_slopes, branching_method=args.branching_method,
                                                                  prop_mat=prop_mat, prop_rhs=prop_rhs, model_ori=model_ori,
                                                                  all_prop=all_prop)

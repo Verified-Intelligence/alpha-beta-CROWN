@@ -17,6 +17,9 @@ VNNLIB_FILE=$4
 RESULTS_FILE=$5
 TIMEOUT=$6
 
+# Avoid MKL slowdown on AMD CPUs. Requires mkl<=2020.0.
+grep AMD /proc/cpuinfo > /dev/null && export MKL_DEBUG_CPU_TYPE=5
+
 echo "Running benchmark instance in category '$CATEGORY' with onnx file '$ONNX_FILE', vnnlib file '$VNNLIB_FILE', results file $RESULTS_FILE, and timeout $TIMEOUT"
 
 # setup environment variable for tool (doing it earlier won't be persistent with docker)"

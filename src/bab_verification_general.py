@@ -7,31 +7,39 @@ import time
 import gc
 import csv
 import math
+import torch
+import numpy as np
 from collections import defaultdict
 
-from model_beta_CROWN import LiRPAConvNet
-from relu_conv_parallel import relu_bab_parallel
+from beta_CROWN_solver import LiRPAConvNet, set_mip_refine_timeout
+from batch_branch_and_bound import relu_bab_parallel
 from utils import *
 from attack_pgd import attack_pgd
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import *
 from auto_LiRPA.bound_ops import *
+from auto_LiRPA.utils import reduction_min, stop_criterion_min
 from read_vnnlib import read_vnnlib_simple
 from arguments import common_argparser
 from nn4sys_verification import nn4sys_verification
 
-parser = common_argparser()
-parser.add_argument("--csv_name", type=str, default=None, help='name of .csv file')
-parser.add_argument("--onnx_path", type=str, default=None, help='path to .onnx file')
-parser.add_argument("--vnnlib_path", type=str, default=None, help='path to .vnnlib file')
-parser.add_argument("--results_file", type=str, default=None, help='path to results file')
-parser.add_argument("--data", type=str, default="CIFAR", choices=["MNIST", "CIFAR", "ACASXU", "NN4SYS", "TEST"], help='dataset')
-parser.add_argument("--model", type=str, default="cresnet5_16_avg_bn", help='model name')
-parser.add_argument('--increase_TO', action='store_true', default=False, help='increase timeout when debugging')
-parser.add_argument('--pgd_order', choices=["before", "after", "skip"], default="before", help='Run PGD before/after incomplete verification, or skip it.')
-parser.add_argument('--complete_verifier', choices=["bab", "mip", "bab-refine", "skip"], default="bab", help='Complete verification verifier.')
-parser.add_argument('--no_incomplete', action='store_false', dest='incomplete', help='do not use init opt crown for all labels')
-args = parser.parse_args()
+
+def config_args():
+    parser = common_argparser()
+    parser.add_argument("--csv_name", type=str, default=None, help='name of .csv file')
+    parser.add_argument("--onnx_path", type=str, default=None, help='path to .onnx file')
+    parser.add_argument("--vnnlib_path", type=str, default=None, help='path to .vnnlib file')
+    parser.add_argument("--results_file", type=str, default=None, help='path to results file')
+    parser.add_argument("--data", type=str, default="CIFAR", choices=["MNIST", "CIFAR", "ACASXU", "NN4SYS", "TEST"], help='dataset')
+    parser.add_argument("--model", type=str, default="cresnet5_16_avg_bn", help='model name')
+    parser.add_argument('--increase_TO', action='store_true', default=False, help='increase timeout when debugging')
+    parser.add_argument('--pgd_order', choices=["before", "after", "skip"], default="after", help='Run PGD before/after incomplete verification, or skip it.')
+    parser.add_argument('--complete_verifier', choices=["bab", "mip", "bab-refine", "skip"], default="bab", help='Complete verification verifier.')
+    parser.add_argument('--no_incomplete', action='store_false', dest='incomplete', help='do not use init opt crown for all labels')
+    args = parser.parse_args()
+
+    set_mip_refine_timeout(args.mip_refine_timeout*args.timeout)
+    return args
 
 
 def get_labels(model_ori, x, vnnlib):
@@ -53,7 +61,9 @@ def get_labels(model_ori, x, vnnlib):
                 y = int(y)
             else:
                 y = None
-            pidx = int(np.where(prop_mat[0] == -1)[0])  # target label
+            pidx = np.where(prop_mat[0] == -1)[0]  # target label
+            pidx = int(pidx) if len(pidx) != 0 else None  # Fix constant specification with no target label.
+            if y is not None and pidx is None: y, pidx = pidx, y  # Fix vnnlib with >= const property.
             args.decision_thresh = prop_rhs[0]
         if pidx == y:
             raise NotImplementedError
@@ -93,7 +103,7 @@ def incomplete_verifier(model_ori, data, norm, args, y, data_ub=None, data_lb=No
         c = None
     model = LiRPAConvNet(model_ori, y, None, solve_slope=args.solve_slope, device=args.device,
                 in_size=data.shape, deterministic=args.deterministic, simplify=False,  c=c)
-    print('Model prediction is:', model.net(data))
+    print('Model prediction is:', model.net(data))                             
     if list(model.net.parameters())[0].is_cuda:
         data = data.cuda()
         data_lb, data_ub = data_lb.cuda(), data_ub.cuda()
@@ -103,13 +113,12 @@ def incomplete_verifier(model_ori, data, norm, args, y, data_ub=None, data_lb=No
     domain = torch.stack([data_lb.squeeze(0), data_ub.squeeze(0)], dim=-1)
     # global_ub, global_lb, _, _, _, updated_mask, lA, lower_bounds, upper_bounds, pre_relu_indices, slope, history
     _, global_lb, _, _, _, mask, lA, lower_bounds, upper_bounds, pre_relu_indices, slope, _ = model.build_the_model(
-            domain, x, decision_thresh=args.decision_thresh, use_beta_branching=args.new_branching,
+            domain, x, 
             lr_init_alpha=args.lr_init_alpha, init_iteration=args.init_iteration, optimizer=args.optimizer,
-            per_neuron_slopes=args.per_neuron_slopes, share_slopes=args.share_slopes, 
-            against_all_classes=True, lr_decay=args.lr_decay, loss_reduction_func=args.loss_reduction_func)
+            share_slopes=args.share_slopes, lr_decay=args.lr_decay,
+            loss_reduction_func=args.loss_reduction_func, 
+            stop_criterion_func=stop_criterion_min(args.decision_thresh))
     # print("initial opt crown bounds:", global_lb)
-    # change the stop criterion to single mode after init against_all_classes
-    model.net.set_bound_opts({'optimize_bound_args': {'ob_against_all_classes': False}})
 
     if y is not None:
         # For the last layer, since we missed one label, we add them back here.
@@ -117,14 +126,13 @@ def incomplete_verifier(model_ori, data, norm, args, y, data_ub=None, data_lb=No
         lower_bounds, upper_bounds, global_lb = reshape_bounds(lower_bounds, upper_bounds, y, global_lb)
         saved_bounds = (model, lower_bounds, upper_bounds, mask, pre_relu_indices, lA)
     else:
-        saved_bounds = (lower_bounds, upper_bounds, global_lb)
+        saved_bounds = (model, lower_bounds, upper_bounds, mask, pre_relu_indices, lA)
 
-    if global_lb.min() >= 0:
+    if global_lb.min() >= args.decision_thresh:
         print("verified with init bound!")
         return "safe-incomplete", global_lb, saved_bounds
     
     return "unknown", global_lb, saved_bounds
-
 
 
 def mip(args, saved_bounds, y):
@@ -132,7 +140,8 @@ def mip(args, saved_bounds, y):
     lirpa_model, lower_bounds, upper_bounds, mask, pre_relu_indices, lA = saved_bounds
 
     if args.complete_verifier == "mip":
-        mip_global_lb, mip_status = lirpa_model.build_the_model_mip(lower_bounds, upper_bounds, args.timeout)
+        mip_global_lb, mip_status = lirpa_model.build_the_model_mip(lower_bounds, upper_bounds, args.timeout,
+                        mip_multi_proc=args.mip_multi_proc, mip_threads=args.mip_threads)
         if mip_global_lb.ndim == 1:
             mip_global_lb = mip_global_lb.unsqueeze(0)  # Missing batch dimension.
         print(f'MIP solved global bound={mip_global_lb}')
@@ -147,18 +156,23 @@ def mip(args, saved_bounds, y):
             return "unsafe-mip", mip_global_lb, None, None
 
     elif args.complete_verifier == "bab-refine":
-        print("start refine intermediate bounds with mip")
+        print("Start solving intermediate bounds with MIP...")
         score = lirpa_model.FSB_score(lower_bounds, upper_bounds, mask, pre_relu_indices, lA)
         # branching_decision = choose_node_parallel_FSB(orig_lbs, orig_ubs, mask, net, pre_relu_indices, lAs,
                     # branching_candidates=branching_candidates, branching_reduceop=branching_reduceop, slopes=slopes, betas=betas, history=history)
 
         refined_lower_bounds, refined_upper_bounds = lirpa_model.build_the_model_mip_refine(lower_bounds, upper_bounds, score=score,
-                    against_all_classes=True, lr_decay=args.lr_decay, loss_reduction_func=args.loss_reduction_func)
+                    lr_decay=args.lr_decay, 
+                    lr_init_alpha=args.lr_init_alpha,
+                    loss_reduction_func=args.loss_reduction_func, 
+                    stop_criterion_func=stop_criterion_min(1e-4),
+                    mip_multi_proc=args.mip_multi_proc, mip_threads=args.mip_threads, 
+                    mip_perneuron_refine_timeout=args.mip_perneuron_refine_timeout)
         lower_bounds, upper_bounds, global_lb = reshape_bounds(refined_lower_bounds, refined_upper_bounds, y)
         refined_global_lb = lower_bounds[-1]
-        print("refined global lb:", refined_global_lb, "min:", refined_global_lb.min() )
+        print("refined global lb:", refined_global_lb, "min:", refined_global_lb.min())
         if refined_global_lb.min()>=0:
-            print("verified safe with opt crown using mip refined bounds!")
+            print("Verified safe using alpha-CROWN with MIP improved bounds!")
             return "safe-incomplete-refine", refined_global_lb, lower_bounds, upper_bounds
 
         return "unknown", refined_global_lb, lower_bounds, upper_bounds
@@ -171,7 +185,7 @@ def bab(model_ori, data, target, norm, args, y, data_ub=None, data_lb=None, lowe
     # LiRPA wrapper
     model = LiRPAConvNet(model_ori, y, target, solve_slope=args.solve_slope, device=args.device, in_size=data.shape,
                          deterministic=args.deterministic, conv_mode=args.conv_mode)
-    print('Model prediction is:', model.net(data))
+    print('Model prediction is:', model.net(data))                             
     if list(model.net.parameters())[0].is_cuda:
         data = data.cuda()
         data_lb, data_ub = data_lb.cuda(), data_ub.cuda()
@@ -319,13 +333,13 @@ def main(args):
         raise NotImplementedError
 
     if args.csv_name is not None:
-        file_root = args.load + '/'  # 'tmp/cifar10_resnet_benchmark/'
-        csv_file = open(file_root + args.csv_name, newline='')
-        reader = csv.reader(csv_file, delimiter=',')
+        file_root = args.load
+        with open(os.path.join(file_root, args.csv_name), newline='') as csv_f:
+            reader = csv.reader(csv_f, delimiter=',')
 
-        csv_file = []
-        for row in reader:
-            csv_file.append(row)
+            csv_file = []
+            for row in reader:
+                csv_file.append(row)
 
         save_path = 'vnn-comp_[{}]_start={}_end={}_iter={}_b={}_int-beta={}_timeout={}_branching={}-{}-{}_lra-init={}_lra={}_lrb={}_PGD={}.npz'. \
             format(os.path.splitext(args.csv_name)[0], args.start, args.end, args.iteration, args.batch_size,
@@ -336,12 +350,10 @@ def main(args):
         if args.start != 0 or args.end != reader.line_num:
             assert args.start>=0 and args.start<=reader.line_num and args.end>args.start,\
                 "start or end sample error: {}, {}, {}".format(args.end, args.start, reader.line_num)
-            verified_examples = args.end-args.start
             print("customized start/end sample from {} to {}".format(args.start, args.end))
         else:
             print("no customized start/end sample, testing for all samples")
             args.start, args.end = 0, reader.line_num
-            verified_examples = reader.line_num
     else:
         # run in .sh
         args.start, args.end = 0, 1
@@ -352,14 +364,13 @@ def main(args):
     verification_summary = defaultdict(list)
     time_per_sample_list = []
     status_per_sample_list = []
-    bounds_per_sample_list = []
     bab_ret = []
     cnt = 0  # Number of examples in this run.
     bnb_ids = csv_file[args.start:args.end]
 
     for new_idx, csv_item in enumerate(bnb_ids):
         time_per_sample = time.time()
-        print('\n %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% idx:', new_idx,  '%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%')
+        print('\n %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% idx:', new_idx, '%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%')
 
         onnx_path, vnnlib_path, args.timeout = csv_item
         args.timeout = int(float(args.timeout))
@@ -372,31 +383,31 @@ def main(args):
         # Convert ONNX model and read specifications.
         is_channel_last = False
         if args.data == 'MNIST':
-            model_ori, is_channel_last = load_model_onnx(file_root + onnx_path, input_shape=(1,28,28))
-            vnnlib = read_vnnlib_simple(file_root + vnnlib_path, 784, 10)
+            model_ori, is_channel_last = load_model_onnx(os.path.join(file_root, onnx_path), input_shape=(1,28,28))
+            vnnlib = read_vnnlib_simple(os.path.join(file_root, vnnlib_path), 784, 10)
         elif args.data == 'CIFAR':
-            model_ori, is_channel_last = load_model_onnx(file_root + onnx_path, input_shape=(3,32,32))
-            vnnlib = read_vnnlib_simple(file_root + vnnlib_path, 3072, 10)
+            model_ori, is_channel_last = load_model_onnx(os.path.join(file_root, onnx_path), input_shape=(3,32,32))
+            vnnlib = read_vnnlib_simple(os.path.join(file_root, vnnlib_path), 3072, 10)
         elif args.data == 'ACASXU':
-            model_ori = load_model_onnx(file_root + onnx_path, input_shape=(5,))
-            vnnlib = read_vnnlib_simple(file_root + vnnlib_path, 5, 5)
+            model_ori = load_model_onnx(os.path.join(file_root, onnx_path), input_shape=(5,))
+            vnnlib = read_vnnlib_simple(os.path.join(file_root, vnnlib_path), 5, 5)
             model_ori = nn.Sequential(*list(model_ori.modules())[1:])
         elif args.data == 'TEST':
-            model_ori = load_model_onnx(file_root + onnx_path, input_shape=(1,))
-            vnnlib = read_vnnlib_simple(file_root + vnnlib_path, 1, 1)
+            model_ori = load_model_onnx(os.path.join(file_root, onnx_path), input_shape=(1,))
+            vnnlib = read_vnnlib_simple(os.path.join(file_root, vnnlib_path), 1, 1)
             model_ori = convert_test_model(model_ori)
         elif args.data == 'NN4SYS':
             from convert_nn4sys_model import convert_and_save_nn4sys, get_path
-            path = get_path(file_root + onnx_path)
+            path = get_path(os.path.join(file_root, onnx_path))
             if not os.path.exists(path):
-                convert_and_save_nn4sys(file_root + onnx_path)
+                convert_and_save_nn4sys(os.path.join(file_root, onnx_path))
             # load pre-converted model
             model_ori = torch.load(path)
             print(f'Loaded from {path}')
-            vnnlib = read_vnnlib_simple(file_root + vnnlib_path, 1, 1, regression=True)
+            vnnlib = read_vnnlib_simple(os.path.join(file_root, vnnlib_path), 1, 1, regression=True)
 
         if args.data == 'NN4SYS':
-            res = nn4sys_verification(model_ori, vnnlib, args, onnx_path=file_root + onnx_path)
+            res = nn4sys_verification(model_ori, vnnlib, args, onnx_path=os.path.join(file_root, onnx_path))
             print(res)
             if res == 'unsafe':
                 verified_status = "unsafe"
@@ -480,7 +491,9 @@ def main(args):
                             y = int(y)
                         else:
                             y = None
-                        pidx = int(np.where(prop_mat[0] == -1)[0])  # target label
+                        pidx = np.where(prop_mat[0] == -1)[0]  # target label
+                        pidx = int(pidx) if len(pidx) != 0 else None  # Fix constant specification with no target label.
+                        if y is not None and pidx is None: y, pidx = pidx, y  # Fix vnnlib with >= const property.
                         args.decision_thresh = prop_rhs[0]
 
                     print('##### [{}] True label: {}, Tested against: {}, onnx_path: {}, vnnlib_path: {} ######'.format(new_idx, y, pidx, onnx_path, vnnlib_path))
@@ -578,4 +591,5 @@ def main(args):
 
 
 if __name__ == "__main__":
+    args = config_args()
     main(args)

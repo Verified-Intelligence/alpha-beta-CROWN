@@ -8,10 +8,13 @@ from torch.nn import ZeroPad2d
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.bound_ops import BoundRelu
 from auto_LiRPA.perturbations import *
+from auto_LiRPA.utils import (reduction_min, reduction_max, reduction_mean, reduction_sum,
+                            stop_criterion_sum, stop_criterion_min)
 from modules import Flatten
 
 import multiprocessing
 import sys
+import os
 
 try:
     import gurobipy as grb
@@ -20,6 +23,24 @@ except ModuleNotFoundError:
 
 total_func_time = total_prepare_time = total_bound_time = total_beta_bound_time = total_transfer_time = total_finalize_time = 0.0
 
+def reduction_str2func(reduction_func):
+    if type(reduction_func) == str:
+        if reduction_func == 'min':
+            return reduction_min
+        elif reduction_func == 'max':
+            return reduction_max
+        elif reduction_func == 'sum':
+            return reduction_sum
+        elif reduction_func == 'mean':
+            return reduction_mean
+        else:
+            raise NotImplementedError(f'Unknown reduction_func {reduction_func}')
+    else:
+        return reduction_func
+
+def handle_gurobi_error(message):
+    print(f'Gurobi error: {message}')
+    raise 
 
 def simplify_network(all_layers):
     """
@@ -87,11 +108,12 @@ def add_single_prop(layers, gt, cls):
 
 class LiRPAConvNet:
     def __init__(self, model_ori, pred, test, solve_slope=False, device='cuda', simplify=True, in_size=(1, 3, 32, 32),
-                 use_beta_branching=False, conv_mode='patches', deterministic=False, c=None):
+                 conv_mode='patches', deterministic=False, c=None):
         """
         convert pytorch model to auto_LiRPA module
         """
-        assert type(list(model_ori.modules())[-1]) is torch.nn.Linear
+        if type(list(model_ori.modules())[-1]) is not torch.nn.Linear:
+            simplify = False  # test_nano.onnx has relu layer at the last layer.
         net = copy.deepcopy(model_ori)
         layers = list(net.children())
         self.simplify = simplify
@@ -106,14 +128,14 @@ class LiRPAConvNet:
             self.layers = layers
         self.solve_slope = solve_slope
         if solve_slope:
-            self.net = BoundedModule(net, torch.zeros(in_size, device=device), bound_opts={'relu': 'optimized', 'tanh': 'optimized', 'sigmoid': 'optimized', 'deterministic': deterministic, 'conv_mode': conv_mode, 'ob_get_heuristic': use_beta_branching},
+            self.net = BoundedModule(net, torch.zeros(in_size, device=device), bound_opts={'relu': 'adaptive', 'deterministic': deterministic, 'conv_mode': conv_mode},
                                      device=device)
         else:
             self.net = BoundedModule(net, torch.zeros(in_size, device=device), bound_opts={'relu': 'same-slope', 'conv_mode': conv_mode}, device=device)
         self.net.eval()
 
     def get_lower_bound(self, pre_lbs, pre_ubs, split, slopes=None, betas=None, history=None, decision_thresh=0, layer_set_bound=True,
-                        beta=True, use_beta_branching=False, lr_alpha=0.1, lr_beta=0.05, optimizer="adam", iteration=20, beta_warmup=True,
+                        beta=True, lr_alpha=0.1, lr_beta=0.05, optimizer="adam", iteration=20, beta_warmup=True,
                         opt_coeffs=True, opt_bias=True, lp_test=None, split_history=None, single_node_split=True,
                         intermediate_betas=None, opt_intermediate_beta=True, intermediate_refinement_layers=None):
 
@@ -131,18 +153,17 @@ class LiRPAConvNet:
         if single_node_split:
             ret = self.update_bounds_parallel(pre_lbs, pre_ubs, split, slopes, beta=beta, betas=betas, early_stop=False,
                                               optimizer=optimizer, iteration=iteration, history=history,
-                                              layer_set_bound=layer_set_bound, lr_alpha=lr_alpha, lr_beta=lr_beta,
-                                              use_beta_branching=use_beta_branching)
+                                              layer_set_bound=layer_set_bound, lr_alpha=lr_alpha, lr_beta=lr_beta)
         else:
             ret = self.update_bounds_parallel_general(pre_lbs, pre_ubs, split, slopes, beta=beta, early_stop=False,
                                               optimizer=optimizer, iteration=iteration, history=history,
                                               split_history=split_history, intermediate_betas=intermediate_betas,
                                               layer_set_bound=layer_set_bound, lr_alpha=lr_alpha, lr_beta=lr_beta,
-                                              use_beta_branching=use_beta_branching, beta_warmup=beta_warmup,
+                                              beta_warmup=beta_warmup,
                                               opt_coeffs=opt_coeffs, opt_bias=opt_bias, opt_intermediate_beta=opt_intermediate_beta,
                                               intermediate_refinement_layers=intermediate_refinement_layers)
 
-        lower_bounds, upper_bounds, lAs, slopes, betas, split_history, split_hints, best_intermediate_betas = ret
+        lower_bounds, upper_bounds, lAs, slopes, betas, split_history, best_intermediate_betas = ret
 
         if lp_test == "LP":
             for bdi, bd in enumerate(split["decision"]):
@@ -162,7 +183,7 @@ class LiRPAConvNet:
         end = time.time()
         print('batch bounding time: ', end - start)
         return [i[-1].item() for i in upper_bounds], [i[-1].item() for i in lower_bounds], None, lAs, lower_bounds, \
-               upper_bounds, slopes, split_history, betas, split_hints, best_intermediate_betas
+               upper_bounds, slopes, split_history, betas, best_intermediate_betas
 
     def get_relu(self, model, idx):
         # find the i-th ReLU layer
@@ -194,13 +215,10 @@ class LiRPAConvNet:
             cpu_layer.lA = layer.lA.to(device='cpu', non_blocking=non_blocking)
         # For get_slope().
         for cpu_layer, layer in zip(cpu_net.relus, net.relus):
-            if hasattr(net.relus[0], 'alpha'):
-                # Per-neuron alpha.
-                for spec_name, alpha in layer.alpha.items():
-                    cpu_layer.alpha = OrderedDict()
-                    cpu_layer.alpha[spec_name] = alpha.half().to(device='cpu', non_blocking=non_blocking)
-            else:
-                cpu_layer.slope = layer.slope.half().to(device='cpu', non_blocking=non_blocking)
+            # Per-neuron alpha.
+            for spec_name, alpha in layer.alpha.items():
+                cpu_layer.alpha = OrderedDict()
+                cpu_layer.alpha[spec_name] = alpha.half().to(device='cpu', non_blocking=non_blocking)
         # For get_beta().
         for cpu_layer, layer in zip(cpu_net.relus, net.relus):
             if layer.sparse_beta is not None:
@@ -310,47 +328,29 @@ class LiRPAConvNet:
     def get_slope(self, model):
         if len(model.relus) == 0:
             return [None]
-        if hasattr(model.relus[0], 'alpha'):
-            # slope has size (2, spec, batch, *shape). When we save it, we make batch dimension the first.
-            # spec is some intermediate layer neurons, or output spec size.
-            batch_size = next(iter(model.relus[0].alpha.values())).size(2)
-            ret = [defaultdict(dict) for i in range(batch_size)]
-            for m in model.relus:
-                for spec_name, alpha in m.alpha.items():
-                    for i in range(batch_size):
-                        # each slope size is (2, spec, 1, *shape).
-                        ret[i][m.name][spec_name] = alpha[:,:,i:i+1,:]
-            return ret
-        else:
-            s = []
-            for m in model.relus:
-                # slope has size (idx, 2, batch, *shape). When we save it, we make batch dimension the first.
-                s.append(m.slope.transpose(0, 2))
 
-            ret = []
-            # reorganize the slope by batch element. Each element in ret is a list of number of relu neurons; each element is an alpha.
-            for i in range(s[0].size(0)):
-                ret.append([j[i:i+1] for j in s])
-            return ret
+        # slope has size (2, spec, batch, *shape). When we save it, we make batch dimension the first.
+        # spec is some intermediate layer neurons, or output spec size.
+        batch_size = next(iter(model.relus[0].alpha.values())).size(2)
+        ret = [defaultdict(dict) for i in range(batch_size)]
+        for m in model.relus:
+            for spec_name, alpha in m.alpha.items():
+                for i in range(batch_size):
+                    # each slope size is (2, spec, 1, *shape).
+                    ret[i][m.name][spec_name] = alpha[:,:,i:i+1,:]
+        return ret
 
     def set_slope(self, model, slope):
-        if isinstance(slope[0], dict):
-            for m in model.relus:
-                for spec_name in list(m.alpha.keys()):
-                    if spec_name in slope[0][m.name]:
-                        # Merge all slope vectors together in this batch. Size is (2, spec, batch, *shape).
-                        m.alpha[spec_name] = torch.cat([slope[i][m.name][spec_name] for i in range(len(slope))], dim=2)
-                        # Duplicate for the second half of the batch.
-                        m.alpha[spec_name] = m.alpha[spec_name].repeat(1, 1, 2, *([1] * (m.alpha[spec_name].ndim - 3)))
-                    else:
-                        # This layer's alpha is not used. For example, we can drop all intermediate layer alphas.
-                        del m.alpha[spec_name]
-        else:
-            idx = 0
-            for m in model.relus:
-                # Duplicate in the batch dimension, and transpose to (idx, 2, batch, *shape)
-                m.slope = slope[idx].repeat(2, *([1] * (slope[idx].ndim - 1))).transpose(0, 2).detach().requires_grad_(True)
-                idx += 1
+        for m in model.relus:
+            for spec_name in list(m.alpha.keys()):
+                if spec_name in slope[0][m.name]:
+                    # Merge all slope vectors together in this batch. Size is (2, spec, batch, *shape).
+                    m.alpha[spec_name] = torch.cat([slope[i][m.name][spec_name] for i in range(len(slope))], dim=2)
+                    # Duplicate for the second half of the batch.
+                    m.alpha[spec_name] = m.alpha[spec_name].repeat(1, 1, 2, *([1] * (m.alpha[spec_name].ndim - 3)))
+                else:
+                    # This layer's alpha is not used. For example, we can drop all intermediate layer alphas.
+                    del m.alpha[spec_name]
 
     def reset_beta(self, model, batch, max_splits_per_layer=None, betas=None):
         # Recreate new beta with appropriate shape.
@@ -383,7 +383,7 @@ class LiRPAConvNet:
             raise InfeasibleMaskException()
         else:
             print('\n')
-            print(f'model.status: {model.status}\n')
+            print(f'Gurobi model.status: {model.status}\n')
             raise NotImplementedError
 
     def copy_model(self, model, basis=True, use_basis_warm_start=True, remove_constr_list=[]):
@@ -420,9 +420,10 @@ class LiRPAConvNet:
         model_split.update()
         return model_split
 
+    """Main function for computing bounds after branch and bound in Beta-CROWN."""
     def update_bounds_parallel(self, pre_lb_all=None, pre_ub_all=None, split=None, slopes=None, beta=True,
                                betas=None, early_stop=True, optimizer="adam", iteration=20, history=None,
-                               layer_set_bound=True, use_beta_branching=False, lr_alpha=0.1, lr_beta=0.05, shortcut=False):
+                               layer_set_bound=True, lr_alpha=0.1, lr_beta=0.05, shortcut=False):
         global total_func_time, total_bound_time, total_prepare_time, total_beta_bound_time, total_transfer_time, total_finalize_time
         func_time = time.time()
         prepare_time = bound_time = transfer_time = finalize_time = beta_bound_time = 0.0
@@ -449,9 +450,6 @@ class LiRPAConvNet:
         ret_b = [[] for _ in range(batch * 2)]
         new_split_history = [{} for _ in range(batch * 2)]
         best_intermediate_betas = [defaultdict(dict) for _ in range(batch * 2)] # Each key is corresponding to a pre-relu layer, and each value intermediate beta values for neurons in that layer.
-
-        if use_beta_branching:
-            assert self.solve_slope
 
         start_prepare_time = time.time()
         # iteratively change upper and lower bound from former to later layer
@@ -548,7 +546,6 @@ class LiRPAConvNet:
         start_bound_time = time.time()
 
         if shortcut:
-            self.net.set_relu_used_count(1)  # sum(change_idx <= x for x in self.pre_relu_indices)
             self.net.set_bound_opts({'optimize_bound_args': {'ob_beta': beta, 'ob_single_node_split': True,
                 'ob_update_by_layer': layer_set_bound, 'ob_optimizer':optimizer}})
             with torch.no_grad():
@@ -560,16 +557,13 @@ class LiRPAConvNet:
             if self.solve_slope:
                 start_beta_bound_time = time.time()
                 self.net.set_bound_opts({'optimize_bound_args':
-                                             {'ob_start_idx': 1, 'ob_beta': beta, 'ob_single_node_split': True,
+                                             {'ob_beta': beta, 'ob_single_node_split': True,
                                               'ob_update_by_layer': layer_set_bound, 'ob_iteration': iteration,
                                               'ob_lr': lr_alpha, 'ob_lr_beta': lr_beta, 'ob_optimizer': optimizer}})
                 lb, ub, = self.net.compute_bounds(x=(new_x,), IBP=False, C=None, method='CROWN-Optimized',
                                                   new_interval=new_candidate, return_A=False, bound_upper=False)
                 beta_bound_time += time.time() - start_beta_bound_time
-                if use_beta_branching:
-                    next_split_hint = self.net.next_split_hint
             else:
-                self.net.set_relu_used_count(1)
                 with torch.no_grad():
                     lb, ub, = self.net.compute_bounds(x=(new_x,), IBP=False, C=None, method='backward',
                                                       new_interval=new_candidate, bound_upper=False, return_A=False)
@@ -579,7 +573,7 @@ class LiRPAConvNet:
         else:
             # all intermediate bounds are re-calculated by optimized CROWN
             self.net.set_bound_opts(
-                {'optimize_bound_args': {'ob_start_idx': 99, 'ob_beta': beta, 'ob_update_by_layer': layer_set_bound,
+                {'optimize_bound_args': {'ob_beta': beta, 'ob_update_by_layer': layer_set_bound,
                     'ob_iteration': iteration, 'ob_lr': lr_alpha, 'ob_lr_beta': lr_beta, 'ob_optimizer': optimizer}})
             lb, ub, = self.net.compute_bounds(x=(new_x,), IBP=False, C=None, method='CROWN-Optimized',
                                               new_interval=new_candidate, return_A=False, bound_upper=False)
@@ -625,15 +619,12 @@ class LiRPAConvNet:
         print(f'This batch time : update_bounds func: {func_time:.4f}\t prepare: {prepare_time:.4f}\t bound: {bound_time:.4f}\t transfer: {transfer_time:.4f}\t finalize: {finalize_time:.4f}')
         print(f'Accumulated time: update_bounds func: {total_func_time:.4f}\t prepare: {total_prepare_time:.4f}\t bound: {total_bound_time:.4f}\t transfer: {transfer_time:.4f}\t finalize: {total_finalize_time:.4f}')
 
-        if use_beta_branching:
-            return ret_l, ret_u, lAs, ret_s, ret_b, new_split_history, next_split_hint, best_intermediate_betas
-        else:
-            return ret_l, ret_u, lAs, ret_s, ret_b, new_split_history, None, best_intermediate_betas
+        return ret_l, ret_u, lAs, ret_s, ret_b, new_split_history, best_intermediate_betas
 
     def update_bounds_parallel_general(self, pre_lb_all=None, pre_ub_all=None, split=None, slopes=None,
                                beta=True, early_stop=True, optimizer="adam", iteration=20, split_history=None,
                                history=None, lr_alpha=0.1, lr_beta=0.05,  intermediate_betas=None,
-                               layer_set_bound=True, use_beta_branching=False, beta_warmup=True, opt_coeffs=True,
+                               layer_set_bound=True, beta_warmup=True, opt_coeffs=True,
                                opt_bias=True, debug=False, opt_intermediate_beta=True, intermediate_refinement_layers=None):
         if not hasattr(self, '_count'):  # for debugging.
             self._count = 0
@@ -680,10 +671,6 @@ class LiRPAConvNet:
         ret_s = [[] for _ in range(batch * 2)]
         betas = [[] for _ in range(batch * 2)]
         best_intermediate_betas = [defaultdict(dict) for _ in range(batch * 2)] # Each key is corresponding to a pre-relu layer, and each value intermediate beta values for neurons in that layer.
-
-        if use_beta_branching:
-            ret_split_hints = [[] for _ in range(batch * 2)]
-            assert self.solve_slope
 
         if debug:
             if split_history[0]:
@@ -1050,17 +1037,14 @@ class LiRPAConvNet:
             if self.solve_slope:
                 start_beta_bound_time = time.time()
                 self.net.set_bound_opts({'optimize_bound_args':
-                                             {'ob_start_idx': 1, 'ob_beta': beta, 'ob_single_node_split': False,
+                                             {'ob_beta': beta, 'ob_single_node_split': False,
                                               'ob_opt_coeffs': opt_coeffs, 'ob_opt_bias': opt_bias,
                                               'ob_update_by_layer': layer_set_bound, 'ob_iteration': iteration,
                                               'ob_lr': lr_alpha, 'ob_lr_beta': lr_beta, 'ob_optimizer': optimizer}})
                 lb, ub, = self.net.compute_bounds(x=(new_x,), IBP=False, C=None, method='CROWN-Optimized',
                                                   new_interval=new_candidate, return_A=False, bound_upper=False)
                 beta_bound_time += time.time() - start_beta_bound_time
-                if use_beta_branching:
-                    next_split_hint = self.net.next_split_hint
             else:
-                self.net.set_relu_used_count(1)
                 with torch.no_grad():
                     lb, ub, = self.net.compute_bounds(x=(new_x,), IBP=False, C=None, method='backward',
                                                       new_interval=new_candidate, bound_upper=False, return_A=False)
@@ -1070,7 +1054,7 @@ class LiRPAConvNet:
         else:
             # all intermediate bounds are re-calculated by optimized CROWN
             self.net.set_bound_opts(
-                {'optimize_bound_args': {'ob_start_idx': 99, 'ob_beta': beta, 'ob_update_by_layer': layer_set_bound,
+                {'optimize_bound_args': {'ob_beta': beta, 'ob_update_by_layer': layer_set_bound,
                                          'ob_iteration': iteration, 'ob_lr': lr_alpha, 'ob_lr_beta': lr_beta,
                                          'ob_opt_coeffs': opt_coeffs, 'ob_opt_bias': opt_bias,
                                          'ob_single_node_split': False, 'ob_intermediate_beta': opt_intermediate_beta,
@@ -1314,10 +1298,7 @@ class LiRPAConvNet:
         total_finalize_time += finalize_time
         print(f'This batch time : update_bounds func: {func_time:.4f}\t prepare: {prepare_time:.4f}\t bound: {bound_time:.4f}\t transfer: {transfer_time:.4f}\t finalize: {finalize_time:.4f}')
         print(f'Accumulated time: update_bounds func: {total_func_time:.4f}\t prepare: {total_prepare_time:.4f}\t bound: {total_bound_time:.4f}\t transfer: {transfer_time:.4f}\t finalize: {total_finalize_time:.4f}')
-        if use_beta_branching:
-            return ret_l, ret_u, lAs, ret_s, betas, new_split_history, ret_split_hints, best_intermediate_betas
-        else:
-            return ret_l, ret_u, lAs, ret_s, betas, new_split_history, None, best_intermediate_betas
+        return ret_l, ret_u, lAs, ret_s, betas, new_split_history, best_intermediate_betas
 
     def fake_forward(self, x):
         for layer in self.layers:
@@ -1370,23 +1351,27 @@ class LiRPAConvNet:
 
         return net_input, primals
 
-    def build_the_model(self, input_domain, x, no_lp=True, decision_thresh=0, use_beta_branching=False,
-                        lr_init_alpha=0.5, init_iteration=100, per_neuron_slopes=True, share_slopes=False, optimizer="adam",
-                        against_all_classes=False, loss_reduction_func='sum', lr_decay=0.98):
+    def build_the_model(self, input_domain, x, no_lp=True, 
+                        lr_init_alpha=0.5, init_iteration=100, share_slopes=False, optimizer="adam",
+                        loss_reduction_func=reduction_sum, stop_criterion_func=stop_criterion_sum(0), 
+                        lr_decay=0.98):
         self.x = x
         self.input_domain = input_domain
 
         slope_opt = None
 
+        loss_reduction_func = reduction_str2func(loss_reduction_func)
+
         # first get CROWN bounds
         if self.solve_slope:
-            self.net.init_slope((self.x,), share_slopes=share_slopes, per_neuron_slopes=per_neuron_slopes, c=self.c)
+            self.net.init_slope((self.x,), share_slopes=share_slopes, c=self.c)
             self.net.set_bound_opts({'optimize_bound_args': {'ob_iteration': init_iteration, 'ob_beta': False, 'ob_alpha': True,
-                                     'ob_alpha_share_slopes': share_slopes, 'ob_alpha_per_neuron': per_neuron_slopes, 'ob_optimizer': optimizer,
-                                     'ob_decision_thresh': decision_thresh, 'ob_early_stop': False, 'ob_log': False,
-                                     'ob_start_idx': 99, 'ob_keep_best': True, 'ob_update_by_layer': True,
-                                     'ob_lr': lr_init_alpha, 'ob_get_heuristic': use_beta_branching,
-                                     'ob_loss_reduction_func': loss_reduction_func, 'ob_against_all_classes': against_all_classes,
+                                     'ob_alpha_share_slopes': share_slopes, 'ob_optimizer': optimizer,
+                                     'ob_early_stop': False, 'ob_verbose': 0,
+                                     'ob_keep_best': True, 'ob_update_by_layer': True,
+                                     'ob_lr': lr_init_alpha, 'ob_init': False,
+                                     'ob_loss_reduction_func': loss_reduction_func, 
+                                     'ob_stop_criterion_func': stop_criterion_func, 
                                      'ob_lr_decay': lr_decay}})
             lb, ub = self.net.compute_bounds(x=(x,), IBP=False, C=self.c, method='CROWN-Optimized', return_A=False,
                                                      bound_upper=False)
@@ -1400,13 +1385,13 @@ class LiRPAConvNet:
         # self.layer_names.sort()
 
         # update bounds
-        print('initial CROWN bounds:', lb, ub)
+        print('initial alpha-CROWN bounds:', lb, ub)
         primals, duals, mini_inp = None, None, None
         # mini_inp, primals = self.get_primals(self.A_dict)
         lb, ub, pre_relu_indices = self.get_candidate(self.net, lb, lb + 99)  # primals are better upper bounds
         mask, lA = self.get_mask_lA_parallel(self.net)
 
-        if not self.simplify or lb[-1]>=decision_thresh:
+        if not self.simplify or stop_criterion_func(lb[-1]):
             history = [[[], []] for _ in range(len(self.net.relus))]
             return ub[-1], lb[-1], mini_inp, duals, primals, mask[0], lA[0], lb, ub, pre_relu_indices, slope_opt, history
 
@@ -1417,11 +1402,12 @@ class LiRPAConvNet:
 
 
     def build_the_model_with_refined_bounds(self, input_domain, x, refined_lower_bounds, refined_upper_bounds, 
-                        no_lp=True, decision_thresh=0, use_beta_branching=False,
-                        lr_init_alpha=0.5, init_iteration=100, per_neuron_slopes=True, share_slopes=False, optimizer="adam",
-                        against_all_classes=False, loss_reduction_func='sum', lr_decay=0.98):
+                        no_lp=True, lr_init_alpha=0.5, init_iteration=100, share_slopes=False, optimizer="adam",
+                        loss_reduction_func=reduction_sum, stop_criterion_func=stop_criterion_sum(0), lr_decay=0.98):
         self.x = x
         self.input_domain = input_domain
+
+        loss_reduction_func = reduction_str2func(loss_reduction_func)
 
         slope_opt = None
         ######## using bab_verification_mip_refine.py ########
@@ -1430,13 +1416,14 @@ class LiRPAConvNet:
 
         # first get CROWN bounds
         if self.solve_slope:
-            self.net.init_slope((self.x,), share_slopes=share_slopes, per_neuron_slopes=per_neuron_slopes)
+            self.net.init_slope((self.x,), share_slopes=share_slopes)
             self.net.set_bound_opts({'optimize_bound_args': {'ob_iteration': init_iteration, 'ob_beta': False, 'ob_alpha': True,
-                                     'ob_alpha_share_slopes': share_slopes, 'ob_alpha_per_neuron': per_neuron_slopes, 'ob_optimizer': optimizer,
-                                     'ob_decision_thresh': decision_thresh, 'ob_early_stop': False, 'ob_log': False,
-                                     'ob_start_idx': 99, 'ob_keep_best': True, 'ob_update_by_layer': True,
-                                     'ob_lr': lr_init_alpha, 'ob_get_heuristic': use_beta_branching,
-                                     'ob_loss_reduction_func': loss_reduction_func, 'ob_against_all_classes': against_all_classes,
+                                     'ob_alpha_share_slopes': share_slopes, 'ob_optimizer': optimizer,
+                                     'ob_early_stop': False, 'ob_verbose': 0,
+                                     'ob_keep_best': True, 'ob_update_by_layer': True,
+                                     'ob_lr': lr_init_alpha, 'ob_init': False,
+                                     'ob_loss_reduction_func': loss_reduction_func, 
+                                     'ob_stop_criterion_func': stop_criterion_func, 
                                      'ob_lr_decay': lr_decay}})
 
             #################
@@ -1452,17 +1439,17 @@ class LiRPAConvNet:
             lb, ub = self.net.compute_bounds(x=(x,), IBP=False, C=None, method='crown-optimized', return_A=False,
                                         new_interval=new_interval, bound_upper=False)
                                         #reference_bounds=reference_bounds, bound_upper=False)
-            print("opt crown with mip refined bounds:", lb, ub)
+            print("alpha-CROWN with intermediate bounds from MIP:", lb, ub)
             slope_opt = self.get_slope(self.net)[0]
             lb, ub, pre_relu_indices = self.get_candidate(self.net, lb, lb + 99)  # primals are better upper bounds
             #################
 
-            if False and lb[-1]<decision_thresh:
+            if False and stop_criterion_func(lb[-1]):
                 #################
                 # using refined bounds with LP
                 glb = self.build_the_model_lp(lb, ub)
                 lb[-1] = torch.tensor([[glb]])
-                print("lp with mip refined bounds:", lb[-1])
+                print("LP with intermediate bounds from MIP:", lb[-1])
                 # #################
             
         else:
@@ -1708,7 +1695,7 @@ class LiRPAConvNet:
 
 
         self.model.update()
-        print('finished building gurobi lp model, calling optimize function')
+        print('Finished building Gurobi LP model. Start solving the LP!')
         # import pdb; pdb.set_trace()
         guro_start = time.time()
         # self.model.setParam("PreSolve", 0)
@@ -1718,7 +1705,11 @@ class LiRPAConvNet:
         self.gurobi_vars[-1][0].UB = 100000
         self.model.setObjective(self.gurobi_vars[-1][0], grb.GRB.MINIMIZE)
         # self.model.write("save.lp")
-        self.model.optimize()
+        try:
+            self.model.optimize()
+        except grb.GurobiError as e: 
+            handle_gurobi_error(e.message)
+
 
         # for c in self.model.getConstrs():
         #     print('The dual value of %s : %g %g'%(c.constrName,c.pi, c.slack))
@@ -1727,7 +1718,7 @@ class LiRPAConvNet:
         self.check_optimization_success()
 
         guro_end = time.time()
-        print('Gurobi solved the lp with ', guro_end - guro_start)
+        print('Gurobi solved the LP with time', guro_end - guro_start)
 
         glb = self.gurobi_vars[-1][0].X
         lower_bounds[-1] = torch.tensor([glb]).to(lower_bounds[0].device)
@@ -1774,7 +1765,8 @@ class LiRPAConvNet:
                 continue
         return glb
 
-    def build_the_model_mip(self, lower_bounds, upper_bounds, timeout):
+
+    def build_the_model_mip(self, lower_bounds, upper_bounds, timeout, mip_multi_proc=None, mip_threads=1):
         """
         Before the first branching, we build the model and create a mask matrix
         Output: relu_mask, current intermediate upper and lower bounds, a list of
@@ -1791,16 +1783,21 @@ class LiRPAConvNet:
         x = self.x
         input_domain = self.input_domain
 
+        # setting for aws instance
+        # mip_multi_proc = 4
+        # mip_threads = 4
+        if mip_multi_proc is None:
+            mip_multi_proc = multiprocessing.cpu_count()
+            print("preset mip_multi_proc as default setting:", mip_multi_proc)
+
         # Initialize the model
-        NUMPROCESSES = 4
-        THREADS = 4
         self.model = grb.Model()
         self.model.setParam('OutputFlag', False)
-        self.model.setParam('Threads', THREADS)
+        self.model.setParam('Threads', mip_threads)
         self.model.setParam("FeasibilityTol", 2e-5)
         self.model.setParam('TimeLimit', timeout)
-        print(f"NUMPROCESSES: {NUMPROCESSES}, THREADS: {THREADS}")
-        
+        print(f"mip_multi_proc: {mip_multi_proc}, mip_threads: {mip_threads}, total threads used: {mip_multi_proc*mip_threads}")
+        build_mip_time = time.time()
 
         # keep a record of model's information
         self.gurobi_vars = []
@@ -1911,6 +1908,7 @@ class LiRPAConvNet:
                 out_lbs = lower_bounds[relu_idx]
                 out_ubs = upper_bounds[relu_idx]
                 # print("conv", layer_idx, relu_idx, lower_bounds[relu_idx].shape, layer.weight.shape, layer.bias.shape)
+                gvars_array = np.array(self.gurobi_vars[-1])
 
                 for out_chan_idx in range(out_lbs.size(1)):
                     out_chan_vars = []
@@ -1921,18 +1919,46 @@ class LiRPAConvNet:
                             lin_expr = layer.bias[out_chan_idx].item()
 
                             for in_chan_idx in range(layer.weight.shape[1]):
-                                for ker_row_idx in range(layer.weight.shape[2]):
-                                    in_row_idx = -layer.padding[0] + layer.stride[0] * out_row_idx + ker_row_idx
-                                    if (in_row_idx < 0) or (in_row_idx == pre_lb_size[2]):
-                                        # This is padding -> value of 0
-                                        continue
-                                    for ker_col_idx in range(layer.weight.shape[3]):
-                                        in_col_idx = -layer.padding[1] + layer.stride[1] * out_col_idx + ker_col_idx
-                                        if (in_col_idx < 0) or (in_col_idx == pre_lb_size[3]):
-                                            # This is padding -> value of 0
-                                            continue
-                                        coeff = layer.weight[out_chan_idx, in_chan_idx, ker_row_idx, ker_col_idx].item()
-                                        lin_expr += coeff * self.gurobi_vars[-1][in_chan_idx][in_row_idx][in_col_idx]
+
+                                # new version of conv layer for building mip by skipping kernel loops
+                                ker_row_min, ker_row_max = 0, layer.weight.shape[2]
+                                in_row_idx_min = -layer.padding[0] + layer.stride[0] * out_row_idx
+                                in_row_idx_max = -layer.padding[0] + layer.stride[0] * out_row_idx + layer.weight.shape[2] - 1
+                                if in_row_idx_min < 0: ker_row_min = 0 - in_row_idx_min
+                                if in_row_idx_max >= pre_lb_size[2]: ker_row_max = ker_row_max - in_row_idx_max + pre_lb_size[2] -1
+                                in_row_idx_min, in_row_idx_max = max(in_row_idx_min, 0), min(in_row_idx_max, pre_lb_size[2] - 1)
+
+                                ker_col_min, ker_col_max = 0, layer.weight.shape[3]
+                                in_col_idx_min = -layer.padding[1] + layer.stride[1] * out_col_idx
+                                in_col_idx_max = -layer.padding[1] + layer.stride[1] * out_col_idx + layer.weight.shape[3] - 1
+                                if in_col_idx_min < 0: ker_col_min = 0 - in_col_idx_min
+                                if in_col_idx_max >= pre_lb_size[3]: ker_col_max = ker_col_max - in_col_idx_max + pre_lb_size[3] -1
+                                in_col_idx_min, in_col_idx_max = max(in_col_idx_min, 0), min(in_col_idx_max, pre_lb_size[3] - 1)
+
+                                coeffs = layer.weight[out_chan_idx, in_chan_idx, ker_row_min:ker_row_max, ker_col_min:ker_col_max].reshape(-1)
+
+                                gvars = gvars_array[in_chan_idx, in_row_idx_min:in_row_idx_max+1, in_col_idx_min:in_col_idx_max+1].reshape(-1)
+                                lin_expr += grb.LinExpr(coeffs, gvars)
+                                # print(lin_expr)
+                                # exit()
+
+                                # old version of conv layer for building mip
+                                # for ker_row_idx in range(layer.weight.shape[2]):
+                                #     in_row_idx = -layer.padding[0] + layer.stride[0] * out_row_idx + ker_row_idx
+                                #     if (in_row_idx < 0) or (in_row_idx == pre_lb_size[2]):
+                                #         # This is padding -> value of 0
+                                #         continue
+                                #     for ker_col_idx in range(layer.weight.shape[3]):
+                                #         in_col_idx = -layer.padding[1] + layer.stride[1] * out_col_idx + ker_col_idx
+                                #         if (in_col_idx < 0) or (in_col_idx == pre_lb_size[3]):
+                                #             # This is padding -> value of 0
+                                #             continue
+                                #         # print(in_row_idx, in_col_idx)
+                                #         coeff = layer.weight[out_chan_idx, in_chan_idx, ker_row_idx, ker_col_idx].item()
+                                #         lin_expr += coeff * self.gurobi_vars[-1][in_chan_idx][in_row_idx][in_col_idx]
+                                # print(lin_expr)
+                                # exit()
+
                             out_lb = out_lbs[0, out_chan_idx, out_row_idx, out_col_idx].item()
                             out_ub = out_ubs[0, out_chan_idx, out_row_idx, out_col_idx].item()
                             v = self.model.addVar(lb=out_lb, ub=out_ub,
@@ -2054,6 +2080,9 @@ class LiRPAConvNet:
                 padding = layer.padding[0]
                 output_x = output_y = (2 * padding + input_x - (layer.stride[0] - 1))//layer.stride[0]
                 chan_num = len(self.gurobi_vars[-1])
+
+                pre_ubs = layer(F.relu(upper_bounds[relu_idx].squeeze(0)))
+
                 for out_chan_idx in range(chan_num):
                     out_chan_vars = []
                     for out_row_idx in range(output_x):
@@ -2077,7 +2106,7 @@ class LiRPAConvNet:
                                     a = self.model.addVar(vtype=grb.GRB.BINARY)
                                     a_sum += a
                                     self.model.addConstr(v >= var)
-                                    self.model.addConstr(v <= var + (1-a)*1000)
+                                    self.model.addConstr(v <= var + (1-a)*pre_ubs[out_chan_idx,out_row_idx,out_col_idx].item())
                                     self.model.update()
                             self.model.addConstr(a_sum == 1)
                             self.model.update()
@@ -2122,12 +2151,14 @@ class LiRPAConvNet:
 
             layer_idx += 1
 
+        print("build_mip_time:", time.time()-build_mip_time)
+
         if self.simplify:
             # Assert that this is as expected a network with a single output
             assert len(self.gurobi_vars[-1]) == 1, "Network doesn't have scalar output if simplified"
 
             self.model.update()
-            print('finished building gurobi mip model, calling optimize function')
+            print('finished building Gurobi MIP model, calling optimize function')
             # import pdb; pdb.set_trace()
             guro_start = time.time()
             # self.model.setParam("PreSolve", 0)
@@ -2138,8 +2169,10 @@ class LiRPAConvNet:
             self.gurobi_vars[-1][0].UB = 100000
             self.model.setObjective(self.gurobi_vars[-1][0], grb.GRB.MINIMIZE)
             # self.model.write("save.mip")
-            self.model.optimize()
-
+            try:
+                self.model.optimize()
+            except grb.GurobiError as e: 
+                handle_gurobi_error(e.message)
             # for c in self.model.getConstrs():
             #     print('The dual value of %s : %g %g'%(c.constrName,c.pi, c.slack))
 
@@ -2147,7 +2180,7 @@ class LiRPAConvNet:
             self.check_optimization_success()
 
             guro_end = time.time()
-            print('Gurobi solved the mip with ', guro_end - guro_start, "second")
+            print('Gurobi solved the MIP with ', guro_end - guro_start, "seconds")
 
             glb = self.gurobi_vars[-1][0].X
             lower_bounds[-1] = torch.tensor([glb]).to(lower_bounds[0].device)
@@ -2176,7 +2209,7 @@ class LiRPAConvNet:
         else:
             # not simplified directly after opt crown init bounds
             self.model.update()
-            print('finished building gurobi mip model, calling optimize function')
+            print('finished building Gurobi MIP model, calling optimize function')
             lb = lower_bounds[-1][0]
             print(lb)
             candidates, candidate_neuron_ids = [], []
@@ -2197,7 +2230,7 @@ class LiRPAConvNet:
             # MULTITHREAD
             global multiprocess_mip_model, stop_multiprocess
             multiprocess_mip_model = self.model
-            with multiprocessing.Pool(NUMPROCESSES) as pool:
+            with multiprocessing.Pool(mip_multi_proc) as pool:
                 solver_result = pool.map(mip_solver_lb, candidates)
             
             multiprocess_mip_model = None
@@ -2208,7 +2241,6 @@ class LiRPAConvNet:
                 lb[pidx] = vlb
                 status[pidx]  = s
             return lb, status
-
 
 
     def compute_ratio(self, lower_bound, upper_bound):
@@ -2297,10 +2329,11 @@ class LiRPAConvNet:
         return score
 
 
-    def build_the_model_mip_refine(self, lower_bounds, upper_bounds,decision_thresh=0, use_beta_branching=False,
-                lr_init_alpha=0.5, per_neuron_slopes=True, share_slopes=False, optimizer="adam", 
-                against_all_classes=True, loss_reduction_func='sum', lr_decay=0.98,
-                score=None, FSB_sort=True, topk_filter=1.):
+    def build_the_model_mip_refine(self, lower_bounds, upper_bounds, 
+                lr_init_alpha=0.5, share_slopes=False, optimizer="adam",
+                loss_reduction_func=reduction_sum, 
+                stop_criterion_func=stop_criterion_min(1e-4), lr_decay=0.98,
+                score=None, FSB_sort=True, topk_filter=1., mip_multi_proc=None, mip_threads=1, mip_perneuron_refine_timeout=15):
         """
         Before the first branching, we build the model and create a mask matrix
         Output: relu_mask, current intermediate upper and lower bounds, a list of
@@ -2316,6 +2349,20 @@ class LiRPAConvNet:
         new_relu_mask = []
         x = self.x
         input_domain = self.input_domain
+        loss_reduction_func = reduction_str2func(loss_reduction_func)
+
+        # preset the args for incomplete full crown with refined bounds
+        self.net.init_slope((self.x,), share_slopes=share_slopes, c=self.c)
+        self.net.set_bound_opts({'optimize_bound_args': {'ob_iteration': 100, 'ob_beta': False, 'ob_alpha': True,
+                                     'ob_alpha_share_slopes': share_slopes, 'ob_optimizer': optimizer,
+                                     'ob_early_stop': False, 'ob_verbose': 0,
+                                     'ob_keep_best': True, 'ob_update_by_layer': True,
+                                     'ob_lr': lr_init_alpha, 'ob_init': False,
+                                     'ob_loss_reduction_func': loss_reduction_func, 
+                                     'ob_stop_criterion_func': stop_criterion_func, 
+                                     'ob_lr_decay': lr_decay}})
+
+        lb_refined, ub_refined = None, None
 
         # Initialize the model
         self.model = grb.Model()
@@ -2324,13 +2371,21 @@ class LiRPAConvNet:
 
         #############
         # Config the hyperparameters for intermeidate bounds refinement with mip
-        THREADS = 1
-        NUMPROCESSES = 8
-        self.model.setParam('TimeLimit', 15)
+
+        # default setting for aws instance
+        # mip_threads = 1
+        # mip_multi_proc = 8
+        if mip_multi_proc is None:
+            mip_multi_proc = multiprocessing.cpu_count()
+            print("preset mip_multi_proc as default setting:", mip_multi_proc)
+
+        self.model.setParam('TimeLimit', mip_perneuron_refine_timeout)
         self.model.setParam('MIPGap', 1e-2)  # Relative gap between primal and dual.
         self.model.setParam('MIPGapAbs', 1e-2)  # Absolute gap between primal and dual.
-        self.model.setParam('Threads', THREADS)
-        print(f"NUMPROCESSES: {NUMPROCESSES}, THREADS: {THREADS}")
+        self.model.setParam('Threads', mip_threads)
+        print(f"mip_multi_proc: {mip_multi_proc}, mip_threads: {mip_threads},"
+                f"total threads used: {mip_multi_proc*mip_threads}, mip_perneuron_refine_timeout: {mip_perneuron_refine_timeout}")
+        print(f"[total time budget for MIP: {mip_refine_timeout}]\n")
 
         refine_start_time = time.time()
         #############
@@ -2378,8 +2433,9 @@ class LiRPAConvNet:
         global multiprocess_mip_model, mip_refine_time_start
         mip_refine_time_start = time.time()
         # print(len(self.layers), len(self.net.relus), len(lower_bounds))
-
+        last_relu_layer_refined = False
         for layer in self.layers:
+            this_layer_refined = False
             new_layer_gurobi_vars = []
             if type(layer) is nn.Linear:
                 
@@ -2408,7 +2464,7 @@ class LiRPAConvNet:
                     self.model.update()
 
                     # if relu_idx == 1 and (out_lb * out_ub < 0):
-                    if (relu_idx >= 1 and relu_idx < len(self.net.relus)) and (out_lb * out_ub < 0) and (time.time() - mip_refine_time_start<MIP_REFINE_TIME_THRESHOLD):
+                    if (relu_idx >= 1 and relu_idx < len(self.net.relus)) and (out_lb * out_ub < 0) and (time.time() - mip_refine_time_start<mip_refine_timeout):
                         candidates.append(v.VarName)
                         candidate_neuron_ids.append(neuron_idx)
                     
@@ -2429,31 +2485,96 @@ class LiRPAConvNet:
                     vi.LB = -np.inf
                     vi.UB = np.inf
 
-                if need_refine and (relu_idx >= 1 and relu_idx < len(self.net.relus)) and (time.time() - mip_refine_time_start<MIP_REFINE_TIME_THRESHOLD):
+                if need_refine and (relu_idx >= 1 and relu_idx < len(self.net.relus)) and (time.time() - mip_refine_time_start<mip_refine_timeout):
                     multiprocess_mip_model = self.model
                     refine_time = time.time()
-                    with multiprocessing.Pool(NUMPROCESSES) as pool:
-                        solver_result = pool.map(mip_solver, candidates, chunksize=1)
 
-                    lb_refined_sum, ub_refined_sum, refined_num = 0., 0., 0
-                    for (vlb, vub, refined), neuron_idx in zip(solver_result, candidate_neuron_ids):
-                        if refined:
-                            # v = new_layer_gurobi_vars[neuron_idx]
-                            refined_num += 1
-                            lb_refined_sum += vlb-lower_bounds[relu_idx][0, neuron_idx]
-                            ub_refined_sum += upper_bounds[relu_idx][0, neuron_idx]-vub
-                            lower_bounds[relu_idx][0, neuron_idx] = vlb
-                            upper_bounds[relu_idx][0, neuron_idx] = vub
-                            # v.LB = vlb
-                            # v.UB = vub
-                    refine_time = time.time() - refine_time
-                    print(f"refined {refined_num} nodes out of {len(candidates)} unstable nodes, lb improved {lb_refined_sum}, ub improved {ub_refined_sum}, time {refine_time:.4f}")
-                    if refined_num>0: 
-                        maximum_refined_relu_layers = relu_idx
+                    #####################
+                    # candidates = [candidates[ci] for ci in range(10)]
+                    # candidate_neuron_ids = [candidate_neuron_ids[ci] for ci in range(10)]
+                    #####################
+
+                    if relu_idx == 1:
+                        # the second relu layer where mip refine starts
+                        with multiprocessing.Pool(mip_multi_proc) as pool:
+                            solver_result = pool.map(mip_solver, candidates, chunksize=1)
+
+                        lb_refined_sum, ub_refined_sum, refined_num = 0., 0., 0
+                        for (vlb, vub, refined), neuron_idx in zip(solver_result, candidate_neuron_ids):
+                            if refined:
+                                # v = new_layer_gurobi_vars[neuron_idx]
+                                refined_num += 1
+                                lb_refined_sum += vlb-lower_bounds[relu_idx][0, neuron_idx]
+                                ub_refined_sum += upper_bounds[relu_idx][0, neuron_idx]-vub
+                                lower_bounds[relu_idx][0, neuron_idx] = vlb
+                                upper_bounds[relu_idx][0, neuron_idx] = vub
+                                # v.LB = vlb
+                                # v.UB = vub
+                        refine_time = time.time() - refine_time
+                        print(f"MIP improved {refined_num} nodes out of {len(candidates)} unstable nodes, lb improved {lb_refined_sum}, ub improved {ub_refined_sum}, time {refine_time:.4f}")
+                        if refined_num > 0: 
+                            maximum_refined_relu_layers = relu_idx
+                            this_layer_refined = True
+                            last_relu_layer_refined = True
+                        else:
+                            need_refine = False
+                            last_relu_layer_refined = False
+                        print("maximum relu layer improved by MIP so far", maximum_refined_relu_layers, "last_relu_layer_refined:", last_relu_layer_refined)
+                        self.model.update()
+
                     else:
-                        need_refine = False
-                    print("maximum relu layer refined so far", maximum_refined_relu_layers)
-                    self.model.update()
+                        with multiprocessing.Pool(mip_multi_proc) as pool:
+                            solver_result = pool.map_async(mip_solver, candidates, chunksize=1)
+
+                            if last_relu_layer_refined and (time.time() - mip_refine_time_start<mip_refine_timeout):
+                                print(f"Run alpha-CROWN after refining layer {layer_idx-2} and relu idx {relu_idx-1}")
+                                # using refined bounds with init opt crown for the previous optimized bounds
+                                new_interval, reference_bounds = {}, {}
+                                # for i, layer in enumerate(self.net.relus):
+                                # only refined with the second relu layer
+                                for i, layer in enumerate(self.net.relus):
+                                    # only refined with the relu layers that are refined by mip before
+                                    if i>=(maximum_refined_relu_layers+1): break
+                                    nd = self.net.relus[i].inputs[0].name
+                                    print(i, nd, lower_bounds[i].shape)
+                                    new_interval[nd] = [lower_bounds[i], upper_bounds[i]]
+                                    reference_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
+                                lb_refined, ub_refined = self.net.compute_bounds(x=(x,), IBP=False, C=self.c, method='CROWN-optimized', return_A=False,
+                                                            reference_bounds=reference_bounds, bound_upper=False)
+                                # lb, ub = self.net.compute_bounds(x=(x,), IBP=False, C=self.c, method='CROWN-Optimized', return_A=False,
+                                                                     # bound_upper=False)
+                                print("alpha-CROWN with intermediate bounds by MIP:", lb_refined, ub_refined)
+
+                                if lb_refined.min().item()>=0:
+                                    print(f"min of alpha-CROWN bounds {lb_refined.min().item()}>=0, verified!")
+                                    pool.terminate()
+                                    break
+                                last_relu_layer_refined = False
+
+                            solver_result = solver_result.get()
+
+                        lb_refined_sum, ub_refined_sum, refined_num = 0., 0., 0
+                        for (vlb, vub, refined), neuron_idx in zip(solver_result, candidate_neuron_ids):
+                            if refined:
+                                # v = new_layer_gurobi_vars[neuron_idx]
+                                refined_num += 1
+                                lb_refined_sum += vlb-lower_bounds[relu_idx][0, neuron_idx]
+                                ub_refined_sum += upper_bounds[relu_idx][0, neuron_idx]-vub
+                                lower_bounds[relu_idx][0, neuron_idx] = vlb
+                                upper_bounds[relu_idx][0, neuron_idx] = vub
+                                # v.LB = vlb
+                                # v.UB = vub
+                        refine_time = time.time() - refine_time
+                        print(f"MIP improved {refined_num} nodes out of {len(candidates)} unstable nodes, lb improved {lb_refined_sum}, ub improved {ub_refined_sum}, time {refine_time:.4f}")
+                        if refined_num>0: 
+                            maximum_refined_relu_layers = relu_idx
+                            this_layer_refined = True
+                            last_relu_layer_refined = True
+                        else:
+                            need_refine = False
+                            last_relu_layer_refined = False
+                        print("maximum relu layer improved by MIP so far", maximum_refined_relu_layers)
+                        self.model.update()
 
             elif type(layer) is nn.Conv2d:
                 ###########
@@ -2468,6 +2589,7 @@ class LiRPAConvNet:
                 out_lbs = lower_bounds[relu_idx]
                 out_ubs = upper_bounds[relu_idx]
                 # print("conv", layer_idx, relu_idx, lower_bounds[relu_idx].shape, layer.weight.shape, layer.bias.shape)
+                gvars_array = np.array(self.gurobi_vars[-1])
 
                 candidates = []
                 candidate_neuron_ids = []
@@ -2480,18 +2602,42 @@ class LiRPAConvNet:
                             lin_expr = layer.bias[out_chan_idx].item()
 
                             for in_chan_idx in range(layer.weight.shape[1]):
-                                for ker_row_idx in range(layer.weight.shape[2]):
-                                    in_row_idx = -layer.padding[0] + layer.stride[0] * out_row_idx + ker_row_idx
-                                    if (in_row_idx < 0) or (in_row_idx == pre_lb_size[2]):
-                                        # This is padding -> value of 0
-                                        continue
-                                    for ker_col_idx in range(layer.weight.shape[3]):
-                                        in_col_idx = -layer.padding[1] + layer.stride[1] * out_col_idx + ker_col_idx
-                                        if (in_col_idx < 0) or (in_col_idx == pre_lb_size[3]):
-                                            # This is padding -> value of 0
-                                            continue
-                                        coeff = layer.weight[out_chan_idx, in_chan_idx, ker_row_idx, ker_col_idx].item()
-                                        lin_expr += coeff * self.gurobi_vars[-1][in_chan_idx][in_row_idx][in_col_idx]
+
+                                # new version of conv layer for building mip by skipping kernel loops
+                                ker_row_min, ker_row_max = 0, layer.weight.shape[2]
+                                in_row_idx_min = -layer.padding[0] + layer.stride[0] * out_row_idx
+                                in_row_idx_max = -layer.padding[0] + layer.stride[0] * out_row_idx + layer.weight.shape[2] - 1
+                                if in_row_idx_min < 0: ker_row_min = 0 - in_row_idx_min
+                                if in_row_idx_max >= pre_lb_size[2]: ker_row_max = ker_row_max - in_row_idx_max + pre_lb_size[2] -1
+                                in_row_idx_min, in_row_idx_max = max(in_row_idx_min, 0), min(in_row_idx_max, pre_lb_size[2] - 1)
+
+                                ker_col_min, ker_col_max = 0, layer.weight.shape[3]
+                                in_col_idx_min = -layer.padding[1] + layer.stride[1] * out_col_idx
+                                in_col_idx_max = -layer.padding[1] + layer.stride[1] * out_col_idx + layer.weight.shape[3] - 1
+                                if in_col_idx_min < 0: ker_col_min = 0 - in_col_idx_min
+                                if in_col_idx_max >= pre_lb_size[3]: ker_col_max = ker_col_max - in_col_idx_max + pre_lb_size[3] -1
+                                in_col_idx_min, in_col_idx_max = max(in_col_idx_min, 0), min(in_col_idx_max, pre_lb_size[3] - 1)
+
+                                coeffs = layer.weight[out_chan_idx, in_chan_idx, ker_row_min:ker_row_max, ker_col_min:ker_col_max].reshape(-1)
+
+                                gvars = gvars_array[in_chan_idx, in_row_idx_min:in_row_idx_max+1, in_col_idx_min:in_col_idx_max+1].reshape(-1)
+                                lin_expr += grb.LinExpr(coeffs, gvars)
+
+                                # old version of conv layer for building mip
+                                # for ker_row_idx in range(layer.weight.shape[2]):
+                                #     in_row_idx = -layer.padding[0] + layer.stride[0] * out_row_idx + ker_row_idx
+                                #     if (in_row_idx < 0) or (in_row_idx == pre_lb_size[2]):
+                                #         # This is padding -> value of 0
+                                #         continue
+                                #     for ker_col_idx in range(layer.weight.shape[3]):
+                                #         in_col_idx = -layer.padding[1] + layer.stride[1] * out_col_idx + ker_col_idx
+                                #         if (in_col_idx < 0) or (in_col_idx == pre_lb_size[3]):
+                                #             # This is padding -> value of 0
+                                #             continue
+                                #         # print(in_row_idx, in_col_idx)
+                                #         coeff = layer.weight[out_chan_idx, in_chan_idx, ker_row_idx, ker_col_idx].item()
+                                #         lin_expr += coeff * self.gurobi_vars[-1][in_chan_idx][in_row_idx][in_col_idx]
+
                             out_lb = out_lbs[0, out_chan_idx, out_row_idx, out_col_idx].item()
                             out_ub = out_ubs[0, out_chan_idx, out_row_idx, out_col_idx].item()
                             v = self.model.addVar(lb=out_lb, ub=out_ub,
@@ -2500,7 +2646,7 @@ class LiRPAConvNet:
                             self.model.addConstr(lin_expr == v)
                             self.model.update()
 
-                            if need_refine and (relu_idx >= 1) and (out_lb * out_ub < 0) and (time.time() - mip_refine_time_start<MIP_REFINE_TIME_THRESHOLD):
+                            if need_refine and (relu_idx >= 1) and (out_lb * out_ub < 0) and (time.time() - mip_refine_time_start<mip_refine_timeout):
                                 candidates.append(v.VarName)
                                 candidate_neuron_ids.append((out_chan_idx, out_row_idx, out_col_idx))
 
@@ -2509,10 +2655,10 @@ class LiRPAConvNet:
                     new_layer_gurobi_vars.append(out_chan_vars)
 
                 ####### Comment out the following condition if disable refine for conv layers #######
-                if False and need_refine and relu_idx >= 1 and (time.time() - mip_refine_time_start<MIP_REFINE_TIME_THRESHOLD):
+                if False and need_refine and relu_idx >= 1 and (time.time() - mip_refine_time_start<mip_refine_timeout):
                     multiprocess_mip_model = self.model
                     refine_time = time.time()
-                    with multiprocessing.Pool(NUMPROCESSES) as pool:
+                    with multiprocessing.Pool(mip_multi_proc) as pool:
                         solver_result = pool.map(mip_solver, candidates)
 
                     lb_refined_sum, ub_refined_sum, refined_num = 0., 0., 0
@@ -2527,9 +2673,11 @@ class LiRPAConvNet:
                             # v.LB = vlb
                             # v.UB = vub
                     refine_time = time.time() - refine_time
-                    print(f"refined {refined_num} nodes out of {len(candidates)} unstable nodes, lb improved {lb_refined_sum}, ub improved {ub_refined_sum}, time {refine_time:.4f}")
-                    if refined_num>0: maximum_refined_relu_layers = relu_idx
-                    print("maximum relu layer refined so far", maximum_refined_relu_layers)
+                    print(f"MIP improved {refined_num} nodes out of {len(candidates)} unstable nodes, lb improved {lb_refined_sum}, ub improved {ub_refined_sum}, time {refine_time:.4f}")
+                    if refined_num>0: 
+                        maximum_refined_relu_layers = relu_idx
+                        this_layer_refined = True
+                    print("maximum relu layer imporved by MIP so far", maximum_refined_relu_layers)
                     self.model.update()
 
             elif type(layer) is nn.ReLU:
@@ -2648,46 +2796,42 @@ class LiRPAConvNet:
 
             layer_idx += 1
 
+            if (time.time() - mip_refine_time_start>=mip_refine_timeout):
+                break
+
         multiprocess_mip_model, mip_refine_time_start = None, None
 
         self.model.update()
         
-        print(f'MIP refine finished with {time.time() - refine_start_time}s')
-
-        # return lower_bounds, upper_bounds
+        print(f'MIP finished with {time.time() - refine_start_time}s')
 
         slope_opt = None
-        lb, ub = lower_bounds, upper_bounds
-        primals, duals, mini_inp = None, None, None
-        self.net.init_slope((self.x,), share_slopes=share_slopes, per_neuron_slopes=per_neuron_slopes)
-        self.net.set_bound_opts({'optimize_bound_args': {'ob_iteration': 100, 'ob_beta': False, 'ob_alpha': True,
-                                     'ob_alpha_share_slopes': share_slopes, 'ob_alpha_per_neuron': per_neuron_slopes, 'ob_optimizer': optimizer,
-                                     'ob_decision_thresh': decision_thresh, 'ob_early_stop': False, 'ob_log': False,
-                                     'ob_start_idx': 99, 'ob_keep_best': True, 'ob_update_by_layer': True,
-                                     'ob_lr': lr_init_alpha, 'ob_get_heuristic': use_beta_branching,
-                                     'ob_loss_reduction_func': loss_reduction_func, 'ob_against_all_classes': against_all_classes,
-                                     'ob_lr_decay': lr_decay}})
         
-        #################
-        # using refined bounds with init opt crown
-        new_interval, reference_bounds = {}, {}
-        # for i, layer in enumerate(self.net.relus):
-        # only refined with the second relu layer
-        for i, layer in enumerate(self.net.relus):
-            # only refined with the relu layers that are refined by mip before
-            if i>=(maximum_refined_relu_layers+1): break
-            nd = self.net.relus[i].inputs[0].name
-            print(i, nd, lb[i].shape)
-            new_interval[nd] = [lb[i], ub[i]]
-            reference_bounds[nd] = [lb[i], ub[i]]
-        lb, ub = self.net.compute_bounds(x=(x,), IBP=False, C=self.c, method='crown-optimized', return_A=False,
-                                    reference_bounds=reference_bounds, bound_upper=False)
-                                    #new_interval=new_interval, bound_upper=False)
-        print("opt crown with mip refined bounds:", lb, ub)
-        slope_opt = self.get_slope(self.net)[0]
-        lb, ub, pre_relu_indices = self.get_candidate(self.net, lb, lb + 99)  # primals are better upper bounds
+        primals, duals, mini_inp = None, None, None
+
+        if last_relu_layer_refined:
+            print(f"Run final alpha-CROWN after MIP solving on layer {layer_idx-1} and relu idx {relu_idx}")
+            # using refined bounds with init opt crown
+            new_interval, reference_bounds = {}, {}
+            # for i, layer in enumerate(self.net.relus):
+            # only refined with the second relu layer
+            for i, layer in enumerate(self.net.relus):
+                # only refined with the relu layers that are refined by mip before
+                if i>=(maximum_refined_relu_layers+1): break
+                nd = self.net.relus[i].inputs[0].name
+                print(i, nd, lower_bounds[i].shape)
+                new_interval[nd] = [lower_bounds[i], upper_bounds[i]]
+                reference_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
+            lb_refined, ub_refined = self.net.compute_bounds(x=(x,), IBP=False, C=self.c, method='CROWN-optimized', return_A=False,
+                                        reference_bounds=reference_bounds, bound_upper=False)
+            print("alpha-CROWN with intermediate bounds improved by MIP:", lb_refined, ub_refined)
+
+        if lb_refined is None:
+            return lower_bounds, upper_bounds
+
+        lb_refined, ub_refined, pre_relu_indices = self.get_candidate(self.net, lb_refined, lb_refined + 99)  # primals are better upper bounds
         mask, lA = self.get_mask_lA_parallel(self.net)
-        return lb, ub
+        return lb_refined, ub_refined
 
 
     def update_the_model_lp(self, relu_mask, lower_bounds, upper_bounds, decision, choice):
@@ -3153,7 +3297,12 @@ class LiRPAConvNet:
 multiprocess_mip_model = None
 stop_multiprocess = False
 mip_refine_time_start = None
-MIP_REFINE_TIME_THRESHOLD = 230
+mip_refine_timeout = 230
+
+def set_mip_refine_timeout(timeout):
+    global mip_refine_timeout
+    mip_refine_timeout = timeout
+    # print(f"[reset mip_refine_timeout to be {mip_refine_timeout}]\n")
 
 def mip_solver(candidate):
 
@@ -3162,7 +3311,7 @@ def mip_solver(candidate):
         if grb_model.status == 9:
             # Timed out. Get current bound.
             bound = bound_type(grb_model.objbound, reference)
-            refined = True
+            refined = bound != reference
         elif grb_model.status == 2:
             # Optimally solved.
             bound = grb_model.objbound
@@ -3180,7 +3329,10 @@ def mip_solver(candidate):
         model.setObjective(v, grb.GRB.MAXIMIZE)
         model.reset()
         model.setParam('BestBdStop', -eps)  # Terminiate as long as we find a negative upper bound.
-        model.optimize()
+        try:
+            model.optimize()
+        except grb.GurobiError as e: 
+            handle_gurobi_error(e.message)
         vub, refined, status_ub = get_grb_solution(model, out_ub, min)
         # assert status_ub != 3, "ub status 3"
         # if status_ub == 3:
@@ -3202,7 +3354,10 @@ def mip_solver(candidate):
         model.setObjective(v, grb.GRB.MINIMIZE)
         model.reset()
         model.setParam('BestBdStop', eps)  # Terminiate as long as we find a positive lower bound.
-        model.optimize()
+        try:
+            model.optimize()
+        except grb.GurobiError as e: 
+            handle_gurobi_error(e.message)
         vlb, refined, status_lb = get_grb_solution(model, out_lb, max)
         # assert status_lb != 3, "lb status 3"
         # if status_lb == 3:
@@ -3225,7 +3380,7 @@ def mip_solver(candidate):
     out_lb, out_ub = v.LB, v.UB
     refine_time = time.time()
     neuron_refined = False
-    if time.time() - mip_refine_time_start >= MIP_REFINE_TIME_THRESHOLD:
+    if time.time() - mip_refine_time_start >= mip_refine_timeout:
         return out_lb, out_ub, False
     eps = 1e-5
 
@@ -3252,7 +3407,7 @@ def mip_solver(candidate):
             # ub < 0, neuron is stable, we skip solving ub.
             vlb, status_lb, status_lb_r = out_lb, -1, -1
 
-    print("start refine for {}, [{},{}]=>[{},{}] ({},{}; {},{}), time: {:.4f}s, #vars: {}, #constrs: {}, refined: {}".format(v.VarName, out_lb, out_ub, vlb, vub,
+    print("Solving MIP for {}, [{},{}]=>[{},{}] ({},{}; {},{}), time: {:.4f}s, #vars: {}, #constrs: {}, improved: {}".format(v.VarName, out_lb, out_ub, vlb, vub,
             status_lb, status_lb_r, status_ub, status_ub_r, time.time()-refine_time, model.NumVars, model.NumConstrs, neuron_refined))
     sys.stdout.flush()
 
@@ -3268,7 +3423,10 @@ def mip_solver_lb(candidate):
     refine_time = time.time()
     model.setParam('BestBdStop', 1e-5)  # Terminiate as long as we find a positive lower bound.
     model.setObjective(v, grb.GRB.MINIMIZE)
-    model.optimize()
+    try:
+        model.optimize()
+    except grb.GurobiError as e: 
+        handle_gurobi_error(e.message)
     if model.status == 9:
         # Timed out. Get current bound.
         vlb = max(model.objbound, out_lb)
@@ -3283,7 +3441,7 @@ def mip_solver_lb(candidate):
         stop_multiprocess = True
 
     assert model.status != 3, "should not be infeasible"
-    print("start refine for {}, [{}]=>[{}], time: {}s".format(v.VarName, out_lb, vlb,
+    print("solving MIP for {}, [{}]=>[{}], time: {}s".format(v.VarName, out_lb, vlb,
             time.time()-refine_time))
     sys.stdout.flush()
     return vlb, model.status

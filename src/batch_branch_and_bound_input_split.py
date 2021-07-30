@@ -4,7 +4,7 @@ import torch
 from collections import defaultdict
 from sortedcontainers import SortedList
 
-from branch_and_bound_input_split import pick_out_batch, add_domain_parallel, InputDomain, input_split_batch
+from branching_domains_input_split import pick_out_batch, add_domain_parallel, InputDomain, input_split_batch
 from attack_pgd import AdamClipping
 
 Visited, Solve_slope = 0, False
@@ -69,7 +69,7 @@ def batch_verification(d, net, batch,  decision_thresh=0, lr_alpha=0.01, iterati
 
 def relu_bab_parallel(net, domain, x, batch=64, decision_thresh=0, iteration=20, max_subproblems_list=100000,
                       timeout=3600, record=False, lr_alpha=0.1, lr_init_alpha=0.5, model_ori=None, shape=None,
-                      per_neuron_slopes=True, share_slopes=False, adv_check=0, prop_mat=None, prop_rhs=None,
+                      share_slopes=False, adv_check=0, prop_mat=None, prop_rhs=None,
                       branching_candidates=3, branching_method=None, all_prop=None):
     start = time.time()
     prop_mat = torch.tensor(prop_mat, dtype=torch.float, device=x.device)
@@ -79,10 +79,10 @@ def relu_bab_parallel(net, domain, x, batch=64, decision_thresh=0, iteration=20,
     Visited, Solve_slope = 0, False
 
     global_ub, global_lb, _,  lower_bounds, upper_bounds, pre_relu_indices, slope, dm_l, dm_u, selected_dims = net.build_the_model(
-    domain, x, decision_thresh, lr_init_alpha, per_neuron_slopes=per_neuron_slopes, share_slopes=share_slopes, shape=shape,
+    domain, x, decision_thresh, lr_init_alpha, share_slopes=share_slopes, shape=shape,
     input_grad=branching_method=='input_grad')
 
-    # if not opt_intermediate_beta and per_neuron_slopes:
+    # if not opt_intermediate_beta:
     #     # If we are not optimizing intermediate layer bounds, we do not need to save all the intermediate alpha.
     #     # We only keep the alpha for the last layer.
     #     new_slope = defaultdict(dict)
@@ -135,8 +135,7 @@ def relu_bab_parallel(net, domain, x, batch=64, decision_thresh=0, iteration=20,
         if not Solve_slope and time.time()-start > 20 and global_lb.cpu() <= last_glb.cpu():
             net.solve_slope = True
             _, global_lb, _, lower_bounds, upper_bounds, pre_relu_indices, slope, dm_l, dm_u, selected_dims = net.build_the_model(
-                domain, x, decision_thresh, lr_init_alpha, per_neuron_slopes=per_neuron_slopes,
-                share_slopes=share_slopes)
+                domain, x, decision_thresh, lr_init_alpha, share_slopes=share_slopes)
 
             global_lb = global_lb.max()
 

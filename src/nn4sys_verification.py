@@ -15,11 +15,7 @@ def compute_bounds(model_v1, model_v2, input_l, input_u, x=None, eps=None):
         eps = (input_u - input_l) / 2
     ptb = PerturbationLpNorm(norm=np.inf, x_L=input_l, x_U=input_u)
     x = BoundedTensor(x, ptb).to(x.device)
-    y1 = model_v1(x)
-    # for clean 
-    # y1[:, :-2] *= (y1[:, 1:-1] <= 0).int()
-    # select = (y1[:, :-1] > 0).int()
-    l, u = model_v1.compute_bounds(x=(x,), method='forward', clr_fv=False)
+    l, u = model_v1.compute_bounds(x=(x,), method='forward')
     # check that there won't be two positions with positive values after the first 1e10 layer    
     margin = ( (u<=0).int() * 1e20 + (u>0).int() * l )[:, :-1].min(dim=-1).values
     safe_numerical_1 = (u[:, :-1].max(dim=-1).values - margin * 1e10 < 0)
@@ -28,8 +24,7 @@ def compute_bounds(model_v1, model_v2, input_l, input_u, x=None, eps=None):
 
     select = (u[:, :-1] > 0).int()
     select[:, :-1] *= ( u[:,:-2] - l[:, 1:-1]*1e10 >= 1e-8).int() # 1e-8 is a tolerance term
-    y2 = model_v2(x)
-    l, u = model_v2.compute_bounds(x=(x,), method='forward', clr_fv=False)
+    l, u = model_v2.compute_bounds(x=(x,), method='forward')
     l_final = torch.min(select * l + (1 - select) * (1e10), dim=-1).values
     u_final = torch.max(select * u + (1 - select) * (-1e10), dim=-1).values  
 
@@ -164,7 +159,7 @@ def attack_nn4sys(model_ori, model_v1, spec, onnx_path, device):
             out_model_ori = model_ori[-1](x)
             print('attack result', m)
             print('model_ori output', out_model_ori)
-            out_onnx = inference_onnx(onnx_path, [x])
+            out_onnx = inference_onnx(onnx_path, x[0].cpu().numpy())
             print('onnx output', out_onnx)
             if out_model_ori == 0:
                 return m

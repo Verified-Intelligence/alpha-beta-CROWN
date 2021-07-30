@@ -1,4 +1,5 @@
 import time
+import os
 import numpy as np
 from collections import OrderedDict, deque, defaultdict
 
@@ -11,15 +12,40 @@ from auto_LiRPA.bound_ops import *
 from auto_LiRPA.bounded_tensor import BoundedTensor, BoundedParameter
 from auto_LiRPA.parse_graph import parse_module
 from auto_LiRPA.perturbations import *
-from auto_LiRPA.utils import LinearBound, logger, eyeC, OneHotC, unpack_inputs, Patches, BoundList, Benchmarking, prod, patchesToMatrix
+from auto_LiRPA.utils import *
 from auto_LiRPA.adam_element_lr import AdamElementLR
+
+import warnings
+
+warnings.simplefilter("once")
 
 Check_against_base_lp = False  # A debugging option, used for checking against LPs. Will be removed.
 Check_against_base_lp_layer = '/21'  # Check for bounds in this layer ('/9', '/11', '/21')
 
 class BoundedModule(nn.Module):
+    """Bounded module with support for automatically computing bounds.
+
+    Args:
+        model (nn.Module): The original model to be wrapped by BoundedModule.
+
+        global_input (tuple): A dummy input to the original model. The shape of 
+        the dummy input should be consistent with the actual input to the model 
+        except for the batch dimension.
+
+        bound_opts (dict): Options for bounds. See 
+        `Bound Options <bound_opts.html>`_.
+
+        device (str or torch.device): Device of the bounded module. 
+        If 'auto', the device will be automatically inferred from the device of 
+        parameters in the original model or the dummy input.
+
+        custom_ops (dict): A dictionary of custom operators. 
+        The dictionary maps operator names to their corresponding bound classes 
+        (subclasses of `Bound`).
+
+    """
     def __init__(self, model, global_input, bound_opts={}, auto_batch_dim=True, device='auto',
-                 verbose=False):
+                 verbose=False, custom_ops={}):
         super(BoundedModule, self).__init__()
         if isinstance(model, BoundedModule):
             for key in model.__dict__.keys():
@@ -27,6 +53,7 @@ class BoundedModule(nn.Module):
             return
         self.verbose = verbose
         self.bound_opts = bound_opts
+        self.custom_ops = custom_ops
         self.auto_batch_dim = auto_batch_dim
         if device == 'auto':
             try:
@@ -37,29 +64,31 @@ class BoundedModule(nn.Module):
             self.device = device
         self.global_input = global_input
         self.ibp_relative = bound_opts.get('ibp_relative', False)   
-        self.conv_mode = bound_opts.get("conv_mode", "matrix")     
+        self.conv_mode = bound_opts.get("conv_mode", "patches")
         if auto_batch_dim:
             # logger.warning('Using automatic batch dimension inferring, which may not be correct')
             self.init_batch_size = -1
 
         state_dict_copy = copy.deepcopy(model.state_dict())
         object.__setattr__(self, 'ori_state_dict', state_dict_copy)
-        self.final_shape = model(*unpack_inputs(global_input)).shape
+        model.to(self.device)
+        self.final_shape = model(*unpack_inputs(global_input, device=self.device)).shape
         self.bound_opts.update({'final_shape': self.final_shape})
         self._convert(model, global_input)
         self._mark_perturbed_nodes()
 
         # set the default values here
-        optimize_bound_args = {'ob_iteration': 20, 'ob_beta': False, 'ob_alpha': True, 'ob_alpha_per_neuron': True, 'ob_alpha_share_slopes': False,
-                                'ob_opt_coeffs': False, 'ob_opt_bias': False,
-                               'ob_optimizer': "adam",  'ob_decision_thresh': 1000, 'ob_early_stop': False, 'ob_log': False,
-                               'ob_start_idx': 99, 'ob_keep_best': True, 'ob_update_by_layer': True, 'ob_lr': 0.5,
-                               'ob_lr_beta': 0.05, 'ob_init': False, 'ob_lower': True, 'ob_upper': False,
-                               'ob_get_heuristic': False, 'ob_single_node_split': True, 'ob_lr_intermediate_beta': 0.1,
+        optimize_bound_args = {'ob_iteration': 20, 'ob_beta': False, 'ob_alpha': True, 'ob_alpha_share_slopes': False,
+                               'ob_opt_coeffs': False, 'ob_opt_bias': False,
+                               'ob_optimizer': "adam", 'ob_verbose': 0,
+                               'ob_keep_best': True, 'ob_update_by_layer': True, 'ob_lr': 0.5,
+                               'ob_lr_beta': 0.05, 'ob_init': True,
+                               'ob_single_node_split': True, 'ob_lr_intermediate_beta': 0.1,
                                'ob_lr_coeffs': 0.01, 'ob_intermediate_beta': False, 'ob_intermediate_refinement_layers': [-1],
-                               'ob_loss_reduction_func': "sum", 'ob_input_grad': False,
-                               'ob_against_all_classes': False, 
-                               'ob_lr_decay': 0.98, 'ob_lr_dynamic_decay': None }
+                               'ob_loss_reduction_func': reduction_sum, 
+                               'ob_stop_criterion_func': lambda x: False,
+                               'ob_input_grad': False,
+                               'ob_lr_decay': 0.98 }
         # change by bound_opts
         optimize_bound_args.update(self.bound_opts.get('optimize_bound_args', {}))
         self.bound_opts.update({'optimize_bound_args': optimize_bound_args})
@@ -69,10 +98,10 @@ class BoundedModule(nn.Module):
         for l in self._modules.values():
             if isinstance(l, BoundRelu):
                 self.relus.append(l)
-        self.tanhs = []
+        self.optimizable_activations = []
         for l in self._modules.values():
-            if isinstance(l, BoundTanh):
-                self.tanhs.append(l)
+            if isinstance(l, BoundOptimizableActivation):
+                self.optimizable_activations.append(l)
 
         # Beta values for all intermediate bounds. Set to None (not used) by default.
         self.best_intermediate_betas = None
@@ -211,7 +240,6 @@ class BoundedModule(nn.Module):
             if isinstance(fv, torch.Size) or isinstance(fv, tuple):
                 fv = torch.tensor(fv, device=self.device)
             object.__setattr__(l, 'forward_value', fv)
-            object.__setattr__(l, 'fv', fv)
             # infer batch dimension
             if not hasattr(l, 'batch_dim'):
                 inp_batch_dim = [self._modules[l_pre].batch_dim for l_pre in l.input_name]
@@ -219,21 +247,26 @@ class BoundedModule(nn.Module):
                     l.batch_dim = l.infer_batch_dim(self.init_batch_size, *inp_batch_dim)
                     try:
                         logger.debug(
-                            'Batch dimension of ({})[{}]: fv shape {}, infered {}, input batch dimensions {}'.format(
+                            'Batch dimension of ({})[{}]: forward_value shape {}, infered {}, input batch dimensions {}'.format(
                                 l, l.name, l.forward_value.shape, l.batch_dim, inp_batch_dim
                             ))
                     except:
                         pass
                 except:
                     raise Exception(
-                        'Fail to infer the batch dimension of ({})[{}]: fv shape {}, input batch dimensions {}'.format(
+                        'Fail to infer the batch dimension of ({})[{}]: forward_value shape {}, input batch dimensions {}'.format(
                             l, l.name, l.forward_value.shape, inp_batch_dim
                         ))
 
-            if isinstance(l.forward_value, torch.Tensor):
-                l.default_shape = l.forward_value.shape
+            # if isinstance(l.forward_value, torch.Tensor):
+            #     l.default_shape = l.forward_value.shape
             forward_values[l.name] = l.forward_value
-            logger.debug('Forward at {}[{}], fv shape {}'.format(l, l.name, fv.shape))
+            logger.debug('Forward at {}[{}], forward_value shape {}'.format(l, l.name, fv.shape))
+
+            # Unperturbed node but it is not a root node. Save forward_value to value.
+            # (Can be used in forward bounds.)
+            if not l.from_input and len(l.inputs) > 0:
+                l.value = l.forward_value
 
             for l_next in l.output_name:
                 degree_in[l_next] -= 1
@@ -292,20 +325,16 @@ class BoundedModule(nn.Module):
                     queue.append(node_next)
         return
 
-    def _clear_and_set_new(self, new_interval, clr_fv=True):
+    def _clear_and_set_new(self, new_interval):
         for l in self._modules.values():
             if hasattr(l, 'linear'):
                 if isinstance(l.linear, tuple):
                     for item in l.linear:
                         del (item)
                 delattr(l, 'linear')
-            for attr in ['lower', 'upper', 'interval']:
+            for attr in ['lower', 'upper', 'interval', 'forward_value']:
                 if hasattr(l, attr):
                     delattr(l, attr)
-            if clr_fv:
-                for attr in ['forward_value', 'fv']:
-                    if hasattr(l, attr):
-                        delattr(l, attr)
             # Given an interval here to make IBP/CROWN start from this node
             if new_interval is not None and l.name in new_interval.keys():
                 l.interval = tuple(new_interval[l.name][:2])
@@ -315,8 +344,8 @@ class BoundedModule(nn.Module):
             if not hasattr(l, 'perturbation') or l.perturbation is None:
                 l.perturbed = False
 
-    def _set_input(self, *x, new_interval=None, clr_fv=True):
-        self._clear_and_set_new(new_interval=new_interval, clr_fv=clr_fv)
+    def _set_input(self, *x, new_interval=None):
+        self._clear_and_set_new(new_interval=new_interval)
         inputs_unpacked = unpack_inputs(x)
         for name, index in zip(self.input_name, self.input_index):
             node = self._modules[name]
@@ -377,14 +406,6 @@ class BoundedModule(nn.Module):
         for i in range(0, len(nodesIn)):
             if nodesIn[i].param is not None:
                 nodesIn[i] = nodesIn[i]._replace(param=nodesIn[i].param.to(self.device))
-
-        # FIXME: better way to handle buffers, do not hard-code it for BN!
-        # Other nodes can also have buffers.
-        bn_nodes = []
-        for n in range(len(nodesOP)):
-            if nodesOP[n].op == 'onnx::BatchNormalization':
-                bn_nodes.extend(nodesOP[n].inputs[3:])  # collect names of  running_mean and running_var
-
         global_input_unpacked = unpack_inputs(global_input)
 
         # Convert input nodes and parameters.
@@ -395,7 +416,7 @@ class BoundedModule(nn.Module):
                     value=global_input_unpacked[nodesIn[i].input_index],
                     perturbation=nodesIn[i].perturbation))
             else:
-                bound_class = BoundBuffers if n.name in bn_nodes else BoundParams
+                bound_class = BoundParams if isinstance(nodesIn[i].param, nn.Parameter) else BoundBuffers 
                 nodesIn[i] = nodesIn[i]._replace(bound_node=bound_class(
                     nodesIn[i].inputs, nodesIn[i].name, nodesIn[i].ori_name,
                     value=nodesIn[i].param, perturbation=nodesIn[i].perturbation))
@@ -414,6 +435,8 @@ class BoundedModule(nn.Module):
                     op = eval('BoundATen{}'.format(attr['operator'].capitalize()))
                 elif nodesOP[n].op.startswith('onnx::'):
                     op = eval('Bound{}'.format(nodesOP[n].op[6:]))
+                elif nodesOP[n].op in self.custom_ops:
+                    op = self.custom_ops[nodesOP[n].op]
                 else:
                     raise KeyError
             except (NameError, KeyError):
@@ -559,13 +582,6 @@ class BoundedModule(nn.Module):
         model.load_state_dict(self.ori_state_dict)
         delattr(self, 'ori_state_dict')
 
-        if self.bound_opts.get('relu') == "random_evaluation" or self.bound_opts.get('relu') == "optimized":
-            for m in self._modules.values():
-                if isinstance(m, BoundRelu):
-                    m.slope = None
-                    m.beta = None
-                    m.sparse_beta = None
-
         # The final node used in the last time calling `compute_bounds`
         self.last_final_node = None
 
@@ -579,130 +595,48 @@ class BoundedModule(nn.Module):
         if self.verbose:
             logger.info('Model converted to support bounds')
 
-    def set_relu_used_count(self, start_idx):
-        """
-        set the index of alpha of relu we used according to start_idx
-        :param start_idx: start_idx = 99 or 'inf' means the backward starting from the 1st layer
-        start_idx = 1 means the backward starting from the last layer
-        """
-        # print('start_idx', start_idx)
-        layer_idx = 0
-        relu_used = 0
-        for model in reversed(self.relus):
-            layer_idx += 1
-            if relu_used < start_idx:
-                relu_used += 1
-            # print('relu used', relu_used)
-            # print('we are using single alpha!!')
-            model.relu_used_count = relu_used  # or always = 1 if not using multiple alpha
-
-    def init_slope(self, x, per_neuron_slopes=True, share_slopes=False, method='backward', c=None):
+    def init_slope(self, x, share_slopes=False, method='backward', c=None):
         if method != 'forward':
             assert isinstance(x, tuple)
             assert method == 'backward'
             x = x[0]
 
-        # initial ReLU slope, ie, alpha, by using the "same-slope" or "adaptive" with the input x
-
-        # Assign initial alpha slopes.
-        for m in self.relus:
-            m.relu_options = "adaptive"  # "same-slope"
-        for node in self.tanhs:
-            assert node.optimize
-            node.init_opt()            
+        for node in self.optimizable_activations:
+            # initialize the parameters
+            node.opt_init()          
 
         with torch.no_grad():
             if method == 'forward':
-                l, u = self.compute_bounds(x=(x,), method='forward', clr_fv=False)
+                l, u = self.compute_bounds(x=(x,), method='forward')
             else:
-                self.compute_bounds(x=(x,), IBP=False, C=c, method='backward', return_A=False)
+                l, u = self.compute_bounds(x=(x,), IBP=False, C=c, method='backward', return_A=False)
 
-        # Assuming the relu neurons are in a sequential order. It won't work on complex architecture.
-        for i, m in enumerate(self.relus):
-            m.relu_options = "optimized"
-            if per_neuron_slopes:
-                # For the relu at layer i, we need the slopes for all bounds after this layer.
-                if method == 'forward':
-                    m.alpha = OrderedDict()
-                    m.alpha['_forward'] = torch.empty([*m.fv.shape]).to(m.fv).requires_grad_(True)
-                else:
-                    m.alpha = OrderedDict()
-                    for j in range(i + 1, len(self.relus) + 1):
-                        if j == len(self.relus):
-                            # This is the final output layer, which depends on output shape.
-                            if c is None:
-                                # Final layer shape.
-                                output_shape = self.final_shape[-1]
-                            else:
-                                # Number of specifications. C has shape (batch, n_specs, spec_coeffs)
-                                assert c.ndim == 3
-                                output_shape = c.size(1)
-                            m.alpha[self.final_name] = torch.empty([2, output_shape, x.size(0), *m.shape], dtype=torch.float, device=x.device, requires_grad=True)
-                        else:
-                            # We use the layer before relu as the key. TODO: this might be a reshape layer, or other layers.
-                            for prev_layer in self.relus[j].inputs:
-                                # Locate the linear/conv layer before relu (TODO: this works for feedforward only).
-                                if isinstance(prev_layer, (BoundLinear, BoundConv, BoundReshape, BoundAdd)):
-                                    break
-                            else:
-                                raise RuntimeError("unsupported network architecture")
-                            if share_slopes:
-                                # all intermediate neurons from the same layer share the same set of slopes.
-                                output_shape = 1
-                            elif m.patch_size and prev_layer.name in m.patch_size:
-                                # Patches mode. Use output channel size as the spec size. This still shares some alpha, but better than no sharing.
-                                # The patch size is [batch, L, out_ch, in_ch, H, W]. We use out_ch as the output shape.
-                                output_shape = m.patch_size[prev_layer.name][2]
-                            else:
-                                output_shape = self.relus[j].flattened_nodes
-                            # Each alpha has shape (2, output_shape, batch_size, *relu_node_shape].
-                            m.alpha[prev_layer.name] = torch.empty([2, output_shape, x.size(0), *m.shape], dtype=torch.float, device=x.device, requires_grad=True)
-                            # print(f'relu {m.name} spec {prev_layer.name} shape {output_shape}')
-
-        if not per_neuron_slopes:
-            assert method != 'forward'
-            self.set_relu_used_count(start_idx=99)  # to be removed.
-            self.forward(x)  # initial slopes randomly, to be remvoed.
-
-        for m in self.relus:
-            m.relu_options = "optimized"
-            if per_neuron_slopes:
-                for k, v in m.alpha.items():
-                    # v.data.copy_(m.d.data)  # Initial from same-slope lower bounds.
-                    v.data.copy_(m.lower_d.data)  # Initial from adaptive lower bounds.
+        for node in self.optimizable_activations:
+            if method == 'forward':
+                assert not '_forward' in self._modules.keys(), '_forward is a reserved node name'
+                assert isinstance(node, BoundRelu), 'Only ReLU is supported for optimizing forward bounds'
+                start_nodes = [ ('_forward', 1) ]
             else:
-                m.slope.data[:, :] = m.d.detach().data  # initial the slopes by CROWN with "same-slope"
-                m.slope.requires_grad = True
-
-        for node in self.tanhs:
-            assert per_neuron_slopes
-
-            l, u = node.inputs[0].lower, node.inputs[0].upper
-
-            start_nodes = []
-            for nj in self.tanhs:
-                if int(nj.name[1:]) > int(node.name[1:]):
-                    start_nodes.append(nj.inputs[0])
-            start_nodes.append(self._modules[self.final_name])
-
-            node.alpha = OrderedDict()
-            for ns in start_nodes:
-                shape = prod(ns.lower.shape[1:])
-                if ns.name == self.final_name:
-                    if c is None:
-                        # Final layer shape.
-                        shape = self.final_shape[-1]
+                start_nodes = []
+                for nj in self.backward_from[node.name]:
+                    if nj.name == self.final_name:
+                        size_final = self.final_shape[-1] if c is None else c.size(1)                    
+                        start_nodes.append((self.final_name, size_final))       
+                        continue                    
+                    if share_slopes:
+                        # all intermediate neurons from the same layer share the same set of slopes.
+                        output_shape = 1
+                    elif isinstance(node, BoundRelu) and node.patch_size and nj.name in node.patch_size:
+                        # Patches mode. Use output channel size as the spec size. This still shares some alpha, but better than no sharing.
+                        # The patch size is [batch, L, out_ch, in_ch, H, W]. We use out_ch as the output shape.
+                        output_shape = node.patch_size[nj.name][2]
                     else:
-                        # Number of specifications. C has shape (batch, n_specs, spec_coeffs)
-                        assert c.ndim == 3
-                        shape = c.size(1)
-                node.alpha[ns.name] = torch.empty(4, shape, *l.shape, device=self.device)
-                node.alpha[ns.name].data[:2] = ((l + u) / 2).unsqueeze(0).expand(2, shape, *l.shape)
-                node.alpha[ns.name].data[2] = node.tp_both_lower_init[ns.name].expand(shape, *l.shape)
-                node.alpha[ns.name].data[3] = node.tp_both_upper_init[ns.name].expand(shape, *l.shape)
-            node.optimizing = True
+                        output_shape = prod(nj.lower.shape[1:])
+                    start_nodes.append((nj.name, output_shape))
+            node.init_opt_parameters(start_nodes)
+            node.opt_start()
 
-        print("init slopes done")
+        print("alpha-CROWN optimizable variables initialized.")
 
     def beta_bias(self):
         batch_size = len(self.relus[-1].split_beta)
@@ -718,90 +652,329 @@ class BoundedModule(nn.Module):
         return bias
 
 
+    """Intialization for beta optimization of intermediate layer bounds."""
+    def _init_intermediate_beta(self, x, opt_coeffs, intermediate_refinement_layers, first_layer_to_refine, partial_new_interval):
+        # This disctionary saves the coefficients for beta for each relu layer.
+        beta_constraint_specs = {}
+        # A list of all optimizable parameters for intermediate betas. Will be passed to the optimizer.
+        all_intermediate_betas = []
+        # We only need to collect some A matrices for the split constraints, so we keep a dictionary for it.
+        needed_A_list = defaultdict(set)
+
+        for layer in self.relus:
+            layer.single_intermediate_betas = {}
+            layer.history_intermediate_betas = {}
+            layer.split_intermediate_betas = {}
+
+        self.best_intermediate_betas = {}
+        # In this loop, we (1) create beta variables for all intermediate neurons for each split, and
+        # (2) obtain all history coefficients for each layer, and combine them into a matrix (which will be used as specifications).
+        # The current split coefficients (which is optimizable) must be handle later, in the optimization loop.
+        for layer in self.relus:
+            layer_spec = None
+            # print(f'layer {layer.name} {layer.max_single_split if hasattr(layer, "max_single_split") else None}')
+            if layer.single_beta_used:
+                # Single split case.
+                assert not layer.history_beta_used and not layer.split_beta_used
+                for ll in self.relus:
+                    if ll.name not in intermediate_refinement_layers:
+                        # Only refine the specific layers. Usually, the last a few layers have bigger room for improvements.
+                        # No beta parameters will be created for layers that will not be refined.
+                        # print(f'skipping {ll.name}')
+                        continue
+                    for prev_layer in ll.inputs:
+                        # Locate the linear/conv layer before relu (TODO: this works for feedforward only).
+                        if isinstance(prev_layer, (BoundLinear, BoundConv, BoundReshape, BoundAdd)):
+                            break
+                    else:
+                        raise RuntimeError("unsupported network architecture")
+                    # print(f'creating {ll.name} for {layer.name}')
+                    # This layer's intermediate bounds are being optimized. We need the A matrices of the specifications on this layer.
+                    needed_A_list[layer.name].add(prev_layer.name)
+                    # Remove the corresponding bounds in intervals to be set.
+                    if ll.name in partial_new_interval:
+                        del partial_new_interval[ll.name]
+                    if prev_layer.name in partial_new_interval:
+                        del partial_new_interval[prev_layer.name]
+                    # layer.beta_mask has shape [batch, *nodes, max_nbeta]
+                    layer.single_intermediate_betas.update({prev_layer.name: {
+                        "lb": torch.zeros(
+                            size=(x[0].size(0),) + ll.shape + (layer.max_single_split,),
+                            device=x[0].device, requires_grad=True),
+                        "ub": torch.zeros(
+                            size=(x[0].size(0),) + ll.shape + (layer.max_single_split,),
+                            device=x[0].device, requires_grad=True),
+                    }
+                    })
+                    beta_constraint_specs[layer.name] = OneHotC(shape=(x[0].size(0), layer.max_single_split) + layer.shape, device=x[0].device, index=layer.single_beta_loc, coeffs=-layer.single_beta_sign)
+                if Check_against_base_lp:
+                    # Add only one layer to optimize; do not optimize all variables jointly.
+                    all_intermediate_betas.extend(
+                        layer.single_intermediate_betas[Check_against_base_lp_layer].values())
+                else:
+                    all_intermediate_betas.extend(
+                        [beta_lb_ub for ll in layer.single_intermediate_betas.values() for beta_lb_ub
+                         in ll.values()])
+                continue  # skip the rest of the loop.
+
+            if layer.history_beta_used:
+                # Create optimizable beta variables for all intermediate layers.
+                # Add the conv/linear layer that is right before a ReLu layer.
+                for ll in self.relus:
+                    if ll.name not in intermediate_refinement_layers:
+                        # Only refine the specific layers. Usually, the last a few layers have bigger room for improvements.
+                        # No beta parameters will be created for layers that will not be refined.
+                        continue
+                    for prev_layer in ll.inputs:
+                        # Locate the linear/conv layer before relu (TODO: this works for feedforward only).
+                        if isinstance(prev_layer, (BoundLinear, BoundConv, BoundReshape, BoundAdd)):
+                            break
+                    else:
+                        raise RuntimeError("unsupported network architecture")
+                    # This layer's intermediate bounds are being optimized. We need the A matrices of the specifications on this layer.
+                    needed_A_list[layer.name].add(prev_layer.name)
+                    # Remove the corresponding bounds in intervals to be set.
+                    if ll.name in partial_new_interval:
+                        del partial_new_interval[ll.name]
+                    if prev_layer.name in partial_new_interval:
+                        del partial_new_interval[prev_layer.name]
+                    # layer.new_history_coeffs has shape [batch, *nodes, max_nbeta]
+                    layer.history_intermediate_betas.update({prev_layer.name: {
+                        "lb": torch.zeros(
+                            size=(x[0].size(0),) + ll.shape + (layer.new_history_coeffs.size(-1),),
+                            device=x[0].device, requires_grad=True),
+                        "ub": torch.zeros(
+                            size=(x[0].size(0),) + ll.shape + (layer.new_history_coeffs.size(-1),),
+                            device=x[0].device, requires_grad=True),
+                    }
+                    })
+                if Check_against_base_lp:
+                    # Add only one layer to optimize; do not optimize all variables jointly.
+                    all_intermediate_betas.extend(
+                        layer.history_intermediate_betas[Check_against_base_lp_layer].values())
+                else:
+                    all_intermediate_betas.extend(
+                        [beta_lb_ub for ll in layer.history_intermediate_betas.values() for beta_lb_ub
+                         in ll.values()])
+                # Coefficients of history constraints only, in shape [batch, n_beta - 1, n_nodes].
+                # For new_history_c = +1, it is z >= 0, and we need to negate and get the lower bound of -z < 0.
+                # For unused beta (dummy padding split) inside a batch, layer_spec will be 0.
+                layer_spec = - layer.new_history_coeffs.transpose(-1,
+                                                                  -2) * layer.new_history_c.unsqueeze(
+                    -1)
+            if layer.split_beta_used:
+                # Create optimizable beta variables for all intermediate layers. First, we always have the layer after the root (input) node.
+                for ll in self.relus:
+                    if ll.name not in intermediate_refinement_layers:
+                        # Only refine the specific layers. Usually, the last a few layers have bigger room for improvements.
+                        # No beta parameters will be created for layers that will not be refined.
+                        continue
+                    for prev_layer in ll.inputs:
+                        # Locate the linear/conv layer before relu (TODO: this works for feedforward only).
+                        if isinstance(prev_layer, (BoundLinear, BoundConv, BoundReshape, BoundAdd)):
+                            break
+                    else:
+                        raise RuntimeError("unsupported network architecture")
+                    # This layer's intermediate bounds are being optimized. We need the A matrices of the specifications on this layer.
+                    needed_A_list[layer.name].add(prev_layer.name)
+                    # Remove the corresponding bounds in intervals to be set.
+                    if ll.name in partial_new_interval:
+                        del partial_new_interval[ll.name]
+                    if prev_layer.name in partial_new_interval:
+                        del partial_new_interval[prev_layer.name]
+                    layer.split_intermediate_betas.update({prev_layer.name: {
+                        "lb": torch.zeros(size=(x[0].size(0),) + ll.shape + (1,), device=x[0].device,
+                                          requires_grad=True),
+                        "ub": torch.zeros(size=(x[0].size(0),) + ll.shape + (1,), device=x[0].device,
+                                          requires_grad=True),
+                    }
+                    })
+                if Check_against_base_lp:
+                    # Add only one layer to optimize; do not optimize all variables jointly.
+                    all_intermediate_betas.extend(
+                        layer.split_intermediate_betas[Check_against_base_lp_layer].values())
+                else:
+                    all_intermediate_betas.extend(
+                        [beta_lb_ub for ll in layer.split_intermediate_betas.values() for beta_lb_ub in
+                         ll.values()])
+            # If split coefficients are not optimized, we can just add current split constraints here - no need to reconstruct every time.
+            if layer.split_beta_used and not opt_coeffs:
+                assert layer.split_coeffs[
+                           "dense"] is not None  # TODO: We only support dense split coefficients.
+                # Now we have coefficients of both history constraints and split constraints, in shape [batch, n_nodes, n_beta].
+                # split_c is 1 for z>0 split, is -1 for z<0 split, and we negate them here to much the formulation in Lagrangian.
+                layer_split_spec = -(
+                            layer.split_coeffs["dense"].repeat(2, 1) * layer.split_c).unsqueeze(1)
+                if layer_spec is not None:
+                    layer_spec = torch.cat((layer_spec, layer_split_spec), dim=1)
+                else:
+                    layer_spec = layer_split_spec
+            if layer_spec is not None:
+                beta_constraint_specs[layer.name] = layer_spec.detach().requires_grad_(False)
+
+        # Remove some unused specs.
+        for k in list(beta_constraint_specs.keys()):
+            if int(k[1:]) < int(first_layer_to_refine[1:]):  # TODO: use a better way to check this.
+                # Remove this spec because it is not used.
+                print(f'Removing {k} from specs for intermediate beta.')
+                del beta_constraint_specs[k]
+
+        # Preset intermediate betas if they are specified as a list.
+        if self.init_intermediate_betas is not None:
+            # The batch dimension.
+            for i, example_int_betas in enumerate(self.init_intermediate_betas):
+                if example_int_betas is not None:
+                    # The layer with split constraints.
+                    for split_layer, all_int_betas_this_layer in example_int_betas.items():
+                        # Beta variables for all layers for that split constraints.
+                        for intermediate_layer, intermediate_betas in all_int_betas_this_layer.items():
+                            saved_n_betas = intermediate_betas['lb'].size(-1)
+                            if self._modules[split_layer].single_beta_used:
+                                # Only self.single_intermediate_beta is created.
+                                assert not self._modules[split_layer].history_beta_used
+                                assert not self._modules[split_layer].split_beta_used
+                                if intermediate_layer in self._modules[split_layer].single_intermediate_betas:
+                                    self._modules[split_layer].single_intermediate_betas[
+                                        intermediate_layer]['lb'].data[i, ..., :saved_n_betas] = \
+                                    intermediate_betas['lb']
+                                    self._modules[split_layer].single_intermediate_betas[
+                                        intermediate_layer]['ub'].data[i, ..., :saved_n_betas] = \
+                                    intermediate_betas['ub']
+                                else:
+                                    warnings.warn(f"Warning: the intermediate bounds of sample {i} split {split_layer} layer {intermediate_layer} are not optimized, but initialization contains it with size {saved_n_betas}. It might be a bug.", stacklevel=2)
+
+                            elif intermediate_layer in self._modules[split_layer].history_intermediate_betas:
+                                # Here we assume the last intermediate beta is the last split, which will still be 0.
+                                # When we create specifications, we used single_beta_loc, which must have the current split at last.
+                                self._modules[split_layer].history_intermediate_betas[
+                                    intermediate_layer]['lb'].data[i, ..., :saved_n_betas] = \
+                                intermediate_betas['lb']
+                                self._modules[split_layer].history_intermediate_betas[
+                                    intermediate_layer]['ub'].data[i, ..., :saved_n_betas] = \
+                                intermediate_betas['ub']
+                            else:
+                                warnings.warn(f"Warning: the intermediate bounds of sample {i} split {split_layer} layer {intermediate_layer} are not optimized, but initialization contains it. It might be a bug.", stacklevel=2)
+
+        return beta_constraint_specs, all_intermediate_betas, needed_A_list
+
+    def _get_intermediate_beta_specs(self, x, aux, opt_coeffs, beta_constraint_specs, needed_A_list, new_interval):
+        beta_spec_coeffs = {}  # Key of the dictionary is the pre-relu node name, value is the A matrices propagated to this pre-relu node. We will directly add it to the initial C matrices when computing intermediate bounds.
+        # Run CROWN using existing intermediate layer bounds, to get linear inequalities of beta constraints w.r.t. input.
+        for layer_idx, layer in enumerate(self.relus):
+            if layer.split_beta_used and opt_coeffs:
+                # In this loop, we add the current optimizable split constraint.
+                assert layer.split_coeffs["dense"] is not None  # We only use dense split coefficients.
+                if layer.name in beta_constraint_specs:
+                    # Now we have coefficients of both history constraints and split constraints, in shape [batch, n_nodes, n_beta].
+                    spec_C = torch.cat((beta_constraint_specs[layer.name],
+                                        -(layer.split_coeffs["dense"].repeat(2, 1) * layer.split_c).unsqueeze(
+                                            1)), dim=1)
+                else:
+                    spec_C = -(layer.split_coeffs["dense"].repeat(2, 1) * layer.split_c).unsqueeze(1)
+            else:
+                if layer.name in beta_constraint_specs:
+                    # This layer only has history constraints, no split constraints. This has already been saved into beta_constraint_specs.
+                    spec_C = beta_constraint_specs[layer.name]
+                else:
+                    # This layer has no beta constraints.
+                    spec_C = None
+            if spec_C is not None:
+                # We now have the specifications, which are just coefficients for beta.
+                # Now get A and bias w.r.t. input x for the layer just before Relu.
+                # TODO: no concretization needed here.
+                prev_layer_name = layer.inputs[0].name
+                # Resize spec size in case there are conv layers.
+                if not isinstance(spec_C, OneHotC):
+                    spec_C = spec_C.view(spec_C.size(0), spec_C.size(1), *layer.shape)
+                # spec_C.index has shape (batch, n_max_beta_split). Need to transpose since alpha has output_shape before batch.
+                alpha_idx = spec_C.index.transpose(0,1)
+                # We need to find which relu layer is this, and set the start_idx accordingly to get the tightest possible bound with optimal alpha for this layer's intermediate bounds.
+                # For example, if this is the pre-activation of the last relu layer, we want start_idx = 2; if it is the pre-activation of the second relu layer, we need to use the first set of alpha, so start_idx = len(self.relus).
+                # lower_spec_A contains the A matrices propagated from the split layer to all interemdiate layers.
+                _, _, lower_spec_A = self.compute_bounds(x, aux, spec_C, IBP=False, forward=False,
+                                                         method="CROWN", bound_lower=True, bound_upper=False,
+                                                         reuse_ibp=True,
+                                                         return_A=True, needed_A_list=needed_A_list[layer.name],
+                                                         final_node_name=prev_layer_name, average_A=False,
+                                                         new_interval=new_interval, alpha_idx=alpha_idx)
+                # For computing the upper bound, the spec vector needs to be negated.
+                if not isinstance(spec_C, OneHotC):
+                    spec_C_neg = - spec_C
+                else:
+                    spec_C_neg = spec_C._replace(coeffs = -spec_C.coeffs)
+                # spec_C_neg.index has shape (batch, n_max_beta_split). Need to transpose since alpha has output_shape before batch.
+                alpha_idx = spec_C_neg.index.transpose(0,1)
+                _, _, upper_spec_A = self.compute_bounds(x, aux, spec_C_neg, IBP=False, forward=False,
+                                                         method="CROWN", bound_lower=False, bound_upper=True,
+                                                         reuse_ibp=True,
+                                                         return_A=True, needed_A_list=needed_A_list[layer.name],
+                                                         final_node_name=prev_layer_name, average_A=False,
+                                                         new_interval=new_interval, alpha_idx=alpha_idx)
+                # Merge spec_A matrices for lower and upper bound.
+                spec_A = {}
+                for k in lower_spec_A[prev_layer_name].keys():
+                    spec_A[k] = {}
+                    spec_A[k]["lA"] = lower_spec_A[prev_layer_name][k]["lA"]
+                    spec_A[k]["lbias"] = lower_spec_A[prev_layer_name][k]["lbias"]
+                    spec_A[k]["uA"] = upper_spec_A[prev_layer_name][k]["uA"]
+                    spec_A[k]["ubias"] = upper_spec_A[prev_layer_name][k]["ubias"]
+
+                beta_spec_coeffs.update({prev_layer_name: spec_A})
+                # del lb, ub, spec_A
+
+        return beta_spec_coeffs
+
     def get_optimized_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward',
                              bound_lower=True, bound_upper=False, reuse_ibp=False, return_A=False, final_node_name=None,
-                             average_A=False, new_interval=None, reference_bounds=None, opt_lower=True, opt_upper=False):
+                             average_A=False, new_interval=None, reference_bounds=None):
         # optimize CROWN lower bound by alpha and beta
         opts = self.bound_opts['optimize_bound_args']
         iteration = opts['ob_iteration']; beta = opts['ob_beta']; alpha = opts['ob_alpha']
-        opt_coeffs = opts['ob_opt_coeffs']; opt_bias = opts['ob_opt_bias']; early_stop = opts['ob_early_stop']
-        log = opts['ob_log']; opt_choice = opts['ob_optimizer']; start_idx = opts['ob_start_idx']
-        decision_thresh = opts['ob_decision_thresh']; get_heuristic = opts['ob_get_heuristic']
+        opt_coeffs = opts['ob_opt_coeffs']; opt_bias = opts['ob_opt_bias']
+        verbose = opts['ob_verbose']; opt_choice = opts['ob_optimizer']
         single_node_split = opts['ob_single_node_split'] 
-        # log = True
-        keep_best = opts['ob_keep_best']; update_by_layer = opts['ob_update_by_layer']; lr = opts['ob_lr']; init = opts['ob_init']
-        lr_beta = opts['ob_lr_beta']
+        keep_best = opts['ob_keep_best']; update_by_layer = opts['ob_update_by_layer']; init = opts['ob_init']
+        lr = opts['ob_lr']; lr_beta = opts['ob_lr_beta']
         lr_intermediate_beta = opts['ob_lr_intermediate_beta']
         intermediate_beta_enabled = opts['ob_intermediate_beta']
-        against_all_classes = opts['ob_against_all_classes'] 
-        lr_decay = opts['ob_lr_decay']; lr_dynamic_decay = opts['ob_lr_dynamic_decay']
-        if intermediate_beta_enabled:
-            # The list of layer numbers for refinement, can be positive or negative. -1 means refine the intermediate layer bound before last relu layer.
-            intermediate_refinement_layers = opts['ob_intermediate_refinement_layers']
-            # Change negative layer number to positive ones.
-            intermediate_refinement_layers = [layer if layer > 0 else layer + len(self.relus) for layer in
-                                            intermediate_refinement_layers]
-            # This is the first layer to refine; we do not need the specs for all layers before it.
-            first_layer_to_refine = self.relus[min(intermediate_refinement_layers)].name
-            # Change layer number to layer name.
-            intermediate_refinement_layers = [self.relus[layer].name for layer in intermediate_refinement_layers]
-        lr_coeffs = opts['ob_lr_coeffs']; loss_reduction_func = opts['ob_loss_reduction_func']
+        lr_decay = opts['ob_lr_decay']; lr_coeffs = opts['ob_lr_coeffs'] 
+        loss_reduction_func = opts['ob_loss_reduction_func']
+        stop_criterion_func = opts['ob_stop_criterion_func']
         input_grad = opts['ob_input_grad']
 
-        assert opt_lower != opt_upper, 'we can only optimize lower OR upper bound at one time'
+        assert bound_lower != bound_upper, 'we can only optimize lower OR upper bound at one time'
         assert alpha or beta, "nothing to optimize, use compute bound instead!"
-
-        if not update_by_layer and not intermediate_beta_enabled:
-            start_idx = 99
-        elif intermediate_beta_enabled:
-            start_idx = len(intermediate_refinement_layers) + 1  # TODO: this is for feedforward network only.
-            print(f'Layers for refinement: {intermediate_refinement_layers}; there are {len(self.relus) - len(intermediate_refinement_layers)} layers NOT being refined. start_idx = {start_idx}')
-        self.set_relu_used_count(start_idx=start_idx)
 
         if C is not None:
             self.final_shape = C.size()[:2]
             self.bound_opts.update({'final_shape': self.final_shape})
         if init:
-            self.init_slope(x, share_slopes=opts['ob_alpha_share_slopes'],
-                            per_neuron_slopes=opts['ob_alpha_per_neuron'], method=method, c=C)
+            self.init_slope(x, share_slopes=opts['ob_alpha_share_slopes'], method=method, c=C)
 
-        # changed from `hasattr(self.relus[0], 'alpha')`
-        use_per_neuron_alpha = opts['ob_alpha_per_neuron'] 
         alphas = []
         betas = []
         beta_masks = []
         parameters = []
         dense_coeffs_mask = []
 
-        if method == 'forward':
-            assert use_per_neuron_alpha
+        for m in self.optimizable_activations:
+            if alpha:
+                alphas.extend(list(m.alpha.values()))
 
-        if use_per_neuron_alpha:
-            for m in self.relus + self.tanhs:
-                if alpha:
-                    alphas.extend(list(m.alpha.values()))
-        else:
-            for model in self.relus:
-                if alpha:
-                    alphas.append(model.slope)
-        
         if alpha:
             # Alpha has shape (2, output_shape, batch_dim, node_shape)
             parameters.append({'params': alphas, 'lr': lr, 'batch_dim': 2})
-            if use_per_neuron_alpha:
-                # best_alpha is a dictionary of dictionary. Each key is the alpha variable for one relu layer, and each value is a dictionary contains all relu layers after that layer as keys.
-                best_alphas = OrderedDict()
-                for m in self.relus + self.tanhs:
-                    best_alphas[m.name] = {}
-                    for alpha_m in m.alpha:
-                        best_alphas[m.name][alpha_m] = m.alpha[alpha_m].clone().detach()
-                        # We will directly replace the dictionary for each relu layer after optimization, so the saved alpha might not have require_grad=True.
-                        m.alpha[alpha_m].requires_grad_() 
-            else:
-                best_alphas = [s.clone().detach() for s in alphas]
+            # best_alpha is a dictionary of dictionary. Each key is the alpha variable for one relu layer, and each value is a dictionary contains all relu layers after that layer as keys.
+            best_alphas = OrderedDict()
+            for m in self.optimizable_activations:
+                best_alphas[m.name] = {}
+                for alpha_m in m.alpha:
+                    best_alphas[m.name][alpha_m] = m.alpha[alpha_m].clone().detach()
+                    # We will directly replace the dictionary for each relu layer after optimization, so the saved alpha might not have require_grad=True.
+                    m.alpha[alpha_m].requires_grad_()
 
         if beta:
-            if len(self.tanhs) > 0:
+            if len(self.relus) != len(self.optimizable_activations):
                 raise NotImplementedError("Beta-CROWN for tanh models is not supported yet")
 
             if single_node_split:
@@ -809,7 +982,6 @@ class BoundedModule(nn.Module):
                     betas.append(model.sparse_beta)
             else:
                 betas = self.beta_params + self.single_beta_params
-                # print("initial betas:", betas)
                 if opt_coeffs:
                     coeffs = [dense_coeffs["dense"] for dense_coeffs in self.split_dense_coeffs_params] + self.coeffs_params
                     dense_coeffs_mask = [dense_coeffs["mask"] for dense_coeffs in self.split_dense_coeffs_params]
@@ -826,215 +998,24 @@ class BoundedModule(nn.Module):
 
         start = time.time()
 
-        # Enable constraints for intermediate neurons.
-        # This disctionary saves the coefficients for beta for each relu layer.
-        beta_constraint_specs = {}
-        # A list of all optimizable parameters for intermediate betas. Will be passed to the optimizer.
-        all_intermediate_betas = []
-        # We only need to collect some A matrices for the split constraints, so we keep a dictionary for it.
-        needed_A_list = defaultdict(set)
-        # We only need to set some intermediate layer bounds.
-        partial_new_interval = new_interval.copy() if new_interval is not None else None  # Shallow copy.
-
-        # For each neuron in each layer, we have M intermediate_beta variables where M is the number of constraints.
         if beta and intermediate_beta_enabled:
-            # Initialize.
-            for layer in self.relus:
-                layer.single_intermediate_betas = {}
-                layer.history_intermediate_betas = {}
-                layer.split_intermediate_betas = {}
-
-            self.best_intermediate_betas = {}
-            # In this loop, we (1) create beta variables for all intermediate neurons for each split, and
-            # (2) obtain all history coefficients for each layer, and combine them into a matrix (which will be used as specifications).
-            # The current split coefficients (which is optimizable) must be handle later, in the optimization loop.
-            for layer in self.relus:
-                layer_spec = None
-                # print(f'layer {layer.name} {layer.max_single_split if hasattr(layer, "max_single_split") else None}')
-                if layer.single_beta_used:
-                    # Single split case.
-                    assert not layer.history_beta_used and not layer.split_beta_used
-                    for ll in self.relus:
-                        if ll.name not in intermediate_refinement_layers:
-                            # Only refine the specific layers. Usually, the last a few layers have bigger room for improvements.
-                            # No beta parameters will be created for layers that will not be refined.
-                            # print(f'skipping {ll.name}')
-                            continue
-                        for prev_layer in ll.inputs:
-                            # Locate the linear/conv layer before relu (TODO: this works for feedforward only).
-                            if isinstance(prev_layer, (BoundLinear, BoundConv, BoundReshape, BoundAdd)):
-                                break
-                        else:
-                            raise RuntimeError("unsupported network architecture")
-                        # print(f'creating {ll.name} for {layer.name}')
-                        # This layer's intermediate bounds are being optimized. We need the A matrices of the specifications on this layer.
-                        needed_A_list[layer.name].add(prev_layer.name)
-                        # Remove the corresponding bounds in intervals to be set.
-                        if ll.name in partial_new_interval:
-                            del partial_new_interval[ll.name]
-                        if prev_layer.name in partial_new_interval:
-                            del partial_new_interval[prev_layer.name]
-                        # layer.beta_mask has shape [batch, *nodes, max_nbeta]
-                        layer.single_intermediate_betas.update({prev_layer.name: {
-                            "lb": torch.zeros(
-                                size=(x[0].size(0),) + ll.shape + (layer.max_single_split,),
-                                device=x[0].device, requires_grad=True),
-                            "ub": torch.zeros(
-                                size=(x[0].size(0),) + ll.shape + (layer.max_single_split,),
-                                device=x[0].device, requires_grad=True),
-                        }
-                        })
-                        beta_constraint_specs[layer.name] = OneHotC(shape=(x[0].size(0), layer.max_single_split) + layer.shape, device=x[0].device, index=layer.single_beta_loc, coeffs=-layer.single_beta_sign)
-                    if Check_against_base_lp:
-                        # Add only one layer to optimize; do not optimize all variables jointly.
-                        all_intermediate_betas.extend(
-                            layer.single_intermediate_betas[Check_against_base_lp_layer].values())
-                    else:
-                        all_intermediate_betas.extend(
-                            [beta_lb_ub for ll in layer.single_intermediate_betas.values() for beta_lb_ub
-                             in ll.values()])
-                    continue  # skip the rest of the loop.
-
-                if layer.history_beta_used:
-                    # Create optimizable beta variables for all intermediate layers.
-                    # Add the conv/linear layer that is right before a ReLu layer.
-                    for ll in self.relus:
-                        if ll.name not in intermediate_refinement_layers:
-                            # Only refine the specific layers. Usually, the last a few layers have bigger room for improvements.
-                            # No beta parameters will be created for layers that will not be refined.
-                            continue
-                        for prev_layer in ll.inputs:
-                            # Locate the linear/conv layer before relu (TODO: this works for feedforward only).
-                            if isinstance(prev_layer, (BoundLinear, BoundConv, BoundReshape, BoundAdd)):
-                                break
-                        else:
-                            raise RuntimeError("unsupported network architecture")
-                        # This layer's intermediate bounds are being optimized. We need the A matrices of the specifications on this layer.
-                        needed_A_list[layer.name].add(prev_layer.name)
-                        # Remove the corresponding bounds in intervals to be set.
-                        if ll.name in partial_new_interval:
-                            del partial_new_interval[ll.name]
-                        if prev_layer.name in partial_new_interval:
-                            del partial_new_interval[prev_layer.name]
-                        # layer.new_history_coeffs has shape [batch, *nodes, max_nbeta]
-                        layer.history_intermediate_betas.update({prev_layer.name: {
-                            "lb": torch.zeros(
-                                size=(x[0].size(0),) + ll.shape + (layer.new_history_coeffs.size(-1),),
-                                device=x[0].device, requires_grad=True),
-                            "ub": torch.zeros(
-                                size=(x[0].size(0),) + ll.shape + (layer.new_history_coeffs.size(-1),),
-                                device=x[0].device, requires_grad=True),
-                        }
-                        })
-                    if Check_against_base_lp:
-                        # Add only one layer to optimize; do not optimize all variables jointly.
-                        all_intermediate_betas.extend(
-                            layer.history_intermediate_betas[Check_against_base_lp_layer].values())
-                    else:
-                        all_intermediate_betas.extend(
-                            [beta_lb_ub for ll in layer.history_intermediate_betas.values() for beta_lb_ub
-                             in ll.values()])
-                    # Coefficients of history constraints only, in shape [batch, n_beta - 1, n_nodes].
-                    # For new_history_c = +1, it is z >= 0, and we need to negate and get the lower bound of -z < 0.
-                    # For unused beta (dummy padding split) inside a batch, layer_spec will be 0.
-                    layer_spec = - layer.new_history_coeffs.transpose(-1,
-                                                                      -2) * layer.new_history_c.unsqueeze(
-                        -1)
-                if layer.split_beta_used:
-                    # Create optimizable beta variables for all intermediate layers. First, we always have the layer after the root (input) node.
-                    for ll in self.relus:
-                        if ll.name not in intermediate_refinement_layers:
-                            # Only refine the specific layers. Usually, the last a few layers have bigger room for improvements.
-                            # No beta parameters will be created for layers that will not be refined.
-                            continue
-                        for prev_layer in ll.inputs:
-                            # Locate the linear/conv layer before relu (TODO: this works for feedforward only).
-                            if isinstance(prev_layer, (BoundLinear, BoundConv, BoundReshape, BoundAdd)):
-                                break
-                        else:
-                            raise RuntimeError("unsupported network architecture")
-                        # This layer's intermediate bounds are being optimized. We need the A matrices of the specifications on this layer.
-                        needed_A_list[layer.name].add(prev_layer.name)
-                        # Remove the corresponding bounds in intervals to be set.
-                        if ll.name in partial_new_interval:
-                            del partial_new_interval[ll.name]
-                        if prev_layer.name in partial_new_interval:
-                            del partial_new_interval[prev_layer.name]
-                        layer.split_intermediate_betas.update({prev_layer.name: {
-                            "lb": torch.zeros(size=(x[0].size(0),) + ll.shape + (1,), device=x[0].device,
-                                              requires_grad=True),
-                            "ub": torch.zeros(size=(x[0].size(0),) + ll.shape + (1,), device=x[0].device,
-                                              requires_grad=True),
-                        }
-                        })
-                    if Check_against_base_lp:
-                        # Add only one layer to optimize; do not optimize all variables jointly.
-                        all_intermediate_betas.extend(
-                            layer.split_intermediate_betas[Check_against_base_lp_layer].values())
-                    else:
-                        all_intermediate_betas.extend(
-                            [beta_lb_ub for ll in layer.split_intermediate_betas.values() for beta_lb_ub in
-                             ll.values()])
-                # If split coefficients are not optimized, we can just add current split constraints here - no need to reconstruct every time.
-                if layer.split_beta_used and not opt_coeffs:
-                    assert layer.split_coeffs[
-                               "dense"] is not None  # TODO: We only support dense split coefficients.
-                    # Now we have coefficients of both history constraints and split constraints, in shape [batch, n_nodes, n_beta].
-                    # split_c is 1 for z>0 split, is -1 for z<0 split, and we negate them here to much the formulation in Lagrangian.
-                    layer_split_spec = -(
-                                layer.split_coeffs["dense"].repeat(2, 1) * layer.split_c).unsqueeze(1)
-                    if layer_spec is not None:
-                        layer_spec = torch.cat((layer_spec, layer_split_spec), dim=1)
-                    else:
-                        layer_spec = layer_split_spec
-                if layer_spec is not None:
-                    beta_constraint_specs[layer.name] = layer_spec.detach().requires_grad_(False)
-
-            # Remove some unused specs.
-            for k in list(beta_constraint_specs.keys()):
-                if int(k[1:]) < int(first_layer_to_refine[1:]):  # TODO: use a better way to check this.
-                    # Remove this spec because it is not used.
-                    print(f'Removing {k} from specs for intermediate beta.')
-                    del beta_constraint_specs[k]
-
-            # Preset intermediate betas if they are specified as a list.
-            if self.init_intermediate_betas is not None:
-                # The batch dimension.
-                for i, example_int_betas in enumerate(self.init_intermediate_betas):
-                    if example_int_betas is not None:
-                        # The layer with split constraints.
-                        for split_layer, all_int_betas_this_layer in example_int_betas.items():
-                            # Beta variables for all layers for that split constraints.
-                            for intermediate_layer, intermediate_betas in all_int_betas_this_layer.items():
-                                saved_n_betas = intermediate_betas['lb'].size(-1)
-                                if self._modules[split_layer].single_beta_used:
-                                    # Only self.single_intermediate_beta is created.
-                                    assert not self._modules[split_layer].history_beta_used
-                                    assert not self._modules[split_layer].split_beta_used
-                                    if intermediate_layer in self._modules[split_layer].single_intermediate_betas:
-                                        self._modules[split_layer].single_intermediate_betas[
-                                            intermediate_layer]['lb'].data[i, ..., :saved_n_betas] = \
-                                        intermediate_betas['lb']
-                                        self._modules[split_layer].single_intermediate_betas[
-                                            intermediate_layer]['ub'].data[i, ..., :saved_n_betas] = \
-                                        intermediate_betas['ub']
-                                    else:
-                                        print(
-                                            f"Warning: the intermediate bounds of sample {i} split {split_layer} layer {intermediate_layer} are not optimized, but initialization contains it with size {saved_n_betas}. It might be a bug.")
-
-                                elif intermediate_layer in self._modules[split_layer].history_intermediate_betas:
-                                    # Here we assume the last intermediate beta is the last split, which will still be 0.
-                                    # When we create specifications, we used single_beta_loc, which must have the current split at last.
-                                    self._modules[split_layer].history_intermediate_betas[
-                                        intermediate_layer]['lb'].data[i, ..., :saved_n_betas] = \
-                                    intermediate_betas['lb']
-                                    self._modules[split_layer].history_intermediate_betas[
-                                        intermediate_layer]['ub'].data[i, ..., :saved_n_betas] = \
-                                    intermediate_betas['ub']
-                                else:
-                                    print(
-                                        f"Warning: the intermediate bounds of sample {i} split {split_layer} layer {intermediate_layer} are not optimized, but initialization contains it. It might be a bug.")
-
+            # The list of layer numbers for refinement, can be positive or negative. -1 means refine the intermediate layer bound before last relu layer.
+            intermediate_refinement_layers = opts['ob_intermediate_refinement_layers']
+            # Change negative layer number to positive ones.
+            intermediate_refinement_layers = [layer if layer > 0 else layer + len(self.relus) for layer in
+                                            intermediate_refinement_layers]
+            # This is the first layer to refine; we do not need the specs for all layers before it.
+            first_layer_to_refine = self.relus[min(intermediate_refinement_layers)].name
+            # Change layer number to layer name.
+            intermediate_refinement_layers = [self.relus[layer].name for layer in intermediate_refinement_layers]
+            print(f'Layers for refinement: {intermediate_refinement_layers}; there are {len(self.relus) - len(intermediate_refinement_layers)} layers NOT being refined.')
+            # We only need to set some intermediate layer bounds.
+            partial_new_interval = new_interval.copy() if new_interval is not None else None  # Shallow copy.
+            # beta_constraint_specs is a disctionary that saves the coefficients for beta for each relu layer.
+            # all_intermediate_betas A list of all optimizable parameters for intermediate betas. Will be passed to the optimizer.
+            # For each neuron in each layer, we have M intermediate_beta variables where M is the number of constraints.
+            # We only need to collect some A matrices for the split constraints, so we keep a dictionary needed_A_list for it.
+            beta_constraint_specs, all_intermediate_betas, needed_A_list = self._init_intermediate_beta(x, opt_coeffs, intermediate_refinement_layers, first_layer_to_refine, partial_new_interval)
             # Add all intermediate layer beta to parameters.
             parameters.append({'params': all_intermediate_betas, 'lr': lr_intermediate_beta})
 
@@ -1042,21 +1023,20 @@ class BoundedModule(nn.Module):
             opt = AdamElementLR(parameters, lr=lr)
         elif opt_choice == "adam":
             opt = optim.Adam(parameters, lr=lr)
-        else:
+        elif opt_choices == 'sgd':
             opt = optim.SGD(parameters, lr=lr, momentum=0.9)
+        else:
+            raise NotImplementedError(opt_choices)
         # Create a weight vector to scale learning rate.
         loss_weight = torch.ones(size=(x[0].size(0),), device=x[0].device)
 
-        # scheduler = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=5, eta_min=0.1)
-        if lr_dynamic_decay is None:
-            scheduler = optim.lr_scheduler.ExponentialLR(opt, lr_decay)
+        scheduler = optim.lr_scheduler.ExponentialLR(opt, lr_decay)
 
-        # opt = optim.SGD(parameters, lr=lr, momentum=0.9)
         last_l = math.inf
         last_total_loss = torch.tensor(1e8, device=x[0].device, dtype=x[0].dtype)
         best_l = torch.zeros([x[0].shape[0], 1], device=x[0].device, dtype=x[0].dtype) + 1e8
 
-        if intermediate_beta_enabled and log:
+        if verbose > 0 and intermediate_beta_enabled:
             for layer in self.relus:
                 if layer.history_beta_used:
                     for k, v in layer.history_intermediate_betas.items():
@@ -1072,94 +1052,26 @@ class BoundedModule(nn.Module):
                             f'single split layer {layer.name} beta layer {k} lb value {v["lb"].abs().sum(dim=list(range(1, v["lb"].ndim))).detach().cpu().numpy()} ub value {v["ub"].abs().sum(dim=list(range(1, v["ub"].ndim))).detach().cpu().numpy()}')
 
         for i in range(iteration):
-            beta_spec_coeffs = {}  # Key of the dictionary is the pre-relu node name, value is the A matrices propagated to this pre-relu node. We will directly add it to the initial C matrices when computing intermediate bounds.
             if beta and intermediate_beta_enabled:
-                # Run CROWN using existing intermediate layer bounds, to get linear inequalities of beta constraints w.r.t. input.
-                for layer_idx, layer in enumerate(self.relus):
-                    if layer.split_beta_used and opt_coeffs:
-                        # In this loop, we add the current optimizable split constraint.
-                        assert layer.split_coeffs["dense"] is not None  # We only use dense split coefficients.
-                        if layer.name in beta_constraint_specs:
-                            # Now we have coefficients of both history constraints and split constraints, in shape [batch, n_nodes, n_beta].
-                            spec_C = torch.cat((beta_constraint_specs[layer.name],
-                                                -(layer.split_coeffs["dense"].repeat(2, 1) * layer.split_c).unsqueeze(
-                                                    1)), dim=1)
-                        else:
-                            spec_C = -(layer.split_coeffs["dense"].repeat(2, 1) * layer.split_c).unsqueeze(1)
-                    else:
-                        if layer.name in beta_constraint_specs:
-                            # This layer only has history constraints, no split constraints. This has already been saved into beta_constraint_specs.
-                            spec_C = beta_constraint_specs[layer.name]
-                        else:
-                            # This layer has no beta constraints.
-                            spec_C = None
-                    if spec_C is not None:
-                        # We now have the specifications, which are just coefficients for beta.
-                        # Now get A and bias w.r.t. input x for the layer just before Relu.
-                        # TODO: no concretization needed here.
-                        prev_layer_name = layer.inputs[0].name
-                        # Resize spec size in case there are conv layers.
-                        if not isinstance(spec_C, OneHotC):
-                            spec_C = spec_C.view(spec_C.size(0), spec_C.size(1), *layer.shape)
-                        # spec_C.index has shape (batch, n_max_beta_split). Need to transpose since alpha has output_shape before batch.
-                        alpha_idx = spec_C.index.transpose(0,1)
-                        # We need to find which relu layer is this, and set the start_idx accordingly to get the tightest possible bound with optimal alpha for this layer's intermediate bounds.
-                        # For example, if this is the pre-activation of the last relu layer, we want start_idx = 2; if it is the pre-activation of the second relu layer, we need to use the first set of alpha, so start_idx = len(self.relus).
-                        self.set_relu_used_count(start_idx=len(self.relus) - layer_idx + 1)
-                        # lower_spec_A contains the A matrices propagated from the split layer to all interemdiate layers.
-                        _, _, lower_spec_A = self.compute_bounds(x, aux, spec_C, IBP=False, forward=False,
-                                                                 method="CROWN", bound_lower=True, bound_upper=False,
-                                                                 reuse_ibp=True,
-                                                                 return_A=True, needed_A_list=needed_A_list[layer.name],
-                                                                 final_node_name=prev_layer_name, average_A=False,
-                                                                 new_interval=new_interval, alpha_idx=alpha_idx)
-                        self.set_relu_used_count(start_idx=len(self.relus) - layer_idx + 1)
-                        # For computing the upper bound, the spec vector needs to be negated.
-                        if not isinstance(spec_C, OneHotC):
-                            spec_C_neg = - spec_C
-                        else:
-                            spec_C_neg = spec_C._replace(coeffs = -spec_C.coeffs)
-                        # spec_C_neg.index has shape (batch, n_max_beta_split). Need to transpose since alpha has output_shape before batch.
-                        alpha_idx = spec_C_neg.index.transpose(0,1)
-                        _, _, upper_spec_A = self.compute_bounds(x, aux, spec_C_neg, IBP=False, forward=False,
-                                                                 method="CROWN", bound_lower=False, bound_upper=True,
-                                                                 reuse_ibp=True,
-                                                                 return_A=True, needed_A_list=needed_A_list[layer.name],
-                                                                 final_node_name=prev_layer_name, average_A=False,
-                                                                 new_interval=new_interval, alpha_idx=alpha_idx)
-                        # Merge spec_A matrices for lower and upper bound.
-                        spec_A = {}
-                        for k in lower_spec_A[prev_layer_name].keys():
-                            spec_A[k] = {}
-                            spec_A[k]["lA"] = lower_spec_A[prev_layer_name][k]["lA"]
-                            spec_A[k]["lbias"] = lower_spec_A[prev_layer_name][k]["lbias"]
-                            spec_A[k]["uA"] = upper_spec_A[prev_layer_name][k]["uA"]
-                            spec_A[k]["ubias"] = upper_spec_A[prev_layer_name][k]["ubias"]
-
-                        # Reset multiple alpha counter.
-                        self.set_relu_used_count(start_idx=start_idx)
-                        beta_spec_coeffs.update({prev_layer_name: spec_A})
-                        # del lb, ub, spec_A
-                intermediate_constr = beta_spec_coeffs
+                intermediate_constr = self._get_intermediate_beta_specs(x, aux, opt_coeffs, beta_constraint_specs, needed_A_list, new_interval)
             else:
                 intermediate_constr = None
 
-            ret = self.compute_bounds(x, aux, C, IBP, forward, method, bound_lower, bound_upper, reuse_ibp,
-                                      return_A=False, final_node_name=final_node_name, average_A=average_A,
-                                      # If we set neuron bounds individually, or if we are optimizing intermediate layer bounds using beta, we do not set new_interval.
-                                      # When intermediate betas are used, we must set new_interval to None because we want to recompute all intermediate layer bounds.
-                                      new_interval=partial_new_interval if beta and intermediate_beta_enabled else new_interval if update_by_layer else None,
-                                      # This is the currently tightest interval, which will be used to pass split constraints when intermediate betas are used.
-                                      reference_bounds=new_interval if beta and intermediate_beta_enabled or not update_by_layer else reference_bounds,
-                                      # These are intermediate layer beta variables and their corresponding A matrices and biases.
-                                      intermediate_constr=intermediate_constr,
-                                      # Reuse forward_value
-                                      clr_fv=False)
+            ret = self.compute_bounds(x, aux, C, method=method, IBP=IBP, forward=forward, 
+                                    bound_lower=bound_lower, bound_upper=bound_upper, reuse_ibp=reuse_ibp,
+                                    return_A=False, final_node_name=final_node_name, average_A=average_A,
+                                    # If we set neuron bounds individually, or if we are optimizing intermediate layer bounds using beta, we do not set new_interval.
+                                    # When intermediate betas are used, we must set new_interval to None because we want to recompute all intermediate layer bounds.
+                                    new_interval=partial_new_interval if beta and intermediate_beta_enabled else new_interval if update_by_layer else None,
+                                    # This is the currently tightest interval, which will be used to pass split constraints when intermediate betas are used.
+                                    reference_bounds=new_interval if beta and intermediate_beta_enabled or not update_by_layer else reference_bounds,
+                                    # These are intermediate layer beta variables and their corresponding A matrices and biases.
+                                    intermediate_constr=intermediate_constr)
 
             if i == 0:
                 best_ret = ret
                 best_intermediate_bounds = []
-                for model in self.relus + self.tanhs:
+                for model in self.optimizable_activations:
                     best_intermediate_bounds.append([model.inputs[0].lower.clone().detach(), model.inputs[0].upper.clone().detach()])
 
             ret_l, ret_u = ret[0], ret[1]
@@ -1169,72 +1081,28 @@ class BoundedModule(nn.Module):
                 ret = (ret_l, ret_u)
 
             l = ret_l
-
             if ret_l is not None and ret_l.shape[1] != 1:  # Reduction over the spec dimension.
-                if loss_reduction_func == "sum":  # Sum is preferred.
-                    l = ret_l.sum(1, keepdim=True)
-                elif loss_reduction_func == "mean":
-                    l = ret_l.mean(1, keepdim=True)
-                elif loss_reduction_func == "max":
-                    l = ret_l.max(1, keepdim=True).values  # we only optimize the bound with the best lower bound at each iter
-                elif loss_reduction_func == "min":
-                    l = ret_l.min(1, keepdim=True).values  # we only optimize the bound with the worst lower bound at each iter
-
+                l = loss_reduction_func(ret_l)
             u = ret_u
             if ret_u is not None and ret_u.shape[1] != 1:
-                if loss_reduction_func == "sum":
-                    u = ret_u.sum(1, keepdim=True)
-                elif loss_reduction_func == "mean":
-                    u = ret_u.mean(1, keepdim=True)
-                elif loss_reduction_func == "max":
-                    u = ret_u.max(1, keepdim=True).values  # we only optimize the bound with the best lower bound at each iter
-                elif loss_reduction_func == "min":
-                    u = ret_u.min(1, keepdim=True).values  # we only optimize the bound with the worst lower bound at each iter
+                u = loss_reduction_func(ret_u)                
 
             if beta and intermediate_beta_enabled and Check_against_base_lp:
-                total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[0, 0] - \
+                # NOTE stop_criterion here is not valid
+                stop_criterion = total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[0, 0] - \
                                             self._modules[Check_against_base_lp_layer].lower[
                                                 0, 1]  # 2.6972426192395584 matched
-                # total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[0,0]  # 2.6972426192395584 matched
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[0,0]  # 2.6972426192395584 matched
-                # total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[1,61]  # 5.071948938093193 matched
-                # 2nd split.
-                # total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[0,17]  # -0.20386706480794792 matched
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[1,16]  # -2.37483868335136 matched
-                # total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[1,73]  # 2.3038716420490046 matched
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[1,64]  # 0.12517279313231944 matched
-                # total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[3,83]  # 4.0738073124436625 matched
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[3,12,3,6]  # 2.51511603162689 matched
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[0,89]  # 2.7961623158771753 matched
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[0,8,2,6] # 0.4982599181278837 matched
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[0,70]  # matched
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[0,98]  # -2.333835206893964 matched
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[0,7,0,2]  # 1.187014866598755 matched
-                # total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[0,80]  # 3.2932843806515795 matched
-                # total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[0,80]  # 3.2932843806515795 matched, 3.3235884308952963 matched
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper.sum()  #
-                # Compute bounds for only one intermediate layer and check results with LP.
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[2,7]  # 0.5143728256225586 matched, beta 0.
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[2,7]  # 0.5143728256225586 matched, beta 0.
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[2,34]  # 1.8942551612854004 matched, beta 0.
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[2,8,0,0]  #
-                # total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[0,17]  # Dense layer /21
-                # total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[1,8,0,0]  # Conv layer /11
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[1,8,0,0]  # Conv layer /11
-                # total_loss = loss_ = loss = self._modules[Check_against_base_lp_layer].upper[1,7,7,7]  # Conv layer /9
-                # total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[0].sum()  # Dense layer /21
-                stop_criterion = loss_            
             else:
-                loss_ = l if opt_lower is True else -u
-                if against_all_classes:
-                    stop_criterion = ret[0].min(dim=1).values
-                else:
-                    stop_criterion = loss_  
+                loss_ = l if bound_lower else -u
+                stop_criterion = stop_criterion_func(ret_l) if bound_lower else stop_criterion_func(-ret_u)
                 total_loss = -1 * loss_
-                # only optimize the lower bounds < decision_thresh
-                loss = (total_loss * (stop_criterion < decision_thresh + 2e-4)).sum()
+                if type(stop_criterion) == bool:
+                    loss = total_loss.sum() * (not stop_criterion)
+                else:
+                    loss = (total_loss * stop_criterion.logical_not()).sum()
 
             with torch.no_grad():
+                # Save varibles if this is the best iteration.
                 if keep_best and (total_loss < best_l).any():
                     # we only pick up the results improved in a batch
                     idx = (total_loss < best_l).squeeze()
@@ -1245,21 +1113,14 @@ class BoundedModule(nn.Module):
                     if ret[1] is not None:
                         best_ret[1][idx] = ret[1][idx]
 
-                    for ii, model in enumerate(self.relus + self.tanhs):
+                    for ii, model in enumerate(self.optimizable_activations):
                         # best_intermediate_bounds.append([model.inputs[0].lower, model.inputs[0].upper])
                         best_intermediate_bounds[ii][0][idx] = model.inputs[0].lower[idx]
                         best_intermediate_bounds[ii][1][idx] = model.inputs[0].upper[idx]
                         if alpha:
-                            if use_per_neuron_alpha:
-                                # each alpha has shape (2, output_shape, batch, *shape)
-                                for alpha_m in model.alpha:
-                                    if method == 'forward':
-                                        best_alphas[model.name][alpha_m][idx] = model.alpha[alpha_m][idx].clone().detach()
-                                    else:
-                                        best_alphas[model.name][alpha_m][:,:,idx] = model.alpha[alpha_m][:,:,idx].clone().detach()
-                            else:
-                                # Alpha has shape (relu_count_idx, 2, batch, *shape)
-                                best_alphas[ii][:, :, idx] = alphas[ii][:, :, idx].clone().detach()
+                            # each alpha has shape (2, output_shape, batch, *shape)
+                            for alpha_m in model.alpha:
+                                best_alphas[model.name][alpha_m][:,:,idx] = model.alpha[alpha_m][:,:,idx].clone().detach()
                         if beta and single_node_split:
                             best_betas[ii][idx] = betas[ii][idx].clone().detach()
 
@@ -1301,23 +1162,14 @@ class BoundedModule(nn.Module):
                                         "ub": v["ub"],
                                     }
 
-            # if i == 0 or i == iteration - 1:
-            # print('optimal slope has loss:', loss.flatten(), scheduler.get_last_lr())
+            if os.environ.get('AUTOLIRPA_DEBUG_OPT', False):
+                print(f"****** iter [{i}]",
+                    f"loss: {loss.item()}, lr: {opt.param_groups[0]['lr']}")
 
-            # DEBUG
-            # print(f"\r****** iter [{i}]",
-            #     f"{decision_thresh} loss: {loss.item()}, lr: {opt.param_groups[0]['lr']} stop_criterion: {stop_criterion.min().item()}", end=" ")
-
-            if (stop_criterion > decision_thresh + 1e-4).all():  # all lower bounds > decision_thresh, no need to optimize
-                print("\nall verified with thresh {} at {}th iter".format(decision_thresh, i))
-                print(ret_l)
+            if isinstance(stop_criterion, torch.Tensor) and stop_criterion.all():
+                print(f"\nall verified at {i}th iter")
                 break
 
-            # early stop
-            if early_stop and (last_l <= loss and iteration < 100):
-                print('\nearly stop', i)
-                break
-            
             current_lr = []
             for param_group in opt.param_groups:
                 current_lr.append(param_group['lr'])
@@ -1330,7 +1182,7 @@ class BoundedModule(nn.Module):
 
             loss.backward()
 
-            if log:
+            if verbose > 0:
                 print(f"*** iter [{i}]\n", f"loss: {loss.item()}", total_loss.squeeze().detach().cpu().numpy(), "lr: ", current_lr)
                 if beta:
                     masked_betas = []
@@ -1361,13 +1213,7 @@ class BoundedModule(nn.Module):
                     if opt_coeffs:
                         for co in coeffs:
                             print(f'coeff sum: {co.abs().sum():.5g}')
-                    # print(self._modules['/11'].lower[0,10,0,7].item(), self._modules['/11'].upper[0,10,0,7].item(),
-                    #         self._modules['/11'].lower[0,28,0,0].item(), self._modules['/11'].upper[0,28,0,0].item())
-
-                    # print("beta: ", [p[0][q.nonzero(as_tuple=True)].detach().cpu().numpy() for p, q in zip(betas, beta_masks)])
-                    # print("beta_grad: ", [p.grad.abs().sum().item() if p.grad is not None else None for p in betas])
-                    # print("masked_beta_grad: ", [p.grad.abs().sum().item() if p is not None and p.grad is not None else None for p in masked_betas])
-                if beta and i == 0 and log:
+                if beta and i == 0 and verbose > 0:
                     breakpoint()
 
             if opt_choice == "adam-autolr":
@@ -1376,9 +1222,9 @@ class BoundedModule(nn.Module):
                 opt.step()
 
             if beta:
+                # Clipping to >=0.
                 for b in betas:
                     b.data = (b >= 0) * b.data
-                    # print(b, b.grad)
                 if intermediate_beta_enabled:
                     for b in all_intermediate_betas:
                         b.data = torch.clamp(b.data, min=0)
@@ -1387,56 +1233,37 @@ class BoundedModule(nn.Module):
                     coeffs[dmi].data = dense_coeffs_mask[dmi].float() * coeffs[dmi].data
 
             if alpha:
-                if use_per_neuron_alpha:
-                    for m in self.relus:
-                        for v in m.alpha.values():
-                            v.data = torch.clamp(v.data, 0., 1.)
-                    # For tanh, we clip it in bound_ops because clipping depends 
-                    # on pre-activation bounds
-                else:
-                    for model in self.relus:
-                        model.slope.data = torch.clamp(model.slope.data, 0., 1.)
+                for m in self.relus:
+                    for v in m.alpha.values():
+                        v.data = torch.clamp(v.data, 0., 1.)
+                # For tanh, we clip it in bound_ops because clipping depends
+                # on pre-activation bounds
 
             # If loss has become worse for some element, reset those to current best.
             with torch.no_grad():
                 if beta and opt_choice == "adam-autolr" and i > iteration * 0.2:
                     for ii, model in enumerate(self.relus):
                         if alpha:
-                            if use_per_neuron_alpha:
-                                # each alpha has shape (2, output_shape, batch, *shape)
-                                for alpha_m in model.alpha:
-                                    model.alpha[alpha_m][:,:,worse_idx] = best_alphas[model.name][alpha_m][:,:,worse_idx].clone().detach()
-                            else:
-                                # Alpha has shape (relu_count_idx, 2, batch, *shape)
-                                alphas[ii][:, :, worse_idx] = best_alphas[ii][:, :, worse_idx].clone().detach()
+                            # each alpha has shape (2, output_shape, batch, *shape)
+                            for alpha_m in model.alpha:
+                                model.alpha[alpha_m][:,:,worse_idx] = best_alphas[model.name][alpha_m][:,:,worse_idx].clone().detach()
                         if beta and single_node_split:
                             betas[ii][worse_idx] = best_betas[ii][worse_idx].clone().detach()
 
-            if lr_dynamic_decay is None:
-                scheduler.step()
-            else:
-                if loss > last_l:
-                    for p in opt.param_groups: 
-                        p['lr'] *= lr_dynamic_decay
+            scheduler.step()
             last_l = loss.item()
             last_total_loss = total_loss.detach().clone()
-            self.set_relu_used_count(start_idx=start_idx)
-        else:
-            # DEBUG
-            print()
 
-        if beta and intermediate_beta_enabled and log:
+        if beta and intermediate_beta_enabled and verbose > 0:
             breakpoint()
 
         if keep_best:
+            # Set all variables to their saved best values.
             with torch.no_grad():
-                for idx, model in enumerate(self.relus + self.tanhs):
+                for idx, model in enumerate(self.optimizable_activations):
                     if alpha:
-                        if use_per_neuron_alpha:
-                            # Assigns a new dictionary.
-                            model.alpha = best_alphas[model.name]
-                        else:
-                            model.slope.data = best_alphas[idx].data
+                        # Assigns a new dictionary.
+                        model.alpha = best_alphas[model.name]
                     model.inputs[0].lower.data = best_intermediate_bounds[idx][0].data
                     model.inputs[0].upper.data = best_intermediate_bounds[idx][1].data
                     if beta:
@@ -1466,71 +1293,54 @@ class BoundedModule(nn.Module):
         print("best_l after optimization:", best_l.sum().item(), "with beta sum per layer:", [p.sum().item() for p in betas])
         # np.save('solve_slope.npy', np.array(record))
         print('optimal alpha/beta time:', time.time() - start)
-
-        # Use gradients of masked_beta in last iteration for branching heurstic. We want to branch on these neurons
-        # where the gradient on beta is large. That will maximize the lower bound as large as possible.
-        # We must process the gradients now; if we do not use it now, the next compute_bounds() will discard them.
-        if beta and get_heuristic:
-            # Saves gradients of beta_masks.
-            beta_grads = []
-            # Get the number of neurons for each ReLU layer.
-            beta_length = [0]
-            # Get all gradients on masked_beta.
-            for m in self.relus:
-                if m.masked_beta is None or m.masked_beta.grad is None:
-                    # If gradient is None, we just use zero (nothing).
-                    t = torch.zeros(m.I.size(), device=m.I.device)
-                else:
-                    # Must be an unstable neuron, must have not been split yet.
-                    t = (m.masked_beta.grad * m.I.float() * (1 - m.beta_mask.abs())).abs()
-                t = t.view(t.size(0), -1)
-                beta_grads.append(t)
-                beta_length.append(t.size(1))
-
-            if len(beta_grads) > 9:
-                # clean former layers results, assume later is better
-                for i, m in enumerate(beta_grads):
-                    if i == len(beta_grads) - 5: break
-                    beta_grads[i] = torch.zeros(beta_grads[i].size(), device=beta_grads[i].device)
-
-            # Use beta_length to convert an index to its layer and offset.
-            beta_length = np.cumsum(beta_length)
-            # Flatten the gradients vector.
-            all_beta_grads = torch.cat(beta_grads, dim=1)
-            # Find the largest gradient.
-            largest = torch.argmax(all_beta_grads, dim=1)
-            # Find which layer and neuron this largest gradient belongs to.
-            next_split = []
-            for l in largest:
-                # Go over each element in this batch.
-                l = l.item()
-                layer = np.searchsorted(beta_length, l, side='right') - 1
-                idx = l - beta_length[layer]
-                next_split.append((layer, idx))
-            # Save results to this property, which will be accessed in batch_verification().
-            self.next_split_hint = next_split
-
-            """
-            # Print out splits and their corresponding history.
-            from collections import defaultdict
-            splits = defaultdict(list)
-            for i, m in enumerate(beta_masks):
-                for a in m.view(m.size(0), -1).nonzero():
-                    splits[a[0].item()].append(((i, a[1].item()), int((m.view(m.size(0), -1)[a[0]][a[1]].item()+1)/2)))
-            for k in sorted(splits.keys()):
-                print(k, 'optimized_bound history', splits[k], 'split', next_split[k])
-            print('optimized_bound next_split hint:', next_split)
-            val = torch.max(all_beta_grads, dim=1)[0]
-            print(largest, val)
-            input()
-            """
-        # self.set_relu_used_count(start_idx)
         return best_ret
 
-    def compute_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward', bound_lower=True,
-                       bound_upper=True, reuse_ibp=False,
+
+    def compute_bounds(self, x=None, aux=None, C=None, method='backward', IBP=False, forward=False, 
+                       bound_lower=True, bound_upper=True, reuse_ibp=False,
                        return_A=False, needed_A_list=None, final_node_name=None, average_A=False, new_interval=None,
-                       return_b=False, b_dict=None, reference_bounds=None, intermediate_constr=None, alpha_idx=None, clr_fv=True):
+                       return_b=False, b_dict=None, reference_bounds=None, intermediate_constr=None, alpha_idx=None):
+        r"""Main function for computing bounds.
+
+        Args:
+            x (tuple or None): Input to the model. If it is None, the input from the last 
+            `forward` or `compute_bounds` call is reused. Otherwise: the number of elements in the tuple should be 
+            equal to the number of input nodes in the model, and each element in the tuple 
+            corresponds to the value for each input node respectively. It should look similar 
+            as the `global_input` argument when used for creating a `BoundedModule`.
+
+            aux (object, optional): Auxliary information that can be passed to `Perturbation` 
+            classes for initializing and concretizing bounds, e.g., additional information 
+            for supporting synonym word subsitution perturbaiton. 
+
+            C (Tensor): The specification matrix that can map the output of the model with an 
+            additional linear layer. This is usually used for maping the logits output of the 
+            model to classification margins.
+
+            method (str): The main method for bound computation. Choices: 
+                * `IBP`: purely use Interval Bound Propagation (IBP) bounds.
+                * `CROWN-IBP`: use IBP to compute intermediate bounds, but use CROWN (backward mode LiRPA) to compute the bounds of the final node.
+                * `CROWN`: purely use CROWN to compute bounds for intermediate nodes and the final node.
+                * `Forward`: purely use forward mode LiRPA to compute the bounds.
+                * `Forward+Backward`: use forward mode LiRPA to compute bounds for intermediate nodes, but further use CROWN to compute bounds for the final node.
+                * `CROWN-Optimized` or `alpha-CROWN`: use CROWN, and also optimize the linear relaxation parameters for activations.
+
+            IBP (bool, optional): If `True`, use IBP to compute the bounds of intermediate nodes.
+            It can be automatically set according to `method`.
+
+            forward (bool, optional): If `True`, use the forward mode bound propagation to compute the bounds
+            of intermediate nodes. It can be automatically set according to `method`.            
+
+            bound_lower (bool, default `True`): If `True`, the lower bounds of the output needs to be computed.
+
+            bound_upper (bool, default `True`): If `True`, the upper bounds of the output needs to be computed.
+
+            reuse_ibp (bool, optional): If `True` and `method` is None, reuse the previously saved IBP bounds.
+
+        Returns:
+            bound (tuple): a tuple of computed lower bound and upper bound respectively.
+        """
+
         # Several shortcuts.
         method = method.lower() if method is not None else method
         if method == 'ibp':
@@ -1547,35 +1357,33 @@ class BoundedModule(nn.Module):
         elif method == 'forward+backward':
             method = 'backward'
             forward = True
-        elif method == "crown-optimized":
-            ob_lower = self.bound_opts.get('optimize_bound_args', {}).get('ob_lower')
-            ob_upper = self.bound_opts.get('optimize_bound_args', {}).get('ob_upper')
-            if ob_lower:
-                # FIXME: remove self.ob_lower and self.ob_upper, reduce options.
+        elif method == "crown-optimized" or method == 'alpha-crown':
+            if bound_lower:
                 ret1 = self.get_optimized_bounds(x=x, IBP=False, C=C, method='backward', new_interval=new_interval, reference_bounds=reference_bounds,
-                                                 bound_lower=bound_lower, bound_upper=bound_upper, return_A=return_A,
-                                                 opt_lower=True, opt_upper=False)
-
-            if ob_upper:
+                                                 bound_lower=bound_lower, bound_upper=False, return_A=return_A)
+            if bound_upper:
                 ret2 = self.get_optimized_bounds(x=x, IBP=False, C=C, method='backward', new_interval=new_interval, reference_bounds=reference_bounds,
-                                                 bound_lower=bound_lower, bound_upper=bound_upper, return_A=return_A,
-                                                 opt_lower=False, opt_upper=True)
-            if ob_lower and ob_upper:
+                                                 bound_lower=False, bound_upper=bound_upper, return_A=return_A)
+            if bound_upper and bound_upper:
                 assert return_A is False
                 return ret1[0], ret2[1]
-            elif ob_lower:
+            elif bound_lower:
                 return ret1
-            elif ob_upper:
+            elif bound_upper:
                 return ret2
             else:
                 raise NotImplementedError
+
+        # If y in self.backward_node_pairs[x], then node y is visited when 
+        # doing backward bound propagation starting from node x.
+        self.backward_from = dict([(node, []) for node in self._modules])
 
         if not bound_lower and not bound_upper:
             raise ValueError('At least one of bound_lower and bound_upper in compute_bounds should be True')
         A_dict = {} if return_A else None
 
         if x is not None:
-            self._set_input(*x, new_interval=new_interval, clr_fv=clr_fv)
+            self._set_input(*x, new_interval=new_interval)
 
         if IBP and method is None and reuse_ibp:
             # directly return the previously saved ibp bounds
@@ -1609,7 +1417,7 @@ class BoundedModule(nn.Module):
                     # This inpute/parameter does not has perturbation. 
                     # Use plain tuple defaulting to Linf perturbation.
                     root[i].interval = (value, value)
-                    root[i].forward_value = root[i].fv = root[i].value = root[i].lower = root[i].upper = value
+                    root[i].forward_value = root[i].forward_value = root[i].value = root[i].lower = root[i].upper = value
 
             if self.ibp_relative:
                 root[i].lower = root[i].interval.lower
@@ -1635,9 +1443,9 @@ class BoundedModule(nn.Module):
 
         if C is None:
             # C is an identity matrix by default 
-            if final.default_shape is None:
+            if final.output_shape is None:
                 raise ValueError('C is not provided while node {} has no default shape'.format(final.shape))
-            dim_output = int(np.prod(final.default_shape[1:]))
+            dim_output = int(np.prod(final.output_shape[1:]))
             C = torch.eye(dim_output, device=self.device).unsqueeze(0).repeat(batch_size, 1, 1)  # TODO: use an eyeC object here.
 
         # check whether weights are perturbed and set nonlinear for the BoundMatMul operation
@@ -1671,7 +1479,7 @@ class BoundedModule(nn.Module):
             if hasattr(i, 'nonlinear') and i.nonlinear:
                 for l_name in i.input_name:
                     node = self._modules[l_name]
-                    # print('node', node, 'lower', hasattr(node, 'lower'), 'perturbed', node.perturbed, 'forward_value', hasattr(node, 'forward_value'), 'fv', hasattr(node, 'fv'), 'from_input', node.from_input)
+                    # print('node', node, 'lower', hasattr(node, 'lower'), 'perturbed', node.perturbed, 'forward_value', hasattr(node, 'forward_value'), 'from_input', node.from_input)
                     if not hasattr(node, 'lower'):
                         assert not IBP, 'There should be no missing intermediate bounds when IBP is enabled'
                         if not node.perturbed and hasattr(node, 'forward_value'):
@@ -1720,7 +1528,7 @@ class BoundedModule(nn.Module):
                                 if not first_layer_flag:
                                     reduced_dim = False  # Only partial neurons (unstable neurons) are bounded.
                                     unstable_idx = None
-                                    dim = int(np.prod(node.default_shape[1:]))
+                                    dim = int(np.prod(node.output_shape[1:]))
                                     # FIXME: C matrix shape incorrect for BoundParams.
                                     if (isinstance(node, BoundLinear) or isinstance(node, BoundMatMul)) and int(
                                             os.environ.get('AUTOLIRPA_USE_FULL_C', 0)) == 0:
@@ -1736,28 +1544,29 @@ class BoundedModule(nn.Module):
                                             # Number of unstable neurons after merging.
                                             max_non_zero = unstable_locs.sum()
                                             # Create an abstract C matrix, the unstable_idx are the non-zero elements in specifications for all batches.
-                                            newC = OneHotC([batch_size, max_non_zero, *node.default_shape[1:]], self.device, unstable_idx, None)
+                                            newC = OneHotC([batch_size, max_non_zero, *node.output_shape[1:]], self.device, unstable_idx, None)
                                             reduced_dim = True
                                             # print(f'layer {node.name} total {dim} unstable {max_non_zero} newC {newC.shape}')
                                             """
                                             newC = torch.eye(dim, device=self.device) \
                                                 .unsqueeze(0).repeat(batch_size, 1, 1) \
-                                                .view(batch_size, dim, *node.default_shape[1:])
+                                                .view(batch_size, dim, *node.output_shape[1:])
                                             print(f'creating new C {newC.size()}')
                                             if int(os.environ.get('USE_EYE_C', 0)) == 1:
-                                                newC = eyeC([batch_size, dim, *node.default_shape[1:]], self.device)
+                                                newC = eyeC([batch_size, dim, *node.output_shape[1:]], self.device)
                                             """
                                         else:
-                                            newC = eyeC([batch_size, dim, *node.default_shape[1:]], self.device)
+                                            newC = eyeC([batch_size, dim, *node.output_shape[1:]], self.device)
                                     elif (isinstance(node, BoundConv) or isinstance(node,
                                                                                     BoundBatchNormalization)) and node.mode == "patches":
+                                        # import pdb; pdb.set_trace()
                                         # Here we create an Identity Patches object 
                                         newC = Patches(None, 1, 0,
-                                                       [batch_size, node.default_shape[-2] * node.default_shape[-1],
-                                                        node.default_shape[-3], node.default_shape[-3], 1, 1], 1)
+                                                       [batch_size, node.output_shape[-2] * node.output_shape[-1],
+                                                        node.output_shape[-3], node.output_shape[-3], 1, 1], 1)
                                     elif isinstance(node, BoundAdd) and node.mode == "patches":
-                                        num_channel = node.default_shape[-3]
-                                        L = node.default_shape[-2] * node.default_shape[-1]
+                                        num_channel = node.output_shape[-3]
+                                        L = node.output_shape[-2] * node.output_shape[-1]
                                         patches = (torch.eye(num_channel, device=self.device)).unsqueeze(0).unsqueeze(
                                             0).unsqueeze(4).unsqueeze(5).expand(batch_size, L, num_channel, num_channel, 1, 1)  # now [1 * 1 * in_C * in_C * 1 * 1]
                                         newC = Patches(patches, 1, 0, [batch_size] + list(patches.shape[1:]))
@@ -1779,13 +1588,15 @@ class BoundedModule(nn.Module):
                                             newC = torch.zeros([1, max_non_zero, dim], device=self.device)
                                             # Fill the corresponding elements to 1.0
                                             newC[0, torch.arange(max_non_zero), unstable_idx] = 1.0
-                                            newC = newC.repeat(batch_size, 1, 1).view(batch_size, max_non_zero, *node.default_shape[1:])
+                                            newC = newC.repeat(batch_size, 1, 1).view(batch_size, max_non_zero, *node.output_shape[1:])
                                             reduced_dim = True
                                             # print(f'layer {node.name} total {dim} unstable {max_non_zero} newC {newC.size()}')
                                         else:
+                                            if dim > 1000:
+                                                warnings.warn(f"Creating an identity matrix with size {dim}x{dim} for node {node}. This may indicate poor performance for bound computation. If you see this message on a small network please submit a bug report.", stacklevel=2)
                                             newC = torch.eye(dim, device=self.device) \
                                                 .unsqueeze(0).repeat(batch_size, 1, 1) \
-                                                .view(batch_size, dim, *node.default_shape[1:])
+                                                .view(batch_size, dim, *node.output_shape[1:])
                                     # print('Creating new C', type(newC), 'for', node)
                                     if False:  # TODO: only return A_dict of final layer
                                         _, _, A_dict = self._backward_general(C=newC, node=node, root=root,
@@ -1797,10 +1608,10 @@ class BoundedModule(nn.Module):
                                         # If we only calculated unstable neurons, we need to scatter the results back based on reference bounds.
                                         new_lower = reference_bounds[node.name][0].detach().clone().view(batch_size, -1)
                                         new_lower[:, unstable_idx] = node.lower.view(batch_size, -1)
-                                        node.lower = new_lower.view(batch_size, *node.default_shape[1:])
+                                        node.lower = new_lower.view(batch_size, *node.output_shape[1:])
                                         new_upper = reference_bounds[node.name][1].detach().clone().view(batch_size, -1)
                                         new_upper[:, unstable_idx] = node.upper.view(batch_size, -1)
-                                        node.upper = new_upper.view(batch_size, *node.default_shape[1:])
+                                        node.upper = new_upper.view(batch_size, *node.output_shape[1:])
                                     # node.lower and node.upper (intermediate bounds) are computed in the above function.
                                     # If we have bound references, we set them here to always obtain a better set of bounds.
                                     if reference_bounds is not None and node.name in reference_bounds:
@@ -1947,6 +1758,7 @@ class BoundedModule(nn.Module):
         all_nodes_before = []
         while len(queue) > 0:
             l = queue.popleft()
+            self.backward_from[l.name].append(node)
             for l_pre in l.input_name:
                 all_nodes_before.append(l_pre)
                 degree_out[l_pre] += 1  # calculate the out degree
@@ -1968,20 +1780,6 @@ class BoundedModule(nn.Module):
         node.lA = C if bound_lower else None
         node.uA = C if bound_upper else None
         lb = ub = torch.tensor(0., device=self.device)
-
-        def _get_A_shape(node):
-            shape_A = ''
-            if bound_lower:
-                try:
-                    shape_A += 'lA shape {} '.format(node.lA.shape)
-                except:
-                    pass
-            if bound_upper:
-                try:
-                    shape_A += 'uA shape {} '.format(node.uA.shape)
-                except:
-                    pass
-            return shape_A
 
         beta_watch_list = defaultdict(dict)
         if intermediate_constr is not None:
@@ -2088,19 +1886,12 @@ class BoundedModule(nn.Module):
                     if small_A == 2:
                         continue
 
-                try:
-                    # TODO automatically check A shape
-                    logger.debug('Backward at {}[{}], fv shape {}, {}'.format(
-                        l, l.name, l.forward_value.shape, _get_A_shape(l)))
-                except:
-                    pass
-
                 if isinstance(l, BoundRelu):
                     A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes, start_node=node, unstable_idx=unstable_idx,
                                                            beta_for_intermediate_layers=intermediate_constr is not None)  # TODO: unify this interface.
-                elif isinstance(l, BoundActivation):
+                elif isinstance(l, BoundOptimizableActivation):
                     A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes, 
-                    start_shape=(prod(node.output_shape) if node.name != self.final_name 
+                    start_shape=(prod(node.output_shape[1:]) if node.name != self.final_name
                         else C.shape[0]), start_node=node)
                 else:
                     A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes)
@@ -2224,8 +2015,8 @@ class BoundedModule(nn.Module):
             lb = lb.transpose(0, 1)
         if ub.ndim >= 2:
             ub = ub.transpose(0, 1)
-        output_shape = node.default_shape[1:]
-        if np.prod(node.default_shape[1:]) != output_dim and type(C) != Patches:
+        output_shape = node.output_shape[1:]
+        if np.prod(node.output_shape[1:]) != output_dim and type(C) != Patches:
             output_shape = [-1]
 
         if return_A:
@@ -2272,23 +2063,23 @@ class BoundedModule(nn.Module):
             # FIXME to simplify
             elif i < self.num_global_inputs:
                 if not isinstance(lA, eyeC):
-                    lb = lb + lA.bmm(root[i].fv.view(batch_size, -1, 1)).squeeze(-1) if bound_lower else None
+                    lb = lb + lA.bmm(root[i].forward_value.view(batch_size, -1, 1)).squeeze(-1) if bound_lower else None
                 else:
-                    lb = lb + root[i].fv.view(batch_size, -1) if bound_lower else None
+                    lb = lb + root[i].forward_value.view(batch_size, -1) if bound_lower else None
                 if not isinstance(uA, eyeC):
                     # FIXME looks questionable
-                    ub = ub + uA.bmm(root[i].fv.view(batch_size, -1, 1)).squeeze(-1) if bound_upper else None
+                    ub = ub + uA.bmm(root[i].forward_value.view(batch_size, -1, 1)).squeeze(-1) if bound_upper else None
                 else:
-                    ub = ub + root[i].fv.view(batch_size, -1) if bound_upper else None
+                    ub = ub + root[i].forward_value.view(batch_size, -1) if bound_upper else None
             else:
                 if isinstance(lA, eyeC):
-                    lb = lb + root[i].fv.view(1, -1) if bound_lower else None
+                    lb = lb + root[i].forward_value.view(1, -1) if bound_lower else None
                 else:
-                    lb = lb + lA.matmul(root[i].fv.view(-1, 1)).squeeze(-1) if bound_lower else None                    
+                    lb = lb + lA.matmul(root[i].forward_value.view(-1, 1)).squeeze(-1) if bound_lower else None                    
                 if isinstance(uA, eyeC):
-                    ub = ub + root[i].fv.view(1, -1) if bound_upper else None
+                    ub = ub + root[i].forward_value.view(1, -1) if bound_upper else None
                 else:
-                    ub = ub + uA.matmul(root[i].fv.view(-1, 1)).squeeze(-1) if bound_upper else None
+                    ub = ub + uA.matmul(root[i].forward_value.view(-1, 1)).squeeze(-1) if bound_upper else None
         node.lower = lb.view(batch_size, *output_shape) if bound_lower else None
         node.upper = ub.view(batch_size, *output_shape) if bound_upper else None
 
@@ -2301,7 +2092,7 @@ class BoundedModule(nn.Module):
 
         if not node.from_input:
             w = None
-            b = node.forward_value
+            b = node.value
             node.linear = LinearBound(w, b, w, b, b, b)
             node.lower = node.upper = b
             node.interval = (node.lower, node.upper)
@@ -2372,7 +2163,8 @@ class BoundedModule(nn.Module):
         if dim_in == 0:
             raise ValueError("At least one node should have a specified perturbation")
         prev_dim_in = 0
-        batch_size = root[0].fv.shape[0]
+        # Assumption: root[0] is the input node which implies batch_size
+        batch_size = root[0].value.shape[0]
         for i in range(len(root)):
             if hasattr(root[i], 'perturbation') and root[i].perturbation is not None:
                 shape = root[i].linear.lw.shape

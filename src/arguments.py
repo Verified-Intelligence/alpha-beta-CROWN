@@ -17,7 +17,6 @@ def common_argparser():
     parser.add_argument("--timeout", type=float, default=360, help='timeout for one property')
     parser.add_argument("--start", type=int, default=0, help='start from i-th property')
     parser.add_argument("--end", type=int, default=1000, help='end with (i-1)-th property')
-    parser.add_argument("--new_branching", action='store_true', help='try the new gradient based branching heuristic')
     parser.add_argument("--branching_method", default="kfsb", choices=["babsr", "fsb", "kfsb"], help='branching method')
     parser.add_argument("--branching_candidates", type=int, default=3, help='select topK candidate per layer when using fsb or kfsb')
     parser.add_argument("--branching_reduceop", choices=["min", "max", "mean", "auto"], default="min", help='reduction operation to compute branching scores from two sides of a branch.')
@@ -36,9 +35,12 @@ def common_argparser():
     parser.add_argument("--conv_mode", default="patches", choices=["patches", "matrix"], help='conv mode in BoundedModule')
     parser.add_argument("--deterministic", action='store_true', help='Run code in CUDA deterministic mode, slower performance but better reproducibility.')
     parser.add_argument("--double_fp", action='store_true', help='Use double precision floating point. GPUs with good double precision support are needed (NVIDIA P100, V100, A100; AMD Radeon Instinc MI50, MI100)')
-    parser.add_argument("--no_per_neuron_slopes", action='store_false', dest='per_neuron_slopes', help='Use per-neuron slope for optimized CROWN bounds.')
     parser.add_argument("--share_slopes", action='store_true', help='When --per_neuron_alpha is True, use shared alpha.')
     parser.add_argument("--loss_reduction_func", default="sum")
+    parser.add_argument('--mip_multi_proc', type=int, default=None, help='Multiprocess threads for mip solver/refine, default to be detected cpu cores, note that the total process used for mip refinement is args.mip_multi_proc*args.mip_threads')
+    parser.add_argument('--mip_threads', type=int, default=1, help='Threads used for single mip solver/refine, default to be 1, note that the total process used for mip refinement is args.mip_multi_proc*args.mip_threads')
+    parser.add_argument('--mip_refine_timeout', type=float, default=0.8, help='Percentage of time used for MIP based bound refinement, default to be 0.8*args.timeout')
+    parser.add_argument('--mip_perneuron_refine_timeout', type=float, default=15, help='Timeout used for MIP to solve upper/lower bound for each refined neuron, default to be 15s')
 
     return parser
 
