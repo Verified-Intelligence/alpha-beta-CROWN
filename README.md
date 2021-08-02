@@ -75,12 +75,31 @@ time.
 If you find our verifier useful, please kindly cite our papers:
 
 ```
+@article{zhang2018efficient,
+  title={Efficient Neural Network Robustness Certification with General Activation Functions},
+  author={Zhang, Huan and Weng, Tsui-Wei and Chen, Pin-Yu and Hsieh, Cho-Jui and Daniel, Luca},
+  journal={Advances in Neural Information Processing Systems},
+  volume={31},
+  pages={4939--4948},
+  year={2018},
+  url={https://arxiv.org/pdf/1811.00866.pdf}
+}
+
 @article{xu2020automatic,
   title={Automatic perturbation analysis for scalable certified robustness and beyond},
   author={Xu, Kaidi and Shi, Zhouxing and Zhang, Huan and Wang, Yihan and Chang, Kai-Wei and Huang, Minlie and Kailkhura, Bhavya and Lin, Xue and Hsieh, Cho-Jui},
   journal={Advances in Neural Information Processing Systems},
   volume={33},
   year={2020}
+}
+
+@article{salman2019convex,
+  title={A Convex Relaxation Barrier to Tight Robustness Verification of Neural Networks},
+  author={Salman, Hadi and Yang, Greg and Zhang, Huan and Hsieh, Cho-Jui and Zhang, Pengchuan},
+  journal={Advances in Neural Information Processing Systems},
+  volume={32},
+  pages={9835--9846},
+  year={2019}
 }
 
 @inproceedings{xu2021fast,
