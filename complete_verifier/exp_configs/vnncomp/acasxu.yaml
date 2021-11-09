@@ -1,0 +1,16 @@
+# Configuration file for running the ACASXu benchmark.
+general:
+  root_path: ../../vnncomp2021/benchmarks/acasxu  # Please clone the vnncomp2021 repo first as it contains the benchmark.
+  csv_name: acasxu_instances.csv
+data:
+  dataset: ACASXU
+solver:
+  beta-crown:
+    batch_size: 1000  # Number of parallel domains to compute on GPU.
+    iteration: 10  # Iterations for computing intermediate layer bounds.
+  alpha-crown:
+    share_slopes: True  # This produces slightly looser bounds, but faster.
+bab:
+  branching:
+    method: sb  # Split on input space.
+    candidates: 3

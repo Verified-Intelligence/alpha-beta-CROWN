@@ -5,78 +5,72 @@ import re
 from collections import namedtuple
 from torch.onnx import OperatorExportTypes
 from packaging import version
-from auto_LiRPA.bounded_tensor import BoundedTensor, BoundedParameter
-from auto_LiRPA.utils import logger, unpack_inputs
+from .bounded_tensor import BoundedTensor, BoundedParameter
+from .utils import logger, unpack_inputs
 
 Node = namedtuple('Node', (
     'name', 'ori_name', 'inputs', 'attr', 'op', 'param', 'input_index', 
-    'bound_node', 'output_index', 'perturbation'))
-
-def replace(name, scope):
-    return '/'.join([scope[name], name])
+    'bound_node', 'output_index', 'perturbation'), defaults=(None,) * 10)
 
 def get_node_name(node):
     return node.debugName()
 
 def parse_graph(graph, inputs, params):
-    # in what scope is each node used as an input
+    input_all = []
+    input_used = []    
     scope = {}
-
+    for n in graph.inputs():
+        input_all.append(n.debugName())
     for n in graph.nodes():
         n_inputs = [get_node_name(i) for i in n.inputs()]
-
-        for inp in n_inputs:
-            if not inp in scope:
-                scope[inp] = n.scopeName()
-
+        for inp in n.inputs():
+            input_used.append(inp.debugName())        
         for out in n.outputs():
-            name = out.debugName()
-            scope[name] = n.scopeName()
+            scope[get_node_name(out)] = n.scopeName()
+    for node in graph.inputs():
+        name = get_node_name(node)
+        scope[name] = ''
+    for n in graph.outputs():
+        name = get_node_name(n)
+        if name in input_all:
+            # This output node directly comes from an input node with an Op
+            input_used.append(n.debugName())
 
+    def name_with_scope(node):
+        name = get_node_name(node)
+        return '/'.join([scope[name], name])
+    
     nodesOP = []
     for n in graph.nodes():
         attrs = {k: n[k] for k in n.attributeNames()}
-
-        n_inputs = [replace(get_node_name(i), scope) for i in n.inputs()]
-
+        n_inputs = [name_with_scope(i) for i in n.inputs()]
         for i, out in enumerate(list(n.outputs())):
-            name = get_node_name(out)
-            nodesOP.append(Node(**{'name': replace(name, scope),
-                                'ori_name': '',
+            nodesOP.append(Node(**{'name': name_with_scope(out),
                                 'op': n.kind(),
                                 'inputs': n_inputs,
                                 'attr': attrs,
-                                'param': None,  # will assign parameters later
-                                'input_index': None, # for input nodes only
-                                'bound_node': None, 
                                 'output_index': i, 
-                                'perturbation': None, }))
-            if n.kind() == 'onnx::BatchNormalization': 
-                break  # bn layer has some redundant outputs
-    nodesOP_dict = {}
-    for n in nodesOP:
-        nodesOP_dict[n.name] = n
+                                }))
 
     # filter out input nodes in `graph.inputs()` that are actually used
     nodesIn = []
-    used_index = []
+    used_by_index = []
     for i, n in enumerate(graph.inputs()):
         name = get_node_name(n)
-        used = name in scope.keys()
-        used_index.append(used)
+        used = name in input_used
+        used_by_index.append(used)
         if used:
             nodesIn.append(n)
-
     # filter out input nodes in `inputs` that are actually used
     inputs_unpacked = unpack_inputs(inputs)
     assert len(list(graph.inputs())) == len(inputs_unpacked) + len(params)
-    inputs = [inputs_unpacked[i] for i in range(len(inputs_unpacked)) if used_index[i]]  
+    inputs = [inputs_unpacked[i] for i in range(len(inputs_unpacked)) if used_by_index[i]]  
     # index of the used inputs among all the inputs
-    input_index = [i for i in range(len(inputs_unpacked)) if used_index[i]]
+    input_index = [i for i in range(len(inputs_unpacked)) if used_by_index[i]]
     # Add a name to all inputs
     inputs = list(zip(["input_{}".format(input_index[i]) for i in range(len(inputs))], inputs))
     # filter out params that are actually used
-    params = [params[i] for i in range(len(params)) if used_index[i + len(inputs_unpacked)]]
+    params = [params[i] for i in range(len(params)) if used_by_index[i + len(inputs_unpacked)]]
     inputs_and_params = inputs + params
     assert len(nodesIn) == len(inputs_and_params) 
 
@@ -84,19 +78,18 @@ def parse_graph(graph, inputs, params):
     nodesOut = []
     for n in graph.outputs():
         # we only record names
-        nodesOut.append(replace(get_node_name(n), scope))
+        nodesOut.append(name_with_scope(n))
 
     for i, n in enumerate(nodesIn):
-        name = get_node_name(n)
-        if isinstance(inputs_and_params[i][1], BoundedTensor) or \
-                isinstance(inputs_and_params[i][1], BoundedParameter):
+        if (isinstance(inputs_and_params[i][1], BoundedTensor) or 
+                isinstance(inputs_and_params[i][1], BoundedParameter)):
             perturbation = inputs_and_params[i][1].ptb
         else:
             perturbation = None
         if n.type().sizes() != list(inputs_and_params[i][1].size()):
             raise RuntimeError("Input tensor shapes do not much: {} != {}".format(
                 n.type().sizes(), list(inputs_and_params[i][1].size())))
-        nodesIn[i] = Node(**{'name': replace(name, scope),
+        nodesIn[i] = Node(**{'name': name_with_scope(n),
                              'ori_name': inputs_and_params[i][0],
                              'op': 'Parameter',
                              'inputs': [], 
@@ -104,8 +97,6 @@ def parse_graph(graph, inputs, params):
                              'param': inputs_and_params[i][1] if i >= len(inputs) else None,
                              # index among all the inputs including unused ones 
                              'input_index': input_index[i] if i < len(inputs) else None,
-                             'bound_node': None,
-                             'output_index': None,
                              # Input nodes may have perturbation, if they are wrapped in BoundedTensor or BoundedParameters
                              'perturbation': perturbation, })
 
@@ -151,20 +142,11 @@ def get_output_template(out):
 
 def parse_module(module, inputs, param_exclude=".*AuxLogits.*", param_include=None):
     params = _get_jit_params(module, param_exclude=param_exclude, param_include=param_include)
-    if version.parse(torch.__version__) < version.parse("1.4.0"):
-        trace, out = torch.jit.get_trace_graph(module, inputs)
-        torch.onnx._optimize_trace(trace, torch.onnx.OperatorExportTypes.ONNX)
-        trace_graph = trace.graph()
-    else:
-        # _get_trace_graph becomes an internal function in version >= 1.4.0
-        trace, out = torch.jit._get_trace_graph(module, inputs)
-        # this is not present in older torch
-        from torch.onnx.symbolic_helper import _set_opset_version
-        if version.parse(torch.__version__) < version.parse("1.5.0"):
-            _set_opset_version(11)
-        else:
-            _set_opset_version(12)
-        trace_graph = torch.onnx.utils._optimize_graph(trace, torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK, params_dict={})
+    # PyTorch>=1.5 is required here
+    trace, out = torch.jit._get_trace_graph(module, inputs)
+    from torch.onnx.symbolic_helper import _set_opset_version
+    _set_opset_version(12)
+    trace_graph = torch.onnx.utils._optimize_graph(trace, torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK, params_dict={})
 
     logger.debug('trace_graph: {}'.format(trace_graph))
 

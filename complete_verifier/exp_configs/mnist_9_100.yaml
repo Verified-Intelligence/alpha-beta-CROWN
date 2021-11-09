@@ -1,0 +1,25 @@
+general:
+  mode: verified-acc
+  complete_verifier: bab-refine
+model:
+  name: mnist_9_100
+  path: models/eran/mnist_9_100_nat.pth
+data:
+  dataset: MNIST_ERAN_UN
+  std: [1.0]
+  mean: [0.0]
+specification:
+  epsilon: 0.026
+attack:
+  pgd_order: after
+solver:
+  beta-crown:
+    batch_size: 1024
+    iteration: 20
+  mip:
+    parallel_solvers: 16
+    refine_neuron_time_percentage: 0.8
+bab:
+  timeout: 300
+  branching:
+    reduceop: max

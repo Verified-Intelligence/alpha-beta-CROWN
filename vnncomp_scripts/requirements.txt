@@ -1,0 +1,5 @@
+sortedcontainers>=2.4
+onnx==1.9.0
+onnxruntime==1.8.0
+git+git://github.com/Sarimuko/onnx2pytorch@master#egg=onnx2pytorch
+pandas==1.2

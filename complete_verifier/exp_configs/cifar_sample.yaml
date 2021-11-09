@@ -1,0 +1,19 @@
+general:
+  mode: runnerup
+  enable_incomplete_verification: False
+model:
+  name: cnn_4layer_b
+  path: models/sdp/cifar_cnn_b_adv.model
+data:
+  dataset: CIFAR_SAMPLE
+specification:
+  epsilon: 0.3
+attack:
+  pgd_order: skip
+solver:
+  beta-crown:
+    batch_size: 300
+    iteration: 20
+bab:
+  timeout: 180
+  decision_thresh: 99999999

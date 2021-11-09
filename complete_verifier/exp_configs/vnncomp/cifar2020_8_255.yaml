@@ -1,0 +1,18 @@
+# python bab_verification_general.py --dataset CIFAR --batch_size 200 --branching_candidates 10 --branching_reduceop max --lr_beta 0.01 --root_path ../../vnncomp2021/benchmarks/cifar2020 --csv_name cifar2020_instances.csv
+
+general:
+  mode: verified-acc
+  root_path: ../../vnncomp2021/benchmarks/cifar2020  # Please update this path to point to the VNN-COMP 2021 repo
+  csv_name: cifar2020_instances.csv
+data:
+  dataset: CIFAR
+  start: 82
+  end: 138
+solver:
+  beta-crown:
+    batch_size: 200
+    lr_beta: 0.01
+bab:
+  branching:
+    reduceop: max
+    candidates: 10

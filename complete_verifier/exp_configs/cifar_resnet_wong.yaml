@@ -1,0 +1,22 @@
+general:
+  mode: verified-acc
+model:
+  name: model_resnet
+  path: models/eran/cifar_resnet_8px.pth
+data:
+  dataset: CIFAR
+  mean: [0.485, 0.456, 0.406]
+  std: [0.225, 0.225, 0.225]
+  end: 1000
+specification:
+  epsilon: 0.03137254901  # 8./255.
+attack:
+  pgd_restarts: 30
+solver:
+  alpha-crown:
+    share_slopes: true
+  beta-crown:
+    batch_size: 8
+    iteration: 20
+bab:
+  timeout: 180

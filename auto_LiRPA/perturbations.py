@@ -4,12 +4,13 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from auto_LiRPA.utils import logger, eyeC, LinearBound, Patches, BoundList, patchesToMatrix, check_padding
+from .utils import logger, eyeC, LinearBound, Patches, BoundList, patches_to_matrix, inplace_unfold
 import torch.nn.functional as F
 
 class Perturbation:
     r"""
-    Base class for a perturbation specification. 
+    Base class for a perturbation specification. Please see examples
+    at `auto_LiRPA/perturbations.py`.    
 
     Examples: 
 
@@ -205,36 +206,41 @@ class PerturbationLpNorm(Perturbation):
                 center = (x_U + x_L) / 2.0
                 diff = (x_U - x_L) / 2.0
                 if not A.identity == 1:
-                    # unfold the input as [batch_size, L, in_c * H * W]
-                    padded_center, padding = check_padding(center, A.padding)
-                    unfold_input = F.unfold(padded_center, kernel_size=A.patches.size(-1), padding = padding, stride = A.stride).transpose(-2, -1)
-                    # reshape the input as [batch_size, L, 1, in_c, H, W]
-                    unfold_input = unfold_input.view(unfold_input.size(0), unfold_input.size(1), -1, A.patches.size(-3), A.patches.size(-2), A.patches.size(-1))
+                    # last_A shape: [out_c, batch_size, out_h, out_w, in_c, H, W] or [unstable_size, batch_size, in_c, H, W]. Here out_c is the spec dimension.
+                    patches = A.patches
 
-                    # use torch.einsum() to save memory, equal to:
-                    # prod = (unfold_input * A.patches).sum((-1, -2, -3)).transpose(-2, -1)
-                    if unfold_input.shape[1] == A.patches.shape[1]:
-                        prod = torch.einsum('ijaxyz,ijbxyz->ibj', unfold_input, A.patches)
+                    # unfold the input as [batch_size, out_h, out_w, in_c, H, W]
+                    unfold_input = inplace_unfold(center, kernel_size=A.patches.shape[-2:], padding = A.padding, stride = A.stride)
+                    if A.unstable_idx is not None:
+                        # We need to add a out_c dimension and select from it.
+                        unfold_input = unfold_input.unsqueeze(0).expand(A.output_shape[1], -1, -1, -1, -1, -1, -1)
+                        # When A is sparse, the shape is [unstable_size, batch_size, in_c, H, W]. Here unfold_input will match this shape.
+                        unfold_input = unfold_input[A.unstable_idx[0], :, A.unstable_idx[1], A.unstable_idx[2]]
+                        # size of bound: [batch_size, unstable_size].
+                        bound = torch.einsum('sbchw,sbchw->bs', unfold_input, patches)
                     else:
-                        prod = torch.einsum('imaxyz,inbxyz->ibm', unfold_input, A.patches)
-                    # assert torch.allclose((unfold_input * A.patches).sum((-1, -2, -3)).transpose(-2, -1), prod, 1e-2)
+                        # size of bound: [batch_size, out_c, out_h, out_w].
+                        bound = torch.einsum('bijchw,sbijchw->bsij', unfold_input, patches)
 
-                    # size of prod: [batch_size, out_c, L], and then reshape it to [batch_size, out_c, M, M]
-                    bound = prod.view(prod.size(0), prod.size(1), int(math.sqrt(prod.size(2))), int(math.sqrt(prod.size(2))))
+                    # unfold the diff as [batch_size, out_h, out_w, in_c, H, W]
+                    unfold_diff = inplace_unfold(diff, kernel_size=A.patches.shape[-2:], padding = A.padding, stride = A.stride)
+                    if A.unstable_idx is not None:
+                        # We need to add a out_c dimension and select from it.
+                        unfold_diff = unfold_diff.unsqueeze(0).expand(A.output_shape[1], -1, -1, -1, -1, -1, -1)
+                        # When A is sparse, the shape is [unstable_size, batch_size, in_c, H, W]
+                        unfold_diff = unfold_diff[A.unstable_idx[0], :, A.unstable_idx[1], A.unstable_idx[2]]
+                        # size of diff: [batch_size, unstable_size].
+                        bound_diff = torch.einsum('sbchw,sbchw->bs', unfold_diff, patches.abs())
+                    else:
+                        # size of diff: [batch_size, out_c, out_h, out_w].
+                        bound_diff = torch.einsum('bijchw,sbijchw->bsij', unfold_diff, patches.abs())
 
-                    if isinstance(A.padding, tuple) and len(A.padding) == 4:
-                        # Asymmetric padding.
-                        padded_diff = F.pad(diff, A.padding)
-                        unfold_input = F.unfold(padded_diff, kernel_size=A.patches.size(-1), padding = 0, stride = A.stride).transpose(-2, -1)
+                    if sign == 1:
+                        bound += bound_diff
+                    elif sign == -1:
+                        bound -= bound_diff
                     else:
-                        unfold_input = F.unfold(diff, kernel_size=A.patches.size(-1), padding = A.padding, stride = A.stride).transpose(-2, -1)
-                    unfold_input = unfold_input.view(unfold_input.size(0), unfold_input.size(1), -1, A.patches.size(-3), A.patches.size(-2), A.patches.size(-1))
-                    if unfold_input.shape[1] == A.patches.shape[1]:
-                        prod = torch.einsum('ijaxyz,ijbxyz->ibj', unfold_input, A.patches.abs())
-                    else:
-                        prod = torch.einsum('imaxyz,inbxyz->ibm', unfold_input, A.patches.abs())
-                    # assert torch.allclose((unfold_input * A.patches.abs()).sum((-1, -2, -3)).transpose(-2, -1), prod, 1e-2)
-                    bound += sign * prod.view(prod.size(0), prod.size(1), int(math.sqrt(prod.size(2))), int(math.sqrt(prod.size(2))))
+                        raise ValueError("Unsupported Sign")
 
                     # The extra bias term from beta term.
                     if extra_constr is not None:
@@ -244,21 +250,22 @@ class PerturbationLpNorm(Perturbation):
                     # A is an identity matrix. No need to do this matmul.
                     bound = center + sign * diff
                 return bound
-            else:# Lp norm
+            else:  # Lp norm
                 # x_L = x - self.eps if self.x_L is None else self.x_L
                 # x_U = x + self.eps if self.x_U is None else self.x_U
 
                 input_shape = x.shape
-                x = x.reshape(x.shape[0], -1, 1)
                 if not A.identity:
-                    out_c = A.patches.size(2)
-                    L = A.patches.size(1)
                     # Find the upper and lower bounds via dual norm.
-                    matrix = patchesToMatrix(A.patches, input_shape, A.stride, A.padding)
-                    matrix = matrix.reshape(matrix.shape[0], matrix.shape[1], -1)
-                    deviation = matrix.norm(self.dual_norm, -1) * self.eps
-                    bound = matrix.matmul(x) + sign * deviation.unsqueeze(-1)
-                    bound = bound.reshape(bound.size(0), out_c, int(math.sqrt(L)), int(math.sqrt(L)))
+                    # matrix has shape (batch_size, out_c * out_h * out_w, input_c, input_h, input_w) or (batch_size, unstable_size, input_c, input_h, input_w)
+                    matrix = patches_to_matrix(A.patches, input_shape, A.stride, A.padding, A.output_shape, A.unstable_idx)
+                    # Note that we should avoid reshape the matrix. Due to padding, matrix cannot be reshaped without copying.
+                    deviation = matrix.norm(p=self.dual_norm, dim=(-3,-2,-1)) * self.eps
+                    # Bound has shape (batch, out_c * out_h * out_w) or (batch, unstable_size).
+                    bound = torch.einsum('bschw,bchw->bs', matrix, x) + sign * deviation
+                    if A.unstable_idx is None:
+                        # Reshape to (batch, out_c, out_h, out_w).
+                        bound = bound.view(matrix.size(0), A.patches.size(0), A.patches.size(2), A.patches.size(3))
                 else:
                     # A is an identity matrix. Its norm is all 1.
                     bound = x + sign * self.eps
@@ -295,7 +302,7 @@ class PerturbationLpNorm(Perturbation):
                 nominal=nominal, lower_offset=lower_offset, upper_offset=upper_offset), x, None
         batch_size = x.shape[0]
         dim = x.reshape(batch_size, -1).shape[-1]
-        eye = torch.eye(dim).to(x).unsqueeze(0).repeat(batch_size, 1, 1)
+        eye = torch.eye(dim).to(x).expand(batch_size, dim, dim)
         lw = eye.reshape(batch_size, dim, *x.shape[1:])
         lb = torch.zeros_like(x).to(x.device)
         uw, ub = lw.clone(), lb.clone()     

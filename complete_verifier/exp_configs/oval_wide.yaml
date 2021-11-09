@@ -1,0 +1,23 @@
+general:
+  mode: specify-target
+  enable_incomplete_verification: False
+model:
+  name: cifar_model_wide
+  path: models/oval/cifar_wide.pth
+data:
+  dataset: CIFAR
+  pkl_path: models/oval/wide_100.pkl
+  std: [0.225, 0.225, 0.225]
+  mean: [0.485, 0.456, 0.406]
+attack:
+  pgd_order: skip
+solver:
+  beta-crown:
+    batch_size: 1024
+    iteration: 20
+bab:
+  timeout: 3600
+  branching:
+    method: fsb
+    reduceop: min
+    candidates: 1

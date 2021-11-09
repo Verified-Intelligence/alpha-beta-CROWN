@@ -7,20 +7,18 @@ import torch
 import torch.optim as optim
 from torch.nn import DataParallel, Parameter, parameter
 
-from auto_LiRPA.bound_op_map import bound_op_map
-from auto_LiRPA.bound_ops import *
-from auto_LiRPA.bounded_tensor import BoundedTensor, BoundedParameter
-from auto_LiRPA.parse_graph import parse_module
-from auto_LiRPA.perturbations import *
-from auto_LiRPA.utils import *
-from auto_LiRPA.adam_element_lr import AdamElementLR
+from .bound_op_map import bound_op_map
+from .bound_ops import *
+from .bounded_tensor import BoundedTensor, BoundedParameter
+from .parse_graph import parse_module
+from .perturbations import *
+from .utils import *
+from .adam_element_lr import AdamElementLR
 
 import warnings
 
 warnings.simplefilter("once")
 
-Check_against_base_lp = False  # A debugging option, used for checking against LPs. Will be removed.
-Check_against_base_lp_layer = '/21'  # Check for bounds in this layer ('/9', '/11', '/21')
 
 class BoundedModule(nn.Module):
     """Bounded module with support for automatically computing bounds.
@@ -44,15 +42,20 @@ class BoundedModule(nn.Module):
         (subclasses of `Bound`).
 
     """
-    def __init__(self, model, global_input, bound_opts={}, auto_batch_dim=True, device='auto',
+    def __init__(self, model, global_input, bound_opts=None, auto_batch_dim=True, device='auto',
                  verbose=False, custom_ops={}):
         super(BoundedModule, self).__init__()
         if isinstance(model, BoundedModule):
             for key in model.__dict__.keys():
                 setattr(self, key, getattr(model, key))
             return
+        if bound_opts is None:
+            bound_opts = {}
+        # Default options.
+        default_bound_opts = {'ibp_relative': False, 'conv_mode': 'patches', 'sparse_intermediate_bounds': True, 'sparse_conv_intermediate_bounds': True}
+        default_bound_opts.update(bound_opts)
+        self.bound_opts = default_bound_opts
         self.verbose = verbose
-        self.bound_opts = bound_opts
         self.custom_ops = custom_ops
         self.auto_batch_dim = auto_batch_dim
         if device == 'auto':
@@ -63,8 +66,8 @@ class BoundedModule(nn.Module):
         else:
             self.device = device
         self.global_input = global_input
-        self.ibp_relative = bound_opts.get('ibp_relative', False)   
-        self.conv_mode = bound_opts.get("conv_mode", "patches")
+        self.ibp_relative = self.bound_opts.get('ibp_relative', False)
+        self.conv_mode = self.bound_opts.get('conv_mode', 'patches')
         if auto_batch_dim:
             # logger.warning('Using automatic batch dimension inferring, which may not be correct')
             self.init_batch_size = -1
@@ -80,7 +83,7 @@ class BoundedModule(nn.Module):
         # set the default values here
         optimize_bound_args = {'ob_iteration': 20, 'ob_beta': False, 'ob_alpha': True, 'ob_alpha_share_slopes': False,
                                'ob_opt_coeffs': False, 'ob_opt_bias': False,
-                               'ob_optimizer': "adam", 'ob_verbose': 0,
+                               'ob_optimizer': 'adam', 'ob_verbose': 0,
                                'ob_keep_best': True, 'ob_update_by_layer': True, 'ob_lr': 0.5,
                                'ob_lr_beta': 0.05, 'ob_init': True,
                                'ob_single_node_split': True, 'ob_lr_intermediate_beta': 0.1,
@@ -216,8 +219,25 @@ class BoundedModule(nn.Module):
         for node in self._modules.values():
             node.eval()
 
-    def forward(self, *x, final_node_name=None):
-        self._set_input(*x)
+    def forward(self, *x, final_node_name=None, clear_forward_only=False):
+        r"""Standard forward computation for the network.
+
+        Args:
+            x (tuple or None): Input to the model.
+
+            final_node_name (str, optional): The name of the final node in the model. The value
+            on the corresponding node will be returned.
+
+            clear_forward_only (bool, default `False`): Whether only standard forward values stored
+            on the nodes should be cleared. If `True`, only standard forward values stored on the 
+            nodes will be cleared. Otherwise, bound information on the nodes will also be cleared.
+
+        Returns:
+            output: The output of the model, or if `final_node_name` is not `None`, return the 
+            value on the corresponding node instead.
+        """
+
+        self._set_input(*x, clear_forward_only=clear_forward_only)
 
         degree_in = {}
         queue = deque()
@@ -231,37 +251,23 @@ class BoundedModule(nn.Module):
         final_output = None
         while len(queue) > 0:
             l = queue.popleft()
-
             inp = [forward_values[l_pre] for l_pre in l.input_name]
-            for l_pre in l.input_name:
-                l.from_input = l.from_input or self._modules[l_pre].from_input
-
+            for l_pre in l.inputs:
+                l.from_input = l.from_input or l_pre.from_input
             fv = l.forward(*inp)
             if isinstance(fv, torch.Size) or isinstance(fv, tuple):
                 fv = torch.tensor(fv, device=self.device)
             object.__setattr__(l, 'forward_value', fv)
             # infer batch dimension
             if not hasattr(l, 'batch_dim'):
-                inp_batch_dim = [self._modules[l_pre].batch_dim for l_pre in l.input_name]
+                inp_batch_dim = [l_pre.batch_dim for l_pre in l.inputs]
                 try:
                     l.batch_dim = l.infer_batch_dim(self.init_batch_size, *inp_batch_dim)
-                    try:
-                        logger.debug(
-                            'Batch dimension of ({})[{}]: forward_value shape {}, infered {}, input batch dimensions {}'.format(
-                                l, l.name, l.forward_value.shape, l.batch_dim, inp_batch_dim
-                            ))
-                    except:
-                        pass
                 except:
                     raise Exception(
                         'Fail to infer the batch dimension of ({})[{}]: forward_value shape {}, input batch dimensions {}'.format(
-                            l, l.name, l.forward_value.shape, inp_batch_dim
-                        ))
-
-            # if isinstance(l.forward_value, torch.Tensor):
-            #     l.default_shape = l.forward_value.shape
+                            l, l.name, l.forward_value.shape, inp_batch_dim))
             forward_values[l.name] = l.forward_value
-            logger.debug('Forward at {}[{}], forward_value shape {}'.format(l, l.name, fv.shape))
 
             # Unperturbed node but it is not a root node. Save forward_value to value.
             # (Can be used in forward bounds.)
@@ -325,16 +331,24 @@ class BoundedModule(nn.Module):
                     queue.append(node_next)
         return
 
-    def _clear_and_set_new(self, new_interval):
+    def _clear_and_set_new(self, new_interval, clear_forward_only=False):
         for l in self._modules.values():
             if hasattr(l, 'linear'):
                 if isinstance(l.linear, tuple):
                     for item in l.linear:
                         del (item)
                 delattr(l, 'linear')
-            for attr in ['lower', 'upper', 'interval', 'forward_value']:
-                if hasattr(l, attr):
-                    delattr(l, attr)
+
+            if clear_forward_only:
+                if hasattr(l, 'forward_value'):
+                    delattr(l, 'forward_value')         
+            else:
+                for attr in ['lower', 'upper', 'interval', 'forward_value', 'd', 'lA', 'lower_d']:
+                    if hasattr(l, attr):
+                        delattr(l, attr)
+
+            for attr in ['zero_backward_coeffs_l', 'zero_backward_coeffs_u', 'zero_lA_mtx', 'zero_uA_mtx']:
+                setattr(l, attr, False)
             # Given an interval here to make IBP/CROWN start from this node
             if new_interval is not None and l.name in new_interval.keys():
                 l.interval = tuple(new_interval[l.name][:2])
@@ -344,8 +358,8 @@ class BoundedModule(nn.Module):
             if not hasattr(l, 'perturbation') or l.perturbation is None:
                 l.perturbed = False
 
-    def _set_input(self, *x, new_interval=None):
-        self._clear_and_set_new(new_interval=new_interval)
+    def _set_input(self, *x, new_interval=None, clear_forward_only=False):
+        self._clear_and_set_new(new_interval=new_interval, clear_forward_only=clear_forward_only)
         inputs_unpacked = unpack_inputs(x)
         for name, index in zip(self.input_name, self.input_index):
             node = self._modules[name]
@@ -429,14 +443,14 @@ class BoundedModule(nn.Module):
             inputs, ori_names = self._get_node_input(nodesOP, nodesIn, nodesOP[n])
 
             try:
-                if nodesOP[n].op in bound_op_map:
+                if nodesOP[n].op in self.custom_ops:
+                    op = self.custom_ops[nodesOP[n].op]
+                elif nodesOP[n].op in bound_op_map:
                     op = bound_op_map[nodesOP[n].op]
                 elif nodesOP[n].op.startswith('aten::ATen'):
                     op = eval('BoundATen{}'.format(attr['operator'].capitalize()))
                 elif nodesOP[n].op.startswith('onnx::'):
                     op = eval('Bound{}'.format(nodesOP[n].op[6:]))
-                elif nodesOP[n].op in self.custom_ops:
-                    op = self.custom_ops[nodesOP[n].op]
                 else:
                     raise KeyError
             except (NameError, KeyError):
@@ -472,10 +486,9 @@ class BoundedModule(nn.Module):
             nodes.append(node.bound_node)
         # We were assuming that the original model had only one output node.
         # When there are multiple output nodes, this seems to be the first output element.
-        # In this case, we are assuming that we always aim to compute the bounds for the first
-        # output element.
-        self.final_name = nodesOP[-1].name
-        assert self.final_name == nodesOut[0]
+        # In this case, we are assuming that we aim to compute the bounds for the first
+        # output element by default.
+        self.final_name = nodesOut[0]
         self.input_name, self.input_index, self.root_name = [], [], []
         for node in nodesIn:
             self.root_name.append(node.name)
@@ -502,47 +515,60 @@ class BoundedModule(nn.Module):
                     self.root_name.append(l.name)
 
     def _split_complex(self, nodesOP, nodesIn):
-        found_complex = False
+        finished = True
         for n in range(len(nodesOP)):
             if hasattr(nodesOP[n].bound_node, 'complex') and \
                     nodesOP[n].bound_node.complex:
-                found_complex = True
-                _nodesOP, _nodesIn, _, _ = self._convert_nodes(
+                finished = False
+                _nodesOP, _nodesIn, _nodesOut, _template = self._convert_nodes(
                     nodesOP[n].bound_node.model, nodesOP[n].bound_node.input)
+                # assuming each supported complex operation only has one output
+                assert len(_nodesOut) == 1
+
                 name_base = nodesOP[n].name + '/split'
                 rename_dict = {}
                 for node in _nodesOP + _nodesIn:
                     rename_dict[node.name] = name_base + node.name
-
                 num_inputs = len(nodesOP[n].bound_node.input)
-
-                # assuming each supported complex operation only has one output
                 for i in range(num_inputs):
                     rename_dict[_nodesIn[i].name] = nodesOP[n].inputs[i]
                 rename_dict[_nodesOP[-1].name] = nodesOP[n].name
 
                 def rename(node):
-                    node = node._replace(name=rename_dict[node.name])
-                    node = node._replace(inputs=[rename_dict[name] for name in node.inputs])
                     node.bound_node.name = rename_dict[node.bound_node.name]
                     node.bound_node.input_name = [
                         rename_dict[name] for name in node.bound_node.input_name]
+                    node = node._replace(
+                        name=rename_dict[node.name],
+                        inputs=node.bound_node.input_name)                        
                     return node
 
                 for i in range(len(_nodesOP)):
                     _nodesOP[i] = rename(_nodesOP[i])
                 for i in range(len(_nodesIn)):
                     _nodesIn[i] = rename(_nodesIn[i])
+                output_name = _nodesOP[-1].name
+                # Any input node of some node within the complex node should be 
+                # replaced with the corresponding input node of the complex node.
+                for node in _nodesOP:
+                    for i in range(len(node.bound_node.inputs)):
+                        if node.bound_node.input_name[i] in nodesOP[n].inputs:
+                            index = nodesOP[n].inputs.index(node.bound_node.input_name[i])
+                            node.bound_node.inputs[i] = nodesOP[n].bound_node.inputs[index]
+                # For any output node of this complex node, modify its input node
+                for node in nodesOP:
+                    if output_name in node.bound_node.input_name:
+                        index = node.bound_node.input_name.index(output_name)
+                        node.bound_node.inputs[index] = _nodesOP[-1].bound_node
 
                 nodesOP = nodesOP[:n] + _nodesOP + nodesOP[(n + 1):]
                 nodesIn = nodesIn + _nodesIn[num_inputs:]
 
                 break
 
-        return nodesOP, nodesIn, found_complex
+        return nodesOP, nodesIn, finished
 
     """build a dict with {ori_name: name, name: ori_name}"""
-
     def _get_node_name_map(self, ):
         self.node_name_map = {}
         for node in self._modules.values():
@@ -571,8 +597,8 @@ class BoundedModule(nn.Module):
         while True:
             self._build_graph(nodesOP, nodesIn, nodesOut, template)
             self.forward(*global_input)  # running means/vars changed
-            nodesOP, nodesIn, found_complex = self._split_complex(nodesOP, nodesIn)
-            if not found_complex:
+            nodesOP, nodesIn, finished = self._split_complex(nodesOP, nodesIn)
+            if finished:
                 break
 
         self._get_node_name_map()
@@ -595,7 +621,7 @@ class BoundedModule(nn.Module):
         if self.verbose:
             logger.info('Model converted to support bounds')
 
-    def init_slope(self, x, share_slopes=False, method='backward', c=None):
+    def init_slope(self, x, share_slopes=False, method='backward', c=None, bound_lower=True, bound_upper=True):
         if method != 'forward':
             assert isinstance(x, tuple)
             assert method == 'backward'
@@ -607,10 +633,12 @@ class BoundedModule(nn.Module):
 
         with torch.no_grad():
             if method == 'forward':
-                l, u = self.compute_bounds(x=(x,), method='forward')
+                l, u = self.compute_bounds(x=(x,), method='forward', bound_lower=bound_lower, bound_upper=bound_upper)
             else:
-                l, u = self.compute_bounds(x=(x,), IBP=False, C=c, method='backward', return_A=False)
+                l, u = self.compute_bounds(x=(x,), IBP=False, C=c, method='backward', return_A=False, bound_lower=bound_lower, bound_upper=bound_upper)
 
+
+        init_intermediate_bounds = {}
         for node in self.optimizable_activations:
             if method == 'forward':
                 assert not '_forward' in self._modules.keys(), '_forward is a reserved node name'
@@ -628,15 +656,17 @@ class BoundedModule(nn.Module):
                         output_shape = 1
                     elif isinstance(node, BoundRelu) and node.patch_size and nj.name in node.patch_size:
                         # Patches mode. Use output channel size as the spec size. This still shares some alpha, but better than no sharing.
-                        # The patch size is [batch, L, out_ch, in_ch, H, W]. We use out_ch as the output shape.
-                        output_shape = node.patch_size[nj.name][2]
+                        # The patch size is [out_ch, batch, out_h, out_w, in_ch, H, W]. We use out_ch as the output shape.
+                        output_shape = node.patch_size[nj.name][0]
                     else:
                         output_shape = prod(nj.lower.shape[1:])
                     start_nodes.append((nj.name, output_shape))
             node.init_opt_parameters(start_nodes)
             node.opt_start()
+            init_intermediate_bounds[node.inputs[0].name] = ([node.inputs[0].lower.detach(), node.inputs[0].upper.detach()])
 
         print("alpha-CROWN optimizable variables initialized.")
+        return l, u, init_intermediate_bounds
 
     def beta_bias(self):
         batch_size = len(self.relus[-1].split_beta)
@@ -652,281 +682,9 @@ class BoundedModule(nn.Module):
         return bias
 
 
-    """Intialization for beta optimization of intermediate layer bounds."""
-    def _init_intermediate_beta(self, x, opt_coeffs, intermediate_refinement_layers, first_layer_to_refine, partial_new_interval):
-        # This disctionary saves the coefficients for beta for each relu layer.
-        beta_constraint_specs = {}
-        # A list of all optimizable parameters for intermediate betas. Will be passed to the optimizer.
-        all_intermediate_betas = []
-        # We only need to collect some A matrices for the split constraints, so we keep a dictionary for it.
-        needed_A_list = defaultdict(set)
-
-        for layer in self.relus:
-            layer.single_intermediate_betas = {}
-            layer.history_intermediate_betas = {}
-            layer.split_intermediate_betas = {}
-
-        self.best_intermediate_betas = {}
-        # In this loop, we (1) create beta variables for all intermediate neurons for each split, and
-        # (2) obtain all history coefficients for each layer, and combine them into a matrix (which will be used as specifications).
-        # The current split coefficients (which is optimizable) must be handle later, in the optimization loop.
-        for layer in self.relus:
-            layer_spec = None
-            # print(f'layer {layer.name} {layer.max_single_split if hasattr(layer, "max_single_split") else None}')
-            if layer.single_beta_used:
-                # Single split case.
-                assert not layer.history_beta_used and not layer.split_beta_used
-                for ll in self.relus:
-                    if ll.name not in intermediate_refinement_layers:
-                        # Only refine the specific layers. Usually, the last a few layers have bigger room for improvements.
-                        # No beta parameters will be created for layers that will not be refined.
-                        # print(f'skipping {ll.name}')
-                        continue
-                    for prev_layer in ll.inputs:
-                        # Locate the linear/conv layer before relu (TODO: this works for feedforward only).
-                        if isinstance(prev_layer, (BoundLinear, BoundConv, BoundReshape, BoundAdd)):
-                            break
-                    else:
-                        raise RuntimeError("unsupported network architecture")
-                    # print(f'creating {ll.name} for {layer.name}')
-                    # This layer's intermediate bounds are being optimized. We need the A matrices of the specifications on this layer.
-                    needed_A_list[layer.name].add(prev_layer.name)
-                    # Remove the corresponding bounds in intervals to be set.
-                    if ll.name in partial_new_interval:
-                        del partial_new_interval[ll.name]
-                    if prev_layer.name in partial_new_interval:
-                        del partial_new_interval[prev_layer.name]
-                    # layer.beta_mask has shape [batch, *nodes, max_nbeta]
-                    layer.single_intermediate_betas.update({prev_layer.name: {
-                        "lb": torch.zeros(
-                            size=(x[0].size(0),) + ll.shape + (layer.max_single_split,),
-                            device=x[0].device, requires_grad=True),
-                        "ub": torch.zeros(
-                            size=(x[0].size(0),) + ll.shape + (layer.max_single_split,),
-                            device=x[0].device, requires_grad=True),
-                    }
-                    })
-                    beta_constraint_specs[layer.name] = OneHotC(shape=(x[0].size(0), layer.max_single_split) + layer.shape, device=x[0].device, index=layer.single_beta_loc, coeffs=-layer.single_beta_sign)
-                if Check_against_base_lp:
-                    # Add only one layer to optimize; do not optimize all variables jointly.
-                    all_intermediate_betas.extend(
-                        layer.single_intermediate_betas[Check_against_base_lp_layer].values())
-                else:
-                    all_intermediate_betas.extend(
-                        [beta_lb_ub for ll in layer.single_intermediate_betas.values() for beta_lb_ub
-                         in ll.values()])
-                continue  # skip the rest of the loop.
-
-            if layer.history_beta_used:
-                # Create optimizable beta variables for all intermediate layers.
-                # Add the conv/linear layer that is right before a ReLu layer.
-                for ll in self.relus:
-                    if ll.name not in intermediate_refinement_layers:
-                        # Only refine the specific layers. Usually, the last a few layers have bigger room for improvements.
-                        # No beta parameters will be created for layers that will not be refined.
-                        continue
-                    for prev_layer in ll.inputs:
-                        # Locate the linear/conv layer before relu (TODO: this works for feedforward only).
-                        if isinstance(prev_layer, (BoundLinear, BoundConv, BoundReshape, BoundAdd)):
-                            break
-                    else:
-                        raise RuntimeError("unsupported network architecture")
-                    # This layer's intermediate bounds are being optimized. We need the A matrices of the specifications on this layer.
-                    needed_A_list[layer.name].add(prev_layer.name)
-                    # Remove the corresponding bounds in intervals to be set.
-                    if ll.name in partial_new_interval:
-                        del partial_new_interval[ll.name]
-                    if prev_layer.name in partial_new_interval:
-                        del partial_new_interval[prev_layer.name]
-                    # layer.new_history_coeffs has shape [batch, *nodes, max_nbeta]
-                    layer.history_intermediate_betas.update({prev_layer.name: {
-                        "lb": torch.zeros(
-                            size=(x[0].size(0),) + ll.shape + (layer.new_history_coeffs.size(-1),),
-                            device=x[0].device, requires_grad=True),
-                        "ub": torch.zeros(
-                            size=(x[0].size(0),) + ll.shape + (layer.new_history_coeffs.size(-1),),
-                            device=x[0].device, requires_grad=True),
-                    }
-                    })
-                if Check_against_base_lp:
-                    # Add only one layer to optimize; do not optimize all variables jointly.
-                    all_intermediate_betas.extend(
-                        layer.history_intermediate_betas[Check_against_base_lp_layer].values())
-                else:
-                    all_intermediate_betas.extend(
-                        [beta_lb_ub for ll in layer.history_intermediate_betas.values() for beta_lb_ub
-                         in ll.values()])
-                # Coefficients of history constraints only, in shape [batch, n_beta - 1, n_nodes].
-                # For new_history_c = +1, it is z >= 0, and we need to negate and get the lower bound of -z < 0.
-                # For unused beta (dummy padding split) inside a batch, layer_spec will be 0.
-                layer_spec = - layer.new_history_coeffs.transpose(-1,
-                                                                  -2) * layer.new_history_c.unsqueeze(
-                    -1)
-            if layer.split_beta_used:
-                # Create optimizable beta variables for all intermediate layers. First, we always have the layer after the root (input) node.
-                for ll in self.relus:
-                    if ll.name not in intermediate_refinement_layers:
-                        # Only refine the specific layers. Usually, the last a few layers have bigger room for improvements.
-                        # No beta parameters will be created for layers that will not be refined.
-                        continue
-                    for prev_layer in ll.inputs:
-                        # Locate the linear/conv layer before relu (TODO: this works for feedforward only).
-                        if isinstance(prev_layer, (BoundLinear, BoundConv, BoundReshape, BoundAdd)):
-                            break
-                    else:
-                        raise RuntimeError("unsupported network architecture")
-                    # This layer's intermediate bounds are being optimized. We need the A matrices of the specifications on this layer.
-                    needed_A_list[layer.name].add(prev_layer.name)
-                    # Remove the corresponding bounds in intervals to be set.
-                    if ll.name in partial_new_interval:
-                        del partial_new_interval[ll.name]
-                    if prev_layer.name in partial_new_interval:
-                        del partial_new_interval[prev_layer.name]
-                    layer.split_intermediate_betas.update({prev_layer.name: {
-                        "lb": torch.zeros(size=(x[0].size(0),) + ll.shape + (1,), device=x[0].device,
-                                          requires_grad=True),
-                        "ub": torch.zeros(size=(x[0].size(0),) + ll.shape + (1,), device=x[0].device,
-                                          requires_grad=True),
-                    }
-                    })
-                if Check_against_base_lp:
-                    # Add only one layer to optimize; do not optimize all variables jointly.
-                    all_intermediate_betas.extend(
-                        layer.split_intermediate_betas[Check_against_base_lp_layer].values())
-                else:
-                    all_intermediate_betas.extend(
-                        [beta_lb_ub for ll in layer.split_intermediate_betas.values() for beta_lb_ub in
-                         ll.values()])
-            # If split coefficients are not optimized, we can just add current split constraints here - no need to reconstruct every time.
-            if layer.split_beta_used and not opt_coeffs:
-                assert layer.split_coeffs[
-                           "dense"] is not None  # TODO: We only support dense split coefficients.
-                # Now we have coefficients of both history constraints and split constraints, in shape [batch, n_nodes, n_beta].
-                # split_c is 1 for z>0 split, is -1 for z<0 split, and we negate them here to much the formulation in Lagrangian.
-                layer_split_spec = -(
-                            layer.split_coeffs["dense"].repeat(2, 1) * layer.split_c).unsqueeze(1)
-                if layer_spec is not None:
-                    layer_spec = torch.cat((layer_spec, layer_split_spec), dim=1)
-                else:
-                    layer_spec = layer_split_spec
-            if layer_spec is not None:
-                beta_constraint_specs[layer.name] = layer_spec.detach().requires_grad_(False)
-
-        # Remove some unused specs.
-        for k in list(beta_constraint_specs.keys()):
-            if int(k[1:]) < int(first_layer_to_refine[1:]):  # TODO: use a better way to check this.
-                # Remove this spec because it is not used.
-                print(f'Removing {k} from specs for intermediate beta.')
-                del beta_constraint_specs[k]
-
-        # Preset intermediate betas if they are specified as a list.
-        if self.init_intermediate_betas is not None:
-            # The batch dimension.
-            for i, example_int_betas in enumerate(self.init_intermediate_betas):
-                if example_int_betas is not None:
-                    # The layer with split constraints.
-                    for split_layer, all_int_betas_this_layer in example_int_betas.items():
-                        # Beta variables for all layers for that split constraints.
-                        for intermediate_layer, intermediate_betas in all_int_betas_this_layer.items():
-                            saved_n_betas = intermediate_betas['lb'].size(-1)
-                            if self._modules[split_layer].single_beta_used:
-                                # Only self.single_intermediate_beta is created.
-                                assert not self._modules[split_layer].history_beta_used
-                                assert not self._modules[split_layer].split_beta_used
-                                if intermediate_layer in self._modules[split_layer].single_intermediate_betas:
-                                    self._modules[split_layer].single_intermediate_betas[
-                                        intermediate_layer]['lb'].data[i, ..., :saved_n_betas] = \
-                                    intermediate_betas['lb']
-                                    self._modules[split_layer].single_intermediate_betas[
-                                        intermediate_layer]['ub'].data[i, ..., :saved_n_betas] = \
-                                    intermediate_betas['ub']
-                                else:
-                                    warnings.warn(f"Warning: the intermediate bounds of sample {i} split {split_layer} layer {intermediate_layer} are not optimized, but initialization contains it with size {saved_n_betas}. It might be a bug.", stacklevel=2)
-
-                            elif intermediate_layer in self._modules[split_layer].history_intermediate_betas:
-                                # Here we assume the last intermediate beta is the last split, which will still be 0.
-                                # When we create specifications, we used single_beta_loc, which must have the current split at last.
-                                self._modules[split_layer].history_intermediate_betas[
-                                    intermediate_layer]['lb'].data[i, ..., :saved_n_betas] = \
-                                intermediate_betas['lb']
-                                self._modules[split_layer].history_intermediate_betas[
-                                    intermediate_layer]['ub'].data[i, ..., :saved_n_betas] = \
-                                intermediate_betas['ub']
-                            else:
-                                warnings.warn(f"Warning: the intermediate bounds of sample {i} split {split_layer} layer {intermediate_layer} are not optimized, but initialization contains it. It might be a bug.", stacklevel=2)
-
-        return beta_constraint_specs, all_intermediate_betas, needed_A_list
-
-    def _get_intermediate_beta_specs(self, x, aux, opt_coeffs, beta_constraint_specs, needed_A_list, new_interval):
-        beta_spec_coeffs = {}  # Key of the dictionary is the pre-relu node name, value is the A matrices propagated to this pre-relu node. We will directly add it to the initial C matrices when computing intermediate bounds.
-        # Run CROWN using existing intermediate layer bounds, to get linear inequalities of beta constraints w.r.t. input.
-        for layer_idx, layer in enumerate(self.relus):
-            if layer.split_beta_used and opt_coeffs:
-                # In this loop, we add the current optimizable split constraint.
-                assert layer.split_coeffs["dense"] is not None  # We only use dense split coefficients.
-                if layer.name in beta_constraint_specs:
-                    # Now we have coefficients of both history constraints and split constraints, in shape [batch, n_nodes, n_beta].
-                    spec_C = torch.cat((beta_constraint_specs[layer.name],
-                                        -(layer.split_coeffs["dense"].repeat(2, 1) * layer.split_c).unsqueeze(
-                                            1)), dim=1)
-                else:
-                    spec_C = -(layer.split_coeffs["dense"].repeat(2, 1) * layer.split_c).unsqueeze(1)
-            else:
-                if layer.name in beta_constraint_specs:
-                    # This layer only has history constraints, no split constraints. This has already been saved into beta_constraint_specs.
-                    spec_C = beta_constraint_specs[layer.name]
-                else:
-                    # This layer has no beta constraints.
-                    spec_C = None
-            if spec_C is not None:
-                # We now have the specifications, which are just coefficients for beta.
-                # Now get A and bias w.r.t. input x for the layer just before Relu.
-                # TODO: no concretization needed here.
-                prev_layer_name = layer.inputs[0].name
-                # Resize spec size in case there are conv layers.
-                if not isinstance(spec_C, OneHotC):
-                    spec_C = spec_C.view(spec_C.size(0), spec_C.size(1), *layer.shape)
-                # spec_C.index has shape (batch, n_max_beta_split). Need to transpose since alpha has output_shape before batch.
-                alpha_idx = spec_C.index.transpose(0,1)
-                # We need to find which relu layer is this, and set the start_idx accordingly to get the tightest possible bound with optimal alpha for this layer's intermediate bounds.
-                # For example, if this is the pre-activation of the last relu layer, we want start_idx = 2; if it is the pre-activation of the second relu layer, we need to use the first set of alpha, so start_idx = len(self.relus).
-                # lower_spec_A contains the A matrices propagated from the split layer to all interemdiate layers.
-                _, _, lower_spec_A = self.compute_bounds(x, aux, spec_C, IBP=False, forward=False,
-                                                         method="CROWN", bound_lower=True, bound_upper=False,
-                                                         reuse_ibp=True,
-                                                         return_A=True, needed_A_list=needed_A_list[layer.name],
-                                                         final_node_name=prev_layer_name, average_A=False,
-                                                         new_interval=new_interval, alpha_idx=alpha_idx)
-                # For computing the upper bound, the spec vector needs to be negated.
-                if not isinstance(spec_C, OneHotC):
-                    spec_C_neg = - spec_C
-                else:
-                    spec_C_neg = spec_C._replace(coeffs = -spec_C.coeffs)
-                # spec_C_neg.index has shape (batch, n_max_beta_split). Need to transpose since alpha has output_shape before batch.
-                alpha_idx = spec_C_neg.index.transpose(0,1)
-                _, _, upper_spec_A = self.compute_bounds(x, aux, spec_C_neg, IBP=False, forward=False,
-                                                         method="CROWN", bound_lower=False, bound_upper=True,
-                                                         reuse_ibp=True,
-                                                         return_A=True, needed_A_list=needed_A_list[layer.name],
-                                                         final_node_name=prev_layer_name, average_A=False,
-                                                         new_interval=new_interval, alpha_idx=alpha_idx)
-                # Merge spec_A matrices for lower and upper bound.
-                spec_A = {}
-                for k in lower_spec_A[prev_layer_name].keys():
-                    spec_A[k] = {}
-                    spec_A[k]["lA"] = lower_spec_A[prev_layer_name][k]["lA"]
-                    spec_A[k]["lbias"] = lower_spec_A[prev_layer_name][k]["lbias"]
-                    spec_A[k]["uA"] = upper_spec_A[prev_layer_name][k]["uA"]
-                    spec_A[k]["ubias"] = upper_spec_A[prev_layer_name][k]["ubias"]
-
-                beta_spec_coeffs.update({prev_layer_name: spec_A})
-                # del lb, ub, spec_A
-
-        return beta_spec_coeffs
-
     def get_optimized_bounds(self, x=None, aux=None, C=None, IBP=False, forward=False, method='backward',
                              bound_lower=True, bound_upper=False, reuse_ibp=False, return_A=False, final_node_name=None,
-                             average_A=False, new_interval=None, reference_bounds=None):
+                             average_A=False, new_interval=None, reference_bounds=None, aux_reference_bounds=None, needed_A_dict=None):
         # optimize CROWN lower bound by alpha and beta
         opts = self.bound_opts['optimize_bound_args']
         iteration = opts['ob_iteration']; beta = opts['ob_beta']; alpha = opts['ob_alpha']
@@ -941,6 +699,7 @@ class BoundedModule(nn.Module):
         loss_reduction_func = opts['ob_loss_reduction_func']
         stop_criterion_func = opts['ob_stop_criterion_func']
         input_grad = opts['ob_input_grad']
+        sparse_intermediate_bounds = self.bound_opts.get('sparse_intermediate_bounds', False)
 
         assert bound_lower != bound_upper, 'we can only optimize lower OR upper bound at one time'
         assert alpha or beta, "nothing to optimize, use compute bound instead!"
@@ -953,7 +712,6 @@ class BoundedModule(nn.Module):
 
         alphas = []
         betas = []
-        beta_masks = []
         parameters = []
         dense_coeffs_mask = []
 
@@ -998,35 +756,16 @@ class BoundedModule(nn.Module):
 
         start = time.time()
 
-        if beta and intermediate_beta_enabled:
-            # The list of layer numbers for refinement, can be positive or negative. -1 means refine the intermediate layer bound before last relu layer.
-            intermediate_refinement_layers = opts['ob_intermediate_refinement_layers']
-            # Change negative layer number to positive ones.
-            intermediate_refinement_layers = [layer if layer > 0 else layer + len(self.relus) for layer in
-                                            intermediate_refinement_layers]
-            # This is the first layer to refine; we do not need the specs for all layers before it.
-            first_layer_to_refine = self.relus[min(intermediate_refinement_layers)].name
-            # Change layer number to layer name.
-            intermediate_refinement_layers = [self.relus[layer].name for layer in intermediate_refinement_layers]
-            print(f'Layers for refinement: {intermediate_refinement_layers}; there are {len(self.relus) - len(intermediate_refinement_layers)} layers NOT being refined.')
-            # We only need to set some intermediate layer bounds.
-            partial_new_interval = new_interval.copy() if new_interval is not None else None  # Shallow copy.
-            # beta_constraint_specs is a disctionary that saves the coefficients for beta for each relu layer.
-            # all_intermediate_betas A list of all optimizable parameters for intermediate betas. Will be passed to the optimizer.
-            # For each neuron in each layer, we have M intermediate_beta variables where M is the number of constraints.
-            # We only need to collect some A matrices for the split constraints, so we keep a dictionary needed_A_list for it.
-            beta_constraint_specs, all_intermediate_betas, needed_A_list = self._init_intermediate_beta(x, opt_coeffs, intermediate_refinement_layers, first_layer_to_refine, partial_new_interval)
-            # Add all intermediate layer beta to parameters.
-            parameters.append({'params': all_intermediate_betas, 'lr': lr_intermediate_beta})
 
         if opt_choice == "adam-autolr":
             opt = AdamElementLR(parameters, lr=lr)
         elif opt_choice == "adam":
             opt = optim.Adam(parameters, lr=lr)
-        elif opt_choices == 'sgd':
+        elif opt_choice == 'sgd':
             opt = optim.SGD(parameters, lr=lr, momentum=0.9)
         else:
-            raise NotImplementedError(opt_choices)
+            raise NotImplementedError(opt_choice)
+
         # Create a weight vector to scale learning rate.
         loss_weight = torch.ones(size=(x[0].size(0),), device=x[0].device)
 
@@ -1036,63 +775,56 @@ class BoundedModule(nn.Module):
         last_total_loss = torch.tensor(1e8, device=x[0].device, dtype=x[0].dtype)
         best_l = torch.zeros([x[0].shape[0], 1], device=x[0].device, dtype=x[0].dtype) + 1e8
 
-        if verbose > 0 and intermediate_beta_enabled:
-            for layer in self.relus:
-                if layer.history_beta_used:
-                    for k, v in layer.history_intermediate_betas.items():
-                        print(
-                            f'hist split layer {layer.name} beta layer {k} lb value {v["lb"].abs().sum(dim=list(range(1, v["lb"].ndim))).detach().cpu().numpy()} ub value {v["ub"].abs().sum(dim=list(range(1, v["ub"].ndim))).detach().cpu().numpy()}')
-                if layer.split_beta_used:
-                    for k, v in layer.split_intermediate_betas.items():
-                        print(
-                            f'new  split layer {layer.name} beta layer {k} lb value {v["lb"].abs().sum(dim=list(range(1, v["lb"].ndim))).detach().cpu().numpy()} ub value {v["ub"].abs().sum(dim=list(range(1, v["ub"].ndim))).detach().cpu().numpy()}')
-                if layer.single_beta_used:
-                    for k, v in layer.single_intermediate_betas.items():
-                        print(
-                            f'single split layer {layer.name} beta layer {k} lb value {v["lb"].abs().sum(dim=list(range(1, v["lb"].ndim))).detach().cpu().numpy()} ub value {v["ub"].abs().sum(dim=list(range(1, v["ub"].ndim))).detach().cpu().numpy()}')
+
+        best_intermediate_bounds = []  # TODO: this should be a dictionary to handle more general architectures.
+
+        if sparse_intermediate_bounds and aux_reference_bounds is None and reference_bounds is not None:
+            aux_reference_bounds = {}
+            for name, (lb, ub) in reference_bounds.items():
+                aux_reference_bounds[name] = (lb.detach().clone(), ub.detach().clone())
+        if aux_reference_bounds is None:
+            aux_reference_bounds = {}
 
         for i in range(iteration):
-            if beta and intermediate_beta_enabled:
-                intermediate_constr = self._get_intermediate_beta_specs(x, aux, opt_coeffs, beta_constraint_specs, needed_A_list, new_interval)
-            else:
-                intermediate_constr = None
+            intermediate_constr = None
 
-            ret = self.compute_bounds(x, aux, C, method=method, IBP=IBP, forward=forward, 
+            if not update_by_layer:
+                reference_bounds = new_interval  # If we still optimize all intermediate neurons, we can use new_interval as reference bounds.
+
+            ret = self.compute_bounds(x, aux, C, method=method, IBP=IBP, forward=forward,
                                     bound_lower=bound_lower, bound_upper=bound_upper, reuse_ibp=reuse_ibp,
-                                    return_A=False, final_node_name=final_node_name, average_A=average_A,
+                                    return_A=return_A, final_node_name=final_node_name, average_A=average_A,
                                     # If we set neuron bounds individually, or if we are optimizing intermediate layer bounds using beta, we do not set new_interval.
                                     # When intermediate betas are used, we must set new_interval to None because we want to recompute all intermediate layer bounds.
                                     new_interval=partial_new_interval if beta and intermediate_beta_enabled else new_interval if update_by_layer else None,
                                     # This is the currently tightest interval, which will be used to pass split constraints when intermediate betas are used.
-                                    reference_bounds=new_interval if beta and intermediate_beta_enabled or not update_by_layer else reference_bounds,
+                                    reference_bounds=reference_bounds,
+                                    # This is the interval used for checking for unstable neurons.
+                                    aux_reference_bounds=aux_reference_bounds if sparse_intermediate_bounds else None,
                                     # These are intermediate layer beta variables and their corresponding A matrices and biases.
-                                    intermediate_constr=intermediate_constr)
+                                    intermediate_constr=intermediate_constr, needed_A_dict=needed_A_dict)
 
             if i == 0:
                 best_ret = ret
-                best_intermediate_bounds = []
                 for model in self.optimizable_activations:
                     best_intermediate_bounds.append([model.inputs[0].lower.clone().detach(), model.inputs[0].upper.clone().detach()])
+                    if sparse_intermediate_bounds:
+                        aux_reference_bounds[model.inputs[0].name] = best_intermediate_bounds[-1]
 
             ret_l, ret_u = ret[0], ret[1]
 
             if beta and opt_bias and not single_node_split:
                 ret_l = ret_l + self.beta_bias()
-                ret = (ret_l, ret_u)
+                ret = (ret_l, ret_u)  # where is A matrix?
 
             l = ret_l
             if ret_l is not None and ret_l.shape[1] != 1:  # Reduction over the spec dimension.
                 l = loss_reduction_func(ret_l)
             u = ret_u
             if ret_u is not None and ret_u.shape[1] != 1:
-                u = loss_reduction_func(ret_u)                
+                u = loss_reduction_func(ret_u)
 
-            if beta and intermediate_beta_enabled and Check_against_base_lp:
-                # NOTE stop_criterion here is not valid
-                stop_criterion = total_loss = loss_ = loss = -self._modules[Check_against_base_lp_layer].lower[0, 0] - \
-                                            self._modules[Check_against_base_lp_layer].lower[
-                                                0, 1]  # 2.6972426192395584 matched
-            else:
+            if True:
                 loss_ = l if bound_lower else -u
                 stop_criterion = stop_criterion_func(ret_l) if bound_lower else stop_criterion_func(-ret_u)
                 total_loss = -1 * loss_
@@ -1112,11 +844,13 @@ class BoundedModule(nn.Module):
                         best_ret[0][idx] = ret[0][idx]
                     if ret[1] is not None:
                         best_ret[1][idx] = ret[1][idx]
+                    if return_A:
+                        best_ret = (best_ret[0], best_ret[1], ret[2])
 
                     for ii, model in enumerate(self.optimizable_activations):
                         # best_intermediate_bounds.append([model.inputs[0].lower, model.inputs[0].upper])
-                        best_intermediate_bounds[ii][0][idx] = model.inputs[0].lower[idx]
-                        best_intermediate_bounds[ii][1][idx] = model.inputs[0].upper[idx]
+                        best_intermediate_bounds[ii][0][idx] = torch.max(best_intermediate_bounds[ii][0][idx], model.inputs[0].lower[idx])
+                        best_intermediate_bounds[ii][1][idx] = torch.min(best_intermediate_bounds[ii][1][idx], model.inputs[0].upper[idx])
                         if alpha:
                             # each alpha has shape (2, output_shape, batch, *shape)
                             for alpha_m in model.alpha:
@@ -1133,34 +867,6 @@ class BoundedModule(nn.Module):
                         if opt_bias:
                             best_biases = [bias.clone().detach() for bias in biases]  # TODO: idx-wise
 
-                    if beta and intermediate_beta_enabled: # # TODO: idx-wise
-                        for layer in self.relus:
-                            if layer.history_beta_used or layer.split_beta_used or layer.single_beta_used:
-                                self.best_intermediate_betas[layer.name] = {}
-                            # The history split and current split is handled seperatedly.
-                            if layer.history_beta_used:
-                                self.best_intermediate_betas[layer.name]['history'] = {}
-                                # Each key in history_intermediate_betas for this layer is a dictionary, with all other pre-relu layers' names.
-                                for k, v in layer.history_intermediate_betas.items():
-                                    self.best_intermediate_betas[layer.name]['history'][k] = {
-                                        "lb": v["lb"],
-                                        # This is a tensor with shape (batch, *intermediate_layer_shape, number_of_beta)
-                                        "ub": v["ub"],
-                                    }
-                            if layer.split_beta_used:
-                                self.best_intermediate_betas[layer.name]['split'] = {}
-                                for k, v in layer.split_intermediate_betas.items():
-                                    self.best_intermediate_betas[layer.name]['split'][k] = {
-                                        "lb": v["lb"],  # This is a tensor with shape (batch, *intermediate_layer_shape, 1)
-                                        "ub": v["ub"],
-                                    }
-                            if layer.single_beta_used:
-                                self.best_intermediate_betas[layer.name]['single'] = {}
-                                for k, v in layer.single_intermediate_betas.items():
-                                    self.best_intermediate_betas[layer.name]['single'][k] = {
-                                        "lb": v["lb"],  # This is a tensor with shape (batch, *intermediate_layer_shape, 1)
-                                        "ub": v["ub"],
-                                    }
 
             if os.environ.get('AUTOLIRPA_DEBUG_OPT', False):
                 print(f"****** iter [{i}]",
@@ -1193,23 +899,6 @@ class BoundedModule(nn.Module):
                         if model.split_beta_used:
                             print(f"{model.name} split beta:", model.split_beta.view(-1))
                             print(f"{model.name} bias:", model.split_bias)
-                    if intermediate_beta_enabled:
-                        for layer in self.relus:
-                            print(
-                                f'layer {layer.name} lower {layer.inputs[0].lower.sum().item()}, upper {layer.inputs[0].upper.sum().item()}')
-                        for layer in self.relus:
-                            if layer.history_beta_used:
-                                for k, v in layer.history_intermediate_betas.items():
-                                    print(
-                                        f'hist split layer {layer.name} beta layer {k} lb value {v["lb"].abs().sum(dim=list(range(1, v["lb"].ndim))).detach().cpu().numpy()} ub value {v["ub"].abs().sum(dim=list(range(1, v["ub"].ndim))).detach().cpu().numpy()}')
-                            if layer.split_beta_used:
-                                for k, v in layer.split_intermediate_betas.items():
-                                    print(
-                                        f'new  split layer {layer.name} beta layer {k} lb value {v["lb"].abs().sum(dim=list(range(1, v["lb"].ndim))).detach().cpu().numpy()} ub value {v["ub"].abs().sum(dim=list(range(1, v["ub"].ndim))).detach().cpu().numpy()}')
-                            if layer.single_beta_used:
-                                for k, v in layer.single_intermediate_betas.items():
-                                    print(
-                                        f'single split layer {layer.name} beta layer {k} lb value {v["lb"].abs().sum(dim=list(range(1, v["lb"].ndim))).detach().cpu().numpy()} ub value {v["ub"].abs().sum(dim=list(range(1, v["ub"].ndim))).detach().cpu().numpy()}')
                     if opt_coeffs:
                         for co in coeffs:
                             print(f'coeff sum: {co.abs().sum():.5g}')
@@ -1225,18 +914,15 @@ class BoundedModule(nn.Module):
                 # Clipping to >=0.
                 for b in betas:
                     b.data = (b >= 0) * b.data
-                if intermediate_beta_enabled:
-                    for b in all_intermediate_betas:
-                        b.data = torch.clamp(b.data, min=0)
                 for dmi in range(len(dense_coeffs_mask)):
                     # apply dense mask to the dense split coeffs matrix
                     coeffs[dmi].data = dense_coeffs_mask[dmi].float() * coeffs[dmi].data
 
             if alpha:
                 for m in self.relus:
-                    for v in m.alpha.values():
+                    for m_start_node, v in m.alpha.items():
                         v.data = torch.clamp(v.data, 0., 1.)
-                # For tanh, we clip it in bound_ops because clipping depends
+                # For tanh, we clip it in bound_ops because clipping depends. TODO: clipping should be a method in the BoundOptimizableActivation class.
                 # on pre-activation bounds
 
             # If loss has become worse for some element, reset those to current best.
@@ -1254,7 +940,8 @@ class BoundedModule(nn.Module):
             last_l = loss.item()
             last_total_loss = total_loss.detach().clone()
 
-        if beta and intermediate_beta_enabled and verbose > 0:
+        # if beta and intermediate_beta_enabled and verbose > 0:
+        if verbose > 0:
             breakpoint()
 
         if keep_best:
@@ -1288,18 +975,47 @@ class BoundedModule(nn.Module):
                     infeasible_neurons = l.lower > l.upper
                     if infeasible_neurons.any():
                         print('infeasible!!!!!!!!!!!!!!', infeasible_neurons.sum().item(), infeasible_neurons.nonzero()[:, 0])
-                        # import pdb; pdb.set_trace()
 
         print("best_l after optimization:", best_l.sum().item(), "with beta sum per layer:", [p.sum().item() for p in betas])
         # np.save('solve_slope.npy', np.array(record))
-        print('optimal alpha/beta time:', time.time() - start)
+        print('alpha/beta optimization time:', time.time() - start)
         return best_ret
 
 
+    def get_unstable_conv_locations(self, node, aux_reference_bounds):
+        # For conv layer we only check the case where all neurons are active/inactive.
+        unstable_masks = torch.logical_and(aux_reference_bounds[node.name][0] < 0, aux_reference_bounds[node.name][1] > 0)
+        # For simplicity, merge unstable locations for all elements in this batch. TODO: use individual unstable mask.
+        # It has shape (H, W) indicating if a neuron is unstable/stable.
+        # TODO: so far we merge over the batch dimension to allow easier implementation.
+        unstable_locs = unstable_masks.sum(dim=0).bool()
+        # Now converting it to indices for these unstable nuerons. These are locations (i,j) of unstable neurons.
+        unstable_idx = unstable_locs.nonzero(as_tuple=True)
+        # Number of unstable neurons.
+        unstable_size = unstable_idx[0].numel()
+        # print(f'layer {node.name} unstable_size {unstable_size} actual {unstable_masks.sum().item()} size {node.output_shape}')
+        # We sum over the channel direction, so need to multiply that.
+        return unstable_idx, unstable_size
+
+
+    def get_unstable_locations(self, node, aux_reference_bounds):
+        # FIXME (09/19): this is for ReLU only!
+        unstable_masks = torch.logical_and(aux_reference_bounds[node.name][0] < 0, aux_reference_bounds[node.name][1] > 0)
+        if unstable_masks.ndim > 2:
+            # Flatten the conv layer shape.
+            unstable_masks = unstable_masks.view(unstable_masks.size(0), -1)
+        # For simplicity, merge unstable locations for all elements in this batch. TODO: use individual unstable mask.
+        unstable_locs = unstable_masks.sum(dim=0).bool()
+        # This is a 1-d indices, shared by all elements in this batch.
+        unstable_idx = unstable_locs.nonzero().squeeze(1)
+        unstable_size = unstable_idx.numel()
+        return unstable_idx, unstable_size
+
     def compute_bounds(self, x=None, aux=None, C=None, method='backward', IBP=False, forward=False, 
                        bound_lower=True, bound_upper=True, reuse_ibp=False,
-                       return_A=False, needed_A_list=None, final_node_name=None, average_A=False, new_interval=None,
-                       return_b=False, b_dict=None, reference_bounds=None, intermediate_constr=None, alpha_idx=None):
+                       return_A=False, needed_A_dict=None, final_node_name=None, average_A=False, new_interval=None,
+                       return_b=False, b_dict=None, reference_bounds=None, intermediate_constr=None, alpha_idx=None,
+                       aux_reference_bounds=None, need_A_only=False):
         r"""Main function for computing bounds.
 
         Args:
@@ -1341,13 +1057,16 @@ class BoundedModule(nn.Module):
             bound (tuple): a tuple of computed lower bound and upper bound respectively.
         """
 
+        if not bound_lower and not bound_upper:
+            raise ValueError('At least one of bound_lower and bound_upper must be True')
+
         # Several shortcuts.
         method = method.lower() if method is not None else method
         if method == 'ibp':
             # Pure IBP bounds.
             method = None
             IBP = True
-        elif method == 'ibp+backward' or method == 'ibp+crown' or method == 'crown-ibp':
+        elif method in ['ibp+backward', 'ibp+crown', 'crown-ibp']:
             method = 'backward'
             IBP = True
         elif method == 'crown':
@@ -1357,22 +1076,28 @@ class BoundedModule(nn.Module):
         elif method == 'forward+backward':
             method = 'backward'
             forward = True
-        elif method == "crown-optimized" or method == 'alpha-crown':
+        elif method in ['crown-optimized', 'alpha-crown']:
+            assert return_A is False
+            ret = []
             if bound_lower:
                 ret1 = self.get_optimized_bounds(x=x, IBP=False, C=C, method='backward', new_interval=new_interval, reference_bounds=reference_bounds,
-                                                 bound_lower=bound_lower, bound_upper=False, return_A=return_A)
+                                                 bound_lower=bound_lower, bound_upper=False, return_A=return_A, aux_reference_bounds=aux_reference_bounds,
+                                                 needed_A_dict=needed_A_dict)
             if bound_upper:
                 ret2 = self.get_optimized_bounds(x=x, IBP=False, C=C, method='backward', new_interval=new_interval, reference_bounds=reference_bounds,
-                                                 bound_lower=False, bound_upper=bound_upper, return_A=return_A)
-            if bound_upper and bound_upper:
-                assert return_A is False
+                                                 bound_lower=False, bound_upper=bound_upper, return_A=return_A, aux_reference_bounds=aux_reference_bounds,
+                                                 needed_A_dict=needed_A_dict)
+            if bound_lower and bound_upper:
                 return ret1[0], ret2[1]
             elif bound_lower:
                 return ret1
             elif bound_upper:
                 return ret2
-            else:
-                raise NotImplementedError
+
+        if reference_bounds is None:
+            reference_bounds = {}
+        if aux_reference_bounds is None:
+            aux_reference_bounds = {}
 
         # If y in self.backward_node_pairs[x], then node y is visited when 
         # doing backward bound propagation starting from node x.
@@ -1400,19 +1125,17 @@ class BoundedModule(nn.Module):
                 # This input/parameter has perturbation. Create an interval object.
                 if self.ibp_relative:
                     root[i].interval = Interval(
-                        None, None, 
-                        root[i].linear.nominal, root[i].linear.lower_offset, root[i].linear.upper_offset)
+                        None, None, root[i].linear.nominal, root[i].linear.lower_offset, root[i].linear.upper_offset)
                 else:
-                    root[i].interval = \
-                        Interval(root[i].linear.lower, root[i].linear.upper, ptb=root[i].perturbation)
+                    root[i].interval = Interval(
+                        root[i].linear.lower, root[i].linear.upper, ptb=root[i].perturbation)
                 if forward:
                     root[i].dim = root[i].linear.lw.shape[1]
                     dim_in += root[i].dim
             else:
                 if self.ibp_relative:
                     root[i].interval = Interval(
-                        None, None, 
-                        value, torch.zeros_like(value), torch.zeros_like(value))                    
+                        None, None, value, torch.zeros_like(value), torch.zeros_like(value))                    
                 else:
                     # This inpute/parameter does not has perturbation. 
                     # Use plain tuple defaulting to Linf perturbation.
@@ -1420,8 +1143,7 @@ class BoundedModule(nn.Module):
                     root[i].forward_value = root[i].forward_value = root[i].value = root[i].lower = root[i].upper = value
 
             if self.ibp_relative:
-                root[i].lower = root[i].interval.lower
-                root[i].upper = root[i].interval.upper
+                root[i].lower, root[i].upper = root[i].interval.lower, root[i].interval.upper
             else:
                 root[i].lower, root[i].upper = root[i].interval
 
@@ -1445,8 +1167,9 @@ class BoundedModule(nn.Module):
             # C is an identity matrix by default 
             if final.output_shape is None:
                 raise ValueError('C is not provided while node {} has no default shape'.format(final.shape))
-            dim_output = int(np.prod(final.output_shape[1:]))
-            C = torch.eye(dim_output, device=self.device).unsqueeze(0).repeat(batch_size, 1, 1)  # TODO: use an eyeC object here.
+            dim_output = int(prod(final.output_shape[1:]))
+            # TODO: use an eyeC object here.
+            C = torch.eye(dim_output, device=self.device).expand(batch_size, dim_output, dim_output)
 
         # check whether weights are perturbed and set nonlinear for the BoundMatMul operation
         for n in self._modules.values():
@@ -1473,13 +1196,19 @@ class BoundedModule(nn.Module):
                         n_pre.used = True
                         queue.append(n_pre)
 
+        for i in self._modules.values():
+            if isinstance(i, BoundRelu):
+                for l_name in i.input_name:
+                    node = self._modules[l_name]
+                    if isinstance(node, BoundConv):
+                        node.relu_followed = True # whether this Conv is followed by a ReLU
+
         for i in self._modules.values():  # for all nodes
             if not i.used:
                 continue
             if hasattr(i, 'nonlinear') and i.nonlinear:
                 for l_name in i.input_name:
                     node = self._modules[l_name]
-                    # print('node', node, 'lower', hasattr(node, 'lower'), 'perturbed', node.perturbed, 'forward_value', hasattr(node, 'forward_value'), 'from_input', node.from_input)
                     if not hasattr(node, 'lower'):
                         assert not IBP, 'There should be no missing intermediate bounds when IBP is enabled'
                         if not node.perturbed and hasattr(node, 'forward_value'):
@@ -1528,124 +1257,156 @@ class BoundedModule(nn.Module):
                                 if not first_layer_flag:
                                     reduced_dim = False  # Only partial neurons (unstable neurons) are bounded.
                                     unstable_idx = None
-                                    dim = int(np.prod(node.output_shape[1:]))
+                                    unstable_size = 99999
+                                    dim = int(prod(node.output_shape[1:]))
+                                    sparse_intermediate_bounds = node.name in aux_reference_bounds and self.bound_opts.get('sparse_intermediate_bounds', False) and isinstance(self._modules[node.output_name[0]], BoundRelu)
+                                    sparse_conv_intermediate_bounds = self.bound_opts.get('sparse_conv_intermediate_bounds', False)
                                     # FIXME: C matrix shape incorrect for BoundParams.
                                     if (isinstance(node, BoundLinear) or isinstance(node, BoundMatMul)) and int(
                                             os.environ.get('AUTOLIRPA_USE_FULL_C', 0)) == 0:
-                                        if intermediate_constr is not None and node.name in reference_bounds:
+                                        if sparse_intermediate_bounds:
                                             # If we are doing bound refinement and reference bounds are given, we only refine unstable neurons.
+                                            # Also, if we are checking against LP solver we will refine all neurons and do not use this optimization.
                                             # For each batch element, we find the unstable neurons.
-                                            unstable_masks = torch.logical_and(reference_bounds[node.name][0] < 0, reference_bounds[node.name][1] > 0)
-                                            # unstable_masks = torch.ones(dtype=torch.bool, size=(batch_size, dim), device=self.device)
-                                            # For simplicity, merge unstable locations for all elements in this batch. TODO: use individual unstable mask.
-                                            unstable_locs = unstable_masks.sum(dim=0).bool()
-                                            # This is a 1-d indices, shared by all elements in this batch.
-                                            unstable_idx = unstable_locs.nonzero().squeeze()
-                                            # Number of unstable neurons after merging.
-                                            max_non_zero = unstable_locs.sum()
-                                            # Create an abstract C matrix, the unstable_idx are the non-zero elements in specifications for all batches.
-                                            newC = OneHotC([batch_size, max_non_zero, *node.output_shape[1:]], self.device, unstable_idx, None)
-                                            reduced_dim = True
-                                            # print(f'layer {node.name} total {dim} unstable {max_non_zero} newC {newC.shape}')
-                                            """
-                                            newC = torch.eye(dim, device=self.device) \
-                                                .unsqueeze(0).repeat(batch_size, 1, 1) \
-                                                .view(batch_size, dim, *node.output_shape[1:])
-                                            print(f'creating new C {newC.size()}')
-                                            if int(os.environ.get('USE_EYE_C', 0)) == 1:
-                                                newC = eyeC([batch_size, dim, *node.output_shape[1:]], self.device)
-                                            """
-                                        else:
+                                            unstable_idx, unstable_size = self.get_unstable_locations(node, aux_reference_bounds)
+                                            if unstable_size == 0:
+                                                # Do nothing, no bounds will be computed.
+                                                reduced_dim = True
+                                                unstable_idx = []
+                                            elif unstable_size < 0.9 * dim and unstable_size > 0:
+                                                # Create an abstract C matrix, the unstable_idx are the non-zero elements in specifications for all batches.
+                                                newC = OneHotC([batch_size, unstable_size, *node.output_shape[1:]], self.device, unstable_idx, None)
+                                                reduced_dim = True
+                                            else:
+                                                unstable_idx = None
+                                        if not reduced_dim:
                                             newC = eyeC([batch_size, dim, *node.output_shape[1:]], self.device)
                                     elif (isinstance(node, BoundConv) or isinstance(node,
                                                                                     BoundBatchNormalization)) and node.mode == "patches":
-                                        # import pdb; pdb.set_trace()
-                                        # Here we create an Identity Patches object 
-                                        newC = Patches(None, 1, 0,
-                                                       [batch_size, node.output_shape[-2] * node.output_shape[-1],
-                                                        node.output_shape[-3], node.output_shape[-3], 1, 1], 1)
+                                        if sparse_intermediate_bounds:
+                                            unstable_idx, unstable_size = self.get_unstable_conv_locations(node, aux_reference_bounds)
+                                            if unstable_size == 0:
+                                                # Do nothing, no bounds will be computed.
+                                                reduced_dim = True
+                                                unstable_idx = []
+                                            # We sum over the channel direction, so need to multiply that.
+                                            elif sparse_conv_intermediate_bounds and unstable_size < 0.8 * dim:
+                                                # Create an abstract C matrix, the unstable_idx are the non-zero elements in specifications for all batches.
+                                                # The shape of patches is [unstable_size, batch, C, H, W].
+                                                newC = Patches(patches=None, stride=1, padding=0, shape=[
+                                                    unstable_size, batch_size, node.output_shape[-3], 1, 1],
+                                                    identity=1, unstable_idx=unstable_idx, output_shape=node.output_shape)
+                                                reduced_dim = True
+                                            else:
+                                                unstable_idx = None
+                                        # Here we create an Identity Patches object
+                                        if not reduced_dim:
+                                            newC = Patches(None, 1, 0,
+                                                           [node.output_shape[-3], batch_size, node.output_shape[-2], node.output_shape[-1],
+                                                            node.output_shape[-3], 1, 1], 1, output_shape=node.output_shape)
                                     elif isinstance(node, BoundAdd) and node.mode == "patches":
-                                        num_channel = node.output_shape[-3]
-                                        L = node.output_shape[-2] * node.output_shape[-1]
-                                        patches = (torch.eye(num_channel, device=self.device)).unsqueeze(0).unsqueeze(
-                                            0).unsqueeze(4).unsqueeze(5).expand(batch_size, L, num_channel, num_channel, 1, 1)  # now [1 * 1 * in_C * in_C * 1 * 1]
-                                        newC = Patches(patches, 1, 0, [batch_size] + list(patches.shape[1:]))
+                                        if sparse_intermediate_bounds:
+                                            unstable_idx, unstable_size = self.get_unstable_conv_locations(node, aux_reference_bounds)
+                                            if unstable_size == 0:
+                                                # Do nothing, no bounds will be computed.
+                                                reduced_dim = True
+                                                unstable_idx = []
+                                            elif sparse_conv_intermediate_bounds and unstable_size < 0.8 * dim:
+                                                num_channel = node.output_shape[-3]
+                                                # Identity patch size: (ouc_c, 1, 1, 1, out_c, 1, 1).
+                                                patches = (torch.eye(num_channel, device=self.device)).view(num_channel, 1, 1, 1, num_channel, 1, 1)
+                                                # Expand to (out_c, 1, unstable_size, out_c, 1, 1).
+                                                patches = patches.expand(-1, 1, node.output_shape[-2], node.output_shape[-1], -1, 1, 1)
+                                                patches = patches[unstable_idx[0], :, unstable_idx[1], unstable_idx[2]]
+                                                # Expand with the batch dimension. Final shape (unstable_size, batch_size, out_c, 1, 1).
+                                                patches = patches.expand(-1, batch_size, -1, -1, -1)
+                                                newC = Patches(patches, 1, 0, patches.shape, unstable_idx=unstable_idx, output_shape=node.output_shape)
+                                                reduced_dim = True
+                                            else:
+                                                unstable_idx = None
+                                        if not reduced_dim:
+                                            num_channel = node.output_shape[-3]
+                                            # Identity patch size: (ouc_c, 1, 1, 1, out_c, 1, 1).
+                                            patches = (torch.eye(num_channel, device=self.device)).view(num_channel, 1, 1, 1, num_channel, 1, 1)
+                                            # Expand to (out_c, batch, out_h, out_w, out_c, 1, 1).
+                                            patches = patches.expand(-1, batch_size, node.output_shape[-2], node.output_shape[-1], -1, 1, 1)
+                                            newC = Patches(patches, 1, 0, patches.shape, output_shape=node.output_shape)
                                     else:
-                                        if intermediate_constr is not None and node.name in reference_bounds:
-                                            # If we are doing bound refinement and reference bounds are given, we only refine unstable neurons.
-                                            # For each batch element, we find the unstable neurons.
-                                            unstable_masks = torch.logical_and(reference_bounds[node.name][0] < 0, reference_bounds[node.name][1] > 0)
-                                            # Flatten the conv layer shape.
-                                            unstable_masks = unstable_masks.view(unstable_masks.size(0), -1)
-                                            # unstable_masks = torch.ones(dtype=torch.bool, size=(batch_size, dim), device=self.device)
-                                            # For simplicity, merge unstable locations for all elements in this batch. TODO: use individual unstable mask.
-                                            unstable_locs = unstable_masks.sum(dim=0).bool()
-                                            # This is always a 1-d indices. For conv layers it's flattened.
-                                            unstable_idx = unstable_locs.nonzero().squeeze()
+                                        if sparse_intermediate_bounds:
+                                            unstable_idx, unstable_size = self.get_unstable_locations(node, aux_reference_bounds)
+                                            if unstable_size == 0:
+                                                # Do nothing, no bounds will be computed.
+                                                reduced_dim = True
+                                                unstable_idx = []
                                             # Number of unstable neurons after merging.
-                                            max_non_zero = unstable_locs.sum()
-                                            # Create a C matrix.
-                                            newC = torch.zeros([1, max_non_zero, dim], device=self.device)
-                                            # Fill the corresponding elements to 1.0
-                                            newC[0, torch.arange(max_non_zero), unstable_idx] = 1.0
-                                            newC = newC.repeat(batch_size, 1, 1).view(batch_size, max_non_zero, *node.output_shape[1:])
-                                            reduced_dim = True
-                                            # print(f'layer {node.name} total {dim} unstable {max_non_zero} newC {newC.size()}')
-                                        else:
+                                            elif unstable_size < 0.9 * dim:
+                                                # Create a C matrix.
+                                                newC = torch.zeros([1, unstable_size, dim], device=self.device)
+                                                # Fill the corresponding elements to 1.0
+                                                newC[0, torch.arange(unstable_size), unstable_idx] = 1.0
+                                                newC = newC.expand(batch_size, -1, -1).view(batch_size, unstable_size, *node.output_shape[1:])
+                                                reduced_dim = True
+                                                # print(f'layer {node.name} total {dim} unstable {unstable_size} newC {newC.size()}')
+                                            else:
+                                                unstable_idx = None
+                                        if not reduced_dim:
                                             if dim > 1000:
                                                 warnings.warn(f"Creating an identity matrix with size {dim}x{dim} for node {node}. This may indicate poor performance for bound computation. If you see this message on a small network please submit a bug report.", stacklevel=2)
                                             newC = torch.eye(dim, device=self.device) \
-                                                .unsqueeze(0).repeat(batch_size, 1, 1) \
+                                                .unsqueeze(0).expand(batch_size, -1, -1) \
                                                 .view(batch_size, dim, *node.output_shape[1:])
-                                    # print('Creating new C', type(newC), 'for', node)
-                                    if False:  # TODO: only return A_dict of final layer
-                                        _, _, A_dict = self._backward_general(C=newC, node=node, root=root,
-                                                                              return_A=return_A, A_dict=A_dict, intermedaite_constr=intermediate_constr)
-                                    else:
+                                    if unstable_idx is None or unstable_size > 0:
+                                        # Compute backward bounds only when there are unstable neurons, or when we don't know which neurons are unstable.
                                         self._backward_general(C=newC, node=node, root=root, return_A=False, intermediate_constr=intermediate_constr, unstable_idx=unstable_idx)
 
                                     if reduced_dim:
-                                        # If we only calculated unstable neurons, we need to scatter the results back based on reference bounds.
-                                        new_lower = reference_bounds[node.name][0].detach().clone().view(batch_size, -1)
-                                        new_lower[:, unstable_idx] = node.lower.view(batch_size, -1)
-                                        node.lower = new_lower.view(batch_size, *node.output_shape[1:])
-                                        new_upper = reference_bounds[node.name][1].detach().clone().view(batch_size, -1)
-                                        new_upper[:, unstable_idx] = node.upper.view(batch_size, -1)
-                                        node.upper = new_upper.view(batch_size, *node.output_shape[1:])
+                                        if unstable_size > 0:
+                                            # If we only calculated unstable neurons, we need to scatter the results back based on reference bounds.
+                                            if isinstance(unstable_idx, tuple):
+                                                new_lower = aux_reference_bounds[node.name][0].detach().clone()
+                                                new_upper = aux_reference_bounds[node.name][1].detach().clone()
+                                                # Conv layer with patches, the unstable_idx is a 3-element tuple for 3 indices (C, H,W) of unstable neurons.
+                                                new_lower[:, unstable_idx[0], unstable_idx[1], unstable_idx[2]] = node.lower
+                                                new_upper[:, unstable_idx[0], unstable_idx[1], unstable_idx[2]] = node.upper
+                                            else:
+                                                # Other layers.
+                                                new_lower = aux_reference_bounds[node.name][0].detach().clone().view(batch_size, -1)
+                                                new_upper = aux_reference_bounds[node.name][1].detach().clone().view(batch_size, -1)
+                                                new_lower[:, unstable_idx] = node.lower.view(batch_size, -1)
+                                                new_upper[:, unstable_idx] = node.upper.view(batch_size, -1)
+                                            # print(f'{node.name} {node} bound diff {(new_lower.view(-1) - aux_reference_bounds[node.name][0].view(-1)).abs().sum()} {(new_upper.view(-1) - aux_reference_bounds[node.name][1].view(-1)).abs().sum()}')
+                                            node.lower = new_lower.view(batch_size, *node.output_shape[1:])
+                                            node.upper = new_upper.view(batch_size, *node.output_shape[1:])
+                                        else:
+                                            # No unstable neurons. Skip the update.
+                                            node.lower = aux_reference_bounds[node.name][0].detach().clone()
+                                            node.upper = aux_reference_bounds[node.name][1].detach().clone()
                                     # node.lower and node.upper (intermediate bounds) are computed in the above function.
                                     # If we have bound references, we set them here to always obtain a better set of bounds.
-                                    if reference_bounds is not None and node.name in reference_bounds:
+                                    if node.name in reference_bounds:
                                         # Initially, the reference bound and the computed bound can be exactly the same when intermediate layer beta is 0. This will prevent gradients flow. So we need a small guard here.
-                                        if Check_against_base_lp:
-                                            if node.name == Check_against_base_lp_layer:
-                                                pass
-                                                # print(reference_bounds[node.name][0][1,0,0,3].item(), node.lower[1,0,0,3].item())
-                                                # node.lower = torch.max(reference_bounds[node.name][0] - 1e-5, node.lower)
-                                                # node.upper = torch.min(reference_bounds[node.name][1] + 1e-5, node.upper)
-                                            else:
-                                                # For LP checking, fix all other intermediate layer bounds.
-                                                node.lower = reference_bounds[node.name][0]
-                                                node.upper = reference_bounds[node.name][1]
+                                        if intermediate_constr is not None:
+                                            # Intermediate layer beta is used.
+                                            # Note that we cannot just take the reference bounds if they are better - this makes alphas have zero gradients.
+                                            node.lower = torch.max((0.9 * reference_bounds[node.name][0] + 0.1 * node.lower), node.lower)
+                                            node.upper = torch.min((0.9 * reference_bounds[node.name][1] + 0.1 * node.upper), node.upper)
+                                            # Additionally, if the reference bounds say a neuron is stable, we always keep it. (FIXME: this is for ReLU only).
+                                            lower_stable = reference_bounds[node.name][0] >= 0.
+                                            node.lower[lower_stable] = reference_bounds[node.name][0][lower_stable]
+                                            upper_stable = reference_bounds[node.name][1] <= 0.
+                                            node.upper[upper_stable] = reference_bounds[node.name][1][upper_stable]
                                         else:
-                                            # Setting reference bounds are actually incorrect. Because the split constraints are computed using slightly
-                                            # different alpha (not the optimal), they can be slightly worse than original at the beginning.
-                                            # So we only update bounds to reference if they cross zero (split constraints).
-                                            node.lower = torch.max(reference_bounds[node.name][0] - 1e-5,
-                                                                   node.lower)
-                                            node.upper = torch.min(reference_bounds[node.name][1] + 1e-5,
-                                                                   node.upper)
-                                            """
-                                            update_lower = reference_bounds[node.name][0] >= 0
-                                            node.lower[update_lower] = reference_bounds[node.name][0][update_lower]
-                                            update_upper = reference_bounds[node.name][0] <= 0
-                                            node.upper[update_upper] = reference_bounds[node.name][1][update_upper]
-                                            """
+                                            # MIP solved intermediate layer bounds.
+                                            # Set the intermediate layer bounds using reference bounds, always choosing the tighter one.
+                                            node.lower = torch.max(reference_bounds[node.name][0] - 1e-5, node.lower)
+                                            node.upper = torch.min(reference_bounds[node.name][1] + 1e-5, node.upper)
+                                        # Otherwise, we only use reference bounds to check which neurons are unstable.
 
         if method == 'backward':
             # This is for the final output bound. No need to pass in intermediate layer beta constraints.
             return self._backward_general(C=C, node=final, root=root, bound_lower=bound_lower, bound_upper=bound_upper,
-                                          return_A=return_A, needed_A_list=needed_A_list, average_A=average_A, A_dict=A_dict,
-                                          return_b=return_b, b_dict=b_dict, unstable_idx=alpha_idx)
+                                          return_A=return_A, needed_A_dict=needed_A_dict, average_A=average_A, A_dict=A_dict,
+                                          return_b=return_b, b_dict=b_dict, unstable_idx=alpha_idx, need_A_only=need_A_only)
         elif method == 'forward':
             return self._forward_general(C=C, node=final, root=root, dim_in=dim_in, concretize=True)
         else:
@@ -1653,10 +1414,9 @@ class BoundedModule(nn.Module):
 
     """ improvement on merging BoundLinear, BoundGatherElements and BoundSub
     when loss fusion is used in training"""
-
     def _IBP_loss_fusion(self, node, C):
         # not using loss fusion
-        if not (isinstance(self.bound_opts, dict) and self.bound_opts.get('loss_fusion', False)):
+        if not self.bound_opts.get('loss_fusion', False):
             return None
 
         # Currently this function has issues in more complicated networks.
@@ -1681,10 +1441,10 @@ class BoundedModule(nn.Module):
                     if torch.isclose(labels.lower, labels.upper, 1e-8).all():
                         labels = labels.lower
                         batch_size = labels.shape[0]
-                        w = w.unsqueeze(0).repeat(batch_size, 1, 1)
+                        w = w.expand(batch_size, *w.shape)
                         w = w - torch.gather(w, dim=1,
                                              index=labels.unsqueeze(-1).repeat(1, w.shape[1], w.shape[2]))
-                        b = b.unsqueeze(0).repeat(batch_size, 1)
+                        b = b.expand(batch_size, *b.shape)
                         b = b - torch.gather(b, dim=1,
                                              index=labels.repeat(1, b.shape[1]))
                         lower, upper = node_start.interval
@@ -1696,56 +1456,97 @@ class BoundedModule(nn.Module):
         return None
 
     def _IBP_general(self, node=None, C=None):
-        if hasattr(node, 'interval'):
-            return node.interval
+        if self.bound_opts.get('loss_fusion', False):
+            res = self._IBP_loss_fusion(node, C)
+            if res is not None:
+                return res
+
         if not node.perturbed and hasattr(node, 'forward_value'):
             node.lower, node.upper = node.interval = (node.forward_value, node.forward_value)
-            
             if self.ibp_relative:
                 node.interval = Interval(
                     None, None, 
                     nominal=node.forward_value, 
                     lower_offset=torch.zeros_like(node.forward_value), 
                     upper_offset=torch.zeros_like(node.forward_value))
+            
+        if not hasattr(node, 'interval'):
+            for n in node.inputs:
+                if not hasattr(n, 'interval'):
+                    self._IBP_general(n)
+            inp = [n_pre.interval for n_pre in node.inputs]
+            if C is not None and isinstance(node, BoundLinear) and not node.is_input_perturbed(1):
+                # merge the last BoundLinear node with the specification, available when 
+                # weights of this layer are not perturbed
+                return node.interval_propagate(*inp, C=C)
+            else:
+                node.interval = node.interval_propagate(*inp)
 
+            if self.ibp_relative:
+                node.lower, node.upper = node.interval.lower, node.interval.upper
+            else:
+                node.lower, node.upper = node.interval
+                if isinstance(node.lower, torch.Size):
+                    node.lower = torch.tensor(node.lower)
+                    node.interval = (node.lower, node.upper)
+                if isinstance(node.upper, torch.Size):
+                    node.upper = torch.tensor(node.upper)
+                    node.interval = (node.lower, node.upper)
+
+        if C is not None:
+            return BoundLinear.interval_propagate(None, node.interval, C=C)
+        else:
             return node.interval
 
-        interval = self._IBP_loss_fusion(node, C)
-        if interval is not None:
-            return interval
-
-        for n_pre in node.input_name:
-            n = self._modules[n_pre]
-            if not hasattr(n, 'interval'):
-                self._IBP_general(n)
-
-        inp = [self._modules[n_pre].interval for n_pre in node.input_name]
-        if C is not None:
-            if isinstance(node, BoundLinear) and not node.is_input_perturbed(1):
-                # merge the output node with the specification, available when weights of this layer are not perturbed
-                node.interval = node.interval_propagate(*inp, C=C)
-            else:
-                interval_before_C = [node.interval_propagate(*inp)]
-                node.interval = BoundLinear.interval_propagate(None, *interval_before_C, C=C)
+    def _addA(self, A1, A2):
+        """ Add two A (each of them is either Tensor or Patches) """
+        if type(A1) == torch.Tensor and type(A1) == torch.Tensor:
+            return A1 + A2
+        elif type(A1) == Patches and type(A2) == Patches:
+            # Here we have to merge two patches, and if A1.stride != A2.stride, the patches will become a matrix, 
+            # in this case, we will avoid using this mode
+            assert A1.stride == A2.stride, "A1.stride should be the same as A2.stride, otherwise, please use the matrix mode"
+            if A1.unstable_idx is not None or A2.unstable_idx is not None:
+                if A1.unstable_idx is not A2.unstable_idx:  # Same tuple object.
+                    raise ValueError('Please set bound option "sparse_conv_intermediate_bounds" to False to run this model.')
+                assert A1.output_shape == A2.output_shape
+            # change paddings to merge the two patches
+            if A1.padding != A2.padding:
+                if A1.padding > A2.padding:
+                    A2 = A2._replace(patches=F.pad(A2.patches, (
+                        A1.padding - A2.padding, A1.padding - A2.padding, A1.padding - A2.padding,
+                        A1.padding - A2.padding)))
+                else:
+                    A1 = A1._replace(patches=F.pad(A1.patches, (
+                        A2.padding - A1.padding, A2.padding - A1.padding, A2.padding - A1.padding,
+                        A2.padding - A1.padding)))
+            sum_ret = A1.patches + A2.patches
+            return Patches(sum_ret, A2.stride, max(A1.padding, A2.padding), sum_ret.shape, unstable_idx=A1.unstable_idx, output_shape=A1.output_shape)
         else:
-            node.interval = node.interval_propagate(*inp)
-        
-        if self.ibp_relative:
-            node.lower = node.interval.lower
-            node.upper = node.interval.upper
-        else:
-            node.lower, node.upper = node.interval
-            if isinstance(node.lower, torch.Size):
-                node.lower = torch.tensor(node.lower)
-                node.interval = (node.lower, node.upper)
-            if isinstance(node.upper, torch.Size):
-                node.upper = torch.tensor(node.upper)
-                node.interval = (node.lower, node.upper)
-
-        return node.interval
+            if type(A1) == Patches:
+                pieces = A1.patches
+                stride = A1.stride
+                padding = A1.padding
+                patch_output_shape = A1.output_shape
+                patch_unstable_idx = A1.unstable_idx
+                # Patches has shape (out_c, batch, out_h, out_w, in_c, h, w).
+                input_shape = A2.shape[3:]
+                matrix = A2
+            if type(A2) == Patches:
+                pieces = A2.patches
+                stride = A2.stride
+                padding = A2.padding
+                patch_output_shape = A2.output_shape
+                patch_unstable_idx = A2.unstable_idx
+                input_shape = A1.shape[3:]
+                matrix = A1
+            A1_matrix = patches_to_matrix(
+                    pieces, input_shape, stride, padding, output_shape=patch_output_shape, unstable_idx=patch_unstable_idx)
+            return A1_matrix.transpose(0,1) + matrix
 
     def _backward_general(self, C=None, node=None, root=None, bound_lower=True, bound_upper=True,
-                          return_A=False, needed_A_list=None, average_A=False, A_dict=None, return_b=False, b_dict=None, intermediate_constr=None, unstable_idx=None):
+                          return_A=False, needed_A_dict=None, average_A=False, A_dict=None, return_b=False, b_dict=None,
+                          intermediate_constr=None, unstable_idx=None, need_A_only=False):
         logger.debug('Backward from ({})[{}]'.format(node, node.name))
         _print_time = False
 
@@ -1767,43 +1568,39 @@ class BoundedModule(nn.Module):
                     queue.append(self._modules[l_pre])
         node.bounded = True
         if isinstance(C, Patches):
-            batch_size, L, out_c = C.shape[:3]
-            output_dim = L * out_c
+            if C.unstable_idx is None:
+                # Patches have size (out_c, batch, out_h, out_w, c, h, w).
+                out_c, batch_size, out_h, out_w = C.shape[:4]
+                output_dim = out_c * out_h * out_w
+            else:
+                # Patches have size (unstable_size, batch, c, h, w).
+                output_dim, batch_size = C.shape[:2]
         else:
             batch_size, output_dim = C.shape[:2]
             
+        # The C matrix specified by the user has shape (batch, spec) but internally we have (spec, batch) format.
         if not isinstance(C, (eyeC, Patches, OneHotC)):
             C = C.transpose(0, 1)
-        elif isinstance(C, (eyeC, OneHotC)):
-            C = C._replace(shape=(C.shape[1], C.shape[0], C.shape[2]))
+        elif isinstance(C, eyeC):
+            C = C._replace(shape=(C.shape[1], C.shape[0], *C.shape[2:]))
+        elif isinstance(C, OneHotC):
+            C = C._replace(shape=(C.shape[1], C.shape[0], *C.shape[2:]), index=C.index.transpose(0,-1), coeffs=None if C.coeffs is None else C.coeffs.transpose(0,-1))
 
         node.lA = C if bound_lower else None
         node.uA = C if bound_upper else None
         lb = ub = torch.tensor(0., device=self.device)
 
-        beta_watch_list = defaultdict(dict)
-        if intermediate_constr is not None:
-            # Intermediate layer betas are handled in two cases.
-            # First, if the beta split is before this node, we don't need to do anything special; it will done in BoundRelu.
-            # Second, if the beta split after this node, we need to modify the A matrix during bound propagation to reflect beta after this layer.
-            for k in intermediate_constr:
-                if k not in all_nodes_before:
-                    # The second case needs special care: we add all such splits in a watch list.
-                    # However, after first occurance of a layer in the watchlist, beta_watch_list will be deleted and the A matrix from split constraints has been added and will be propagated to later layers.
-                    for kk, vv in intermediate_constr[k].items():
-                        beta_watch_list[kk][k] = vv
+
+        # Save intermediate layer A matrices when required.
+        A_record = {}
 
         queue = deque([node])
-        A_record = {}
         while len(queue) > 0:
             l = queue.popleft()  # backward from l
             l.bounded = True
 
             if return_b:
-                b_dict[l.name] = {
-                    'lower_b': lb,
-                    'upper_b': ub
-                }
+                b_dict[l.name] = { 'lower_b': lb, 'upper_b': ub }
 
             if l.name in self.root_name or l == root: continue
 
@@ -1815,199 +1612,94 @@ class BoundedModule(nn.Module):
 
             # Initially, l.lA or l.uA will be set to C for this node.
             if l.lA is not None or l.uA is not None:
-                def bound_add(A, B):
-                    if type(A) == torch.Tensor and type(A) == torch.Tensor:
-                        return A + B
-                    elif type(A) == Patches and type(B) == Patches:
-                        # Here we have to merge two patches, and if A.stride != B.stride, the patches will become a matrix, 
-                        # in this case, we will avoid using this mode
-                        assert A.stride == B.stride, "A.stride should be the same as B.stride, otherwise, please use the matrix mode"
-
-                        # change paddings to merge the two patches
-                        if A.padding != B.padding:
-                            if A.padding > B.padding:
-                                B = B._replace(patches=F.pad(B.patches, (
-                                    A.padding - B.padding, A.padding - B.padding, A.padding - B.padding,
-                                    A.padding - B.padding)))
-                            else:
-                                A = A._replace(patches=F.pad(A.patches, (
-                                    B.padding - A.padding, B.padding - A.padding, B.padding - A.padding,
-                                    B.padding - A.padding)))
-                        sum_ret = A.patches + B.patches
-                        return Patches(sum_ret, B.stride, max(A.padding, B.padding), sum_ret.shape)
-                    else:
-                        if type(A) == Patches:
-                            pieces = A.patches
-                            stride = A.stride
-                            padding = A.padding
-                            input_shape = B.shape[2:]
-                            matrix = B
-                        if type(B) == Patches:
-                            pieces = B.patches
-                            stride = B.stride
-                            padding = B.padding
-                            input_shape = A.shape[2:]
-                            matrix = A
-
-                        A_matrix = patchesToMatrix(pieces, input_shape, stride, padding)
-                        return A_matrix.transpose(0,1) + matrix
-
+                # Propagate lA and uA to a preceding node 
                 def add_bound(node, lA, uA):
                     if lA is not None:
-                        node.lA = lA if node.lA is None else bound_add(node.lA, lA)
+                        if node.lA is None:
+                            # First A added to this node.
+                            node.zero_lA_mtx = l.zero_backward_coeffs_l
+                            node.lA = lA
+                        else:
+                            node.zero_lA_mtx = node.zero_lA_mtx and l.zero_backward_coeffs_l
+                            node.lA = self._addA(node.lA, lA)
                     if uA is not None:
-                        node.uA = uA if node.uA is None else bound_add(node.uA, uA)
+                        if node.uA is None:
+                            # First A added to this node.
+                            node.zero_uA_mtx = l.zero_backward_coeffs_u
+                            node.uA = uA
+                        else:
+                            node.zero_uA_mtx = node.zero_uA_mtx and l.zero_backward_coeffs_u
+                            node.uA = self._addA(node.uA, uA)
 
-                # TODO can we just use l.inputs?
-                input_nodes = [self._modules[l_name] for l_name in l.input_name]
                 if _print_time:
                     start_time = time.time()
 
                 # FIXME make fixed nodes have fixed `forward_value` that is never cleaned out
                 if not l.perturbed and hasattr(l, 'forward_value'):
-                    lb = lb + l.get_bias(l.lA, l.forward_value)
+                    lb = lb + l.get_bias(l.lA, l.forward_value)  # FIXME (09/16): shape for the bias of BoundConstant.
                     ub = ub + l.get_bias(l.uA, l.forward_value)
                     continue
 
-                if not Benchmarking:
-                    small_A = 0
-                    if l.lA is not None and not isinstance(l.lA, (eyeC, OneHotC, Patches)) and torch.norm(l.lA, p=1) < epsilon:  # FIXME: Why need this???
-                        small_A += 1
-                    if l.uA is not None and not isinstance(l.uA, (eyeC, OneHotC, Patches)) and torch.norm(l.uA, p=1) < epsilon:
-                        small_A += 1
-                    if small_A == 2:
-                        continue
-
-                    small_A = 0
-                    if isinstance(l.lA, Patches) and l.lA.identity == 0 and torch.norm(l.lA.patches, p=1) < epsilon:
-                        small_A += 1
-                    if isinstance(l.lA, Patches) and l.uA.identity == 0 and torch.norm(l.uA.patches, p=1) < epsilon:
-                        small_A += 1
-                    if small_A == 2:
-                        continue
+                if l.zero_uA_mtx and l.zero_lA_mtx:
+                    # A matrices are all zero, no need to propagate.
+                    continue
 
                 if isinstance(l, BoundRelu):
-                    A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes, start_node=node, unstable_idx=unstable_idx,
+                    A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *l.inputs, start_node=node, unstable_idx=unstable_idx,
                                                            beta_for_intermediate_layers=intermediate_constr is not None)  # TODO: unify this interface.
                 elif isinstance(l, BoundOptimizableActivation):
-                    A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes, 
+                    A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *l.inputs,
                     start_shape=(prod(node.output_shape[1:]) if node.name != self.final_name
                         else C.shape[0]), start_node=node)
                 else:
-                    A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *input_nodes)
+                    A, lower_b, upper_b = l.bound_backward(l.lA, l.uA, *l.inputs)
+
                 if _print_time:
                     time_elapsed = time.time() - start_time
                     if time_elapsed > 1e-3:
                         print(l, time_elapsed)
                 if lb.ndim > 0 and type(lower_b) == torch.Tensor and self.conv_mode == 'patches':
+                    # When we use patches mode, it's possible that we need to add two bias
+                    # one is from the Tensor mode and one is from the patches mode
+                    # And we need to detect this case and reshape the bias
+                    assert lower_b.ndim == 4 or lower_b.ndim == 2
+                    assert lb.ndim == 4 or lb.ndim == 2
                     if lower_b.ndim < lb.ndim:
-                        lb = lb.transpose(0,1)
-                        lb = lb.reshape(lb.size(0), -1).transpose(0,1)
-
-                        ub = ub.transpose(0,1)
-                        ub = ub.reshape(ub.size(0), -1).transpose(0,1)
+                        lb = lb.transpose(0,1).reshape(lb.size(1), lb.size(0), -1)
+                        lb = lb.expand(lb.size(0), lb.size(1), lower_b.size(0)//lb.size(1))
+                        lb = lb.reshape(lb.size(0), -1).t()
+                        ub = ub.transpose(0,1).reshape(ub.size(1), ub.size(0), -1)
+                        ub = ub.expand(ub.size(0), ub.size(1), upper_b.size(0)//ub.size(1))
+                        ub = ub.reshape(ub.size(0), -1).t()
                     elif lower_b.ndim > lb.ndim:
-                        lower_b = lower_b.transpose(0,1)
-                        lower_b = lower_b.reshape(lower_b.size(0), -1).transpose(0,1)
-
-                        upper_b = upper_b.transpose(0,1)
-                        upper_b = upper_b.reshape(upper_b.size(0), -1).transpose(0,1)
+                        lower_b = lower_b.transpose(0,1).reshape(lower_b.size(1), -1).t()
+                        upper_b = upper_b.transpose(0,1).reshape(upper_b.size(1), -1).t()
                 lb = lb + lower_b
                 ub = ub + upper_b
-                if return_A:
-                    if isinstance(self._modules[l.output_name[0]], BoundRelu):
-                        # We save the A matrices after propagating through layer l if a ReLU follows l. Todo: support a general filter to choose which A to save.
-                        # Here we saved the A *after* propagating backwards through this layer.
-                        # Note that we return the accumulated bias terms, to maintain linear relationship of this node (TODO: does not support ResNet).
+                if return_A and needed_A_dict and node.name in needed_A_dict:
+                    # FIXME ???
+                    # if isinstance(self._modules[l.output_name[0]], BoundRelu):
+                    # We save the A matrices after propagating through layer l if a ReLU follows l.
+                    # Here we saved the A *after* propagating backwards through this layer.
+                    # Note that we return the accumulated bias terms, to maintain linear relationship of this node (TODO: does not support ResNet).
+                    if l.name in needed_A_dict[node.name]:
                         A_record.update({l.name: {
-                            "lA": A[0][0].transpose(0, 1) if A[0][0] is not None else None,
-                            "uA": A[0][1].transpose(0, 1) if A[0][1] is not None else None,
-                            "lbias": lb.transpose(0, 1) if lb.ndim > 1 else None,
+                            "lA": A[0][0].transpose(0, 1).detach() if A[0][0] is not None else None,
+                            "uA": A[0][1].transpose(0, 1) .detach()if A[0][1] is not None else None,
+                            "lbias": lb.transpose(0, 1).detach() if lb.ndim > 1 else None,
                             # When not used, lb or ub is tensor(0).
-                            "ubias": ub.transpose(0, 1) if ub.ndim > 1 else None,
-                        }
-                        })
-                        if set(needed_A_list) == set(A_record.keys()):
-                            # We have collected all A matrices we need. We can return now!
-                            A_dict.update({node.name: A_record})
-                            # Do not concretize to save time. We just need the A matrices.
-                            return None, None, A_dict
+                            "ubias": ub.transpose(0, 1).detach() if ub.ndim > 1 else None,
+                        }})
+                    A_dict.update({node.name: A_record})
+                    if need_A_only and set(needed_A_dict[node.name]) == set(A_record.keys()):
+                        # We have collected all A matrices we need. We can return now!
+                        A_dict.update({node.name: A_record})
+                        # Do not concretize to save time. We just need the A matrices.
+                        # return A matrix as a dict: {node.name: [A_lower, A_upper]}
+                        return None, None, A_dict
 
-                # return A matrix as a dict: {node.name: [A_lower, A_upper]}
-
-                # Check if we have any beta split from a layer after the starting node.
-                if l.name in beta_watch_list:
-                    # Contribution to the constant term.
-                    intermediate_beta_lb = intermediate_beta_ub = 0.0
-                    # Contribution to the linear coefficients.
-                    intermediate_beta_lA = intermediate_beta_uA = 0.0
-                    for split_layer_name, split_coeffs in beta_watch_list[l.name].items():
-                        # We may have multiple splits after this layer, and they are enumerated here.
-                        # Find the corresponding beta variable, which is in a later layer.
-                        # split_layer_name should be the pre-act layer name, and Relu is after it.
-                        split_layer = self._modules[self._modules[split_layer_name].output_name[0]]
-                        # Concat betas from history split and current split.
-                        all_betas_lb = all_betas_ub = None
-                        if split_layer.history_beta_used:
-                            # The beta has size [batch, *node_shape, n_beta] (i.e., each element, each neuron, has a different beta)
-                            all_betas_lb = split_layer.history_intermediate_betas[l.name]["lb"]
-                            all_betas_lb = all_betas_lb.view(all_betas_lb.size(0), -1, all_betas_lb.size(-1))
-                            all_betas_ub = split_layer.history_intermediate_betas[l.name]["ub"]
-                            all_betas_ub = all_betas_ub.view(all_betas_ub.size(0), -1, all_betas_ub.size(-1))
-                            if unstable_idx is not None:
-                                # Only unstable neuron is considered.
-                                all_betas_lb = self.non_deter_index_select(all_betas_lb, index=unstable_idx, dim=1)
-                                all_betas_ub = self.non_deter_index_select(all_betas_ub, index=unstable_idx, dim=1)
-                        if split_layer.split_beta_used:
-                            # Note: we must keep split_intermediate_betas at the last because this is the way we build split_coeffs.
-                            split_intermediate_betas_lb = split_layer.split_intermediate_betas[l.name]["lb"]
-                            split_intermediate_betas_ub = split_layer.split_intermediate_betas[l.name]["ub"]
-                            split_intermediate_betas_lb = split_intermediate_betas_lb.view(split_intermediate_betas_lb.size(0), -1, split_intermediate_betas_lb.size(-1))
-                            split_intermediate_betas_ub = split_intermediate_betas_ub.view(split_intermediate_betas_ub.size(0), -1, split_intermediate_betas_ub.size(-1))
-                            if unstable_idx is not None:
-                                split_intermediate_betas_lb = self.non_deter_index_select(split_intermediate_betas_lb, index=unstable_idx, dim=1)
-                                split_intermediate_betas_ub = self.non_deter_index_select(split_intermediate_betas_ub, index=unstable_idx, dim=1)
-                            all_betas_lb = torch.cat((all_betas_lb, split_intermediate_betas_lb), dim=-1) if all_betas_lb is not None else split_intermediate_betas_lb
-                            all_betas_ub = torch.cat((all_betas_ub, split_intermediate_betas_ub), dim=-1) if all_betas_ub is not None else split_intermediate_betas_ub
-                        if split_layer.single_beta_used:
-                            single_intermediate_betas_lb = split_layer.single_intermediate_betas[l.name]["lb"]
-                            single_intermediate_betas_ub = split_layer.single_intermediate_betas[l.name]["ub"]
-                            single_intermediate_betas_lb = single_intermediate_betas_lb.view(single_intermediate_betas_lb.size(0), -1, single_intermediate_betas_lb.size(-1))
-                            single_intermediate_betas_ub = single_intermediate_betas_ub.view(single_intermediate_betas_ub.size(0), -1, single_intermediate_betas_ub.size(-1))
-                            if unstable_idx is not None:
-                                single_intermediate_betas_lb = self.non_deter_index_select(single_intermediate_betas_lb, index=unstable_idx, dim=1)
-                                single_intermediate_betas_ub = self.non_deter_index_select(single_intermediate_betas_ub, index=unstable_idx, dim=1)
-                            all_betas_lb = torch.cat((all_betas_lb, single_intermediate_betas_lb), dim=-1) if all_betas_lb is not None else single_intermediate_betas_lb
-                            all_betas_ub = torch.cat((all_betas_ub, single_intermediate_betas_ub), dim=-1) if all_betas_ub is not None else single_intermediate_betas_ub
-                        # beta has been reshaped to to [batch, prod(node_shape), n_beta] , prod(node_shape) is the spec dimension for A.
-                        # print(f'Add beta to {l.name} with shape {all_betas_lb.size()}, A shape {A[0][0].size()}, split_coeffs A {split_coeffs["lA"].size()}, split_coeffs bias {split_coeffs["lbias"].size()}')
-                        # Constant terms from beta related Lagrangian. split_coeffs['lbias'] is in shape [batch, n_beta].
-                        # We got shape [batch, *node_shape], which corresponds to the bias terms caused by beta per batch element per intermediate neuron.
-                        intermediate_beta_lb = intermediate_beta_lb + torch.einsum('ijb,ib->ij', all_betas_lb,
-                                                                                   split_coeffs['lbias'])
-                        intermediate_beta_ub = intermediate_beta_ub + torch.einsum('ijb,ib->ij', all_betas_ub,
-                                                                                   split_coeffs['ubias'])
-                        # A coefficients from beta related Lagrangian. split_coeffs['lA'] is in shape [batch, n_beta, *preact_shape].
-                        # We got shape [batch, prod(node_shape), *preact_shape].
-                        # print(f'BEFORE {node.name} split layer {split_layer.name} l {l.name} {torch.tensor(intermediate_beta_lA).abs().sum()} {torch.tensor(intermediate_beta_uA).abs().sum()} \t {all_betas_lb.abs().sum()} {all_betas_lb.size()} {split_coeffs["lA"].abs().sum()} {split_coeffs["lA"].size()}')
-                        intermediate_beta_lA = intermediate_beta_lA + torch.einsum('ijb,ib...->ij...', all_betas_lb,
-                                                                                   split_coeffs['lA'])
-                        intermediate_beta_uA = intermediate_beta_uA + torch.einsum('ijb,ib...->ij...', all_betas_ub,
-                                                                                   split_coeffs['uA'])
-                        # print(f'AFTER  {node.name} split layer {split_layer.name} l {l.name} {torch.tensor(intermediate_beta_lA).abs().sum()} {torch.tensor(intermediate_beta_uA).abs().sum()} \t {all_betas_ub.abs().sum()} {all_betas_lb.size()} {split_coeffs["uA"].abs().sum()} {split_coeffs["uA"].size()}')
-                    # Finished adding beta splits from all layers. Now merge them into the A matrix of this layer.
-                    # Our A has spec dimension at the front, so a transpose is needed.
-                    A[0] = (A[0][0] + intermediate_beta_lA.transpose(0, 1), A[0][1] + intermediate_beta_uA.transpose(0, 1))
-                    lb += intermediate_beta_lb.transpose(0, 1)
-                    ub += intermediate_beta_ub.transpose(0, 1)
-                    # Only need to add the first encountered. Set the watch list to empty.
-                    beta_watch_list = {}
 
                 for i, l_pre in enumerate(l.input_name):
-                    try:
-                        logger.debug('  {} -> {}, uA shape {}'.format(l.name, l_pre, A[i][1].shape))
-                    except:
-                        pass
                     _l = self._modules[l_pre]
                     add_bound(_l, lA=A[i][0], uA=A[i][1])
 
@@ -2015,36 +1707,30 @@ class BoundedModule(nn.Module):
             lb = lb.transpose(0, 1)
         if ub.ndim >= 2:
             ub = ub.transpose(0, 1)
-        output_shape = node.output_shape[1:]
-        if np.prod(node.output_shape[1:]) != output_dim and type(C) != Patches:
-            output_shape = [-1]
 
-        if return_A:
-            # # return A matrix as a dict: {node.name: [A_lower, A_upper]}
-            # this_A_dict = {'bias': [lb.detach(), ub.detach()]}
-            # for i in range(len(root)):
-            #     if root[i].lA is None and root[i].uA is None: continue
-            #     this_A_dict.update({root[i].name: [root[i].lA, root[i].uA]})
-            # this_A_dict.update(A_record)
-            # A_dict.update({node.name: this_A_dict})
-            A_dict.update({node.name: A_record})
+        if return_A and needed_A_dict and node.name in needed_A_dict:
+            root_A_record = {}
+            for i in range(len(root)):
+                if root[i].lA is None and root[i].uA is None: continue
+                if root[i].name in needed_A_dict[node.name]:
+                    root_A_record.update({root[i].name: {
+                        "lA": root[i].lA.transpose(0, 1).detach() if root[i].lA is not None else None,
+                        "uA": root[i].uA.transpose(0, 1).detach() if root[i].uA is not None else None,
+                    }})
+            root_A_record.update(A_record)  # merge to existing A_record
+            A_dict.update({node.name: root_A_record})
 
         for i in range(len(root)):
             if root[i].lA is None and root[i].uA is None: continue
-            # FIXME maybe this one is broken after moving the output dimension to the first
             if average_A and isinstance(root[i], BoundParams):
-                A_shape = root[i].lA.shape if bound_lower else root[i].uA.shape
-                lA = root[i].lA.mean(0, keepdim=True).repeat(A_shape[0],
-                                                             *[1] * len(A_shape[1:])) if bound_lower else None
-                uA = root[i].uA.mean(0, keepdim=True).repeat(A_shape[0],
-                                                             *[1] * len(A_shape[1:])) if bound_upper else None
+                lA = root[i].lA.mean(node.batch_dim + 1, keepdim=True).expand(root[i].lA.shape) if bound_lower else None
+                uA = root[i].uA.mean(node.batch_dim + 1, keepdim=True).expand(root[i].uA.shape) if bound_upper else None
             else:
-                lA = root[i].lA
-                uA = root[i].uA
+                lA, uA = root[i].lA, root[i].uA
                     
             if not isinstance(root[i].lA, eyeC) and not isinstance(root[i].lA, Patches):
                 lA = root[i].lA.reshape(output_dim, batch_size, -1).transpose(0, 1) if bound_lower else None
-            if not isinstance(root[i].uA, eyeC) and not isinstance(root[i].lA, Patches):
+            if not isinstance(root[i].uA, eyeC) and not isinstance(root[i].uA, Patches):
                 uA = root[i].uA.reshape(output_dim, batch_size, -1).transpose(0, 1) if bound_upper else None
             if hasattr(root[i], 'perturbation') and root[i].perturbation is not None:
                 if isinstance(root[i], BoundParams):
@@ -2060,39 +1746,49 @@ class BoundedModule(nn.Module):
                                                               aux=root[i].aux) if bound_lower else None
                     ub = ub + root[i].perturbation.concretize(root[i].center, uA, sign=+1,
                                                               aux=root[i].aux) if bound_upper else None
-            # FIXME to simplify
-            elif i < self.num_global_inputs:
-                if not isinstance(lA, eyeC):
-                    lb = lb + lA.bmm(root[i].forward_value.view(batch_size, -1, 1)).squeeze(-1) if bound_lower else None
-                else:
-                    lb = lb + root[i].forward_value.view(batch_size, -1) if bound_lower else None
-                if not isinstance(uA, eyeC):
-                    # FIXME looks questionable
-                    ub = ub + uA.bmm(root[i].forward_value.view(batch_size, -1, 1)).squeeze(-1) if bound_upper else None
-                else:
-                    ub = ub + root[i].forward_value.view(batch_size, -1) if bound_upper else None
             else:
+                if i < self.num_global_inputs:
+                    # Input node so there is a batch dimension
+                    fv = root[i].forward_value.view(batch_size, -1, 1)
+                    batch_size_ = batch_size
+                else:
+                    # Parameter node so there is no batch dimension
+                    fv = root[i].forward_value.view(-1, 1)
+                    batch_size_ = 1
                 if isinstance(lA, eyeC):
-                    lb = lb + root[i].forward_value.view(1, -1) if bound_lower else None
+                    lb = lb + fv.view(batch_size_, -1) if bound_lower else None
                 else:
-                    lb = lb + lA.matmul(root[i].forward_value.view(-1, 1)).squeeze(-1) if bound_lower else None                    
+                    lb = lb + lA.matmul(fv).squeeze(-1) if bound_lower else None
                 if isinstance(uA, eyeC):
-                    ub = ub + root[i].forward_value.view(1, -1) if bound_upper else None
+                    ub = ub + fv.view(batch_size_, -1) if bound_upper else None
                 else:
-                    ub = ub + uA.matmul(root[i].forward_value.view(-1, 1)).squeeze(-1) if bound_upper else None
-        node.lower = lb.view(batch_size, *output_shape) if bound_lower else None
-        node.upper = ub.view(batch_size, *output_shape) if bound_upper else None
+                    ub = ub + uA.matmul(fv).squeeze(-1) if bound_upper else None
 
-        if return_A: return node.lower, node.upper, A_dict
-        return node.lower, node.upper
+        if isinstance(C, Patches) and C.unstable_idx is not None:
+            # Sparse patches; the output shape is (unstable_size, ).
+            output_shape = [C.shape[0]]
+        elif prod(node.output_shape[1:]) != output_dim and not isinstance(C, Patches):
+            # For the output node, the shape of the bound follows C 
+            # instead of the original output shape
+            # TODO Maybe don't set node.lower and node.upper in this case?
+            # Currently some codes still depend on node.lower and node.upper
+            output_shape = [-1]
+        else:
+            # Generally, the shape of the bounds match the output shape of the node
+            output_shape = node.output_shape[1:]
+        lb = node.lower = lb.view(batch_size, *output_shape) if bound_lower else None
+        ub = node.upper = ub.view(batch_size, *output_shape) if bound_upper else None
+
+        if return_A: return lb, ub, A_dict
+
+        return lb, ub
 
     def _forward_general(self, C=None, node=None, root=None, dim_in=None, concretize=False):
         if hasattr(node, 'lower'):
             return node.lower, node.upper
 
         if not node.from_input:
-            w = None
-            b = node.value
+            w, b  = None, node.value
             node.linear = LinearBound(w, b, w, b, b, b)
             node.lower = node.upper = b
             node.interval = (node.lower, node.upper)
@@ -2127,9 +1823,6 @@ class BoundedModule(nn.Module):
                 _upper = torch.matmul(upper.unsqueeze(1), C_pos.transpose(-1, -2)) + \
                          torch.matmul(lower.unsqueeze(1), C_neg.transpose(-1, -2))
                 lower, upper = _lower.squeeze(1), _upper.squeeze(1)
-            # FIXME looks useless?
-            # else:
-            #     lower, upper = lower.squeeze(1), upper.squeeze(1)
         else:
             lw, uw = node.linear.lw, node.linear.uw
             lower, upper = node.linear.lb, node.linear.ub
@@ -2187,13 +1880,12 @@ class BoundedModule(nn.Module):
                         *([batch_size] + [1] * self.forward_value.ndim))
                 prev_dim_in += shape[1]
             else:
-                fv = root[i].forward_value
+                b = fv = root[i].forward_value
                 shape = fv.shape
                 if root[i].from_input:
                     w = torch.zeros(shape[0], dim_in, *shape[1:], device=self.device)
                 else:
                     w = None
-                b = fv
                 root[i].linear = LinearBound(w, b, w, b, b, b)
                 root[i].lower = root[i].upper = b
                 root[i].interval = (root[i].lower, root[i].upper)
@@ -2207,6 +1899,7 @@ class BoundedModule(nn.Module):
         # NOTE This change is currently inreversible
         if not node.name in self.root_name:
             self.root_name.append(node.name)
+
 
 
 class BoundDataParallel(DataParallel):
@@ -2255,6 +1948,10 @@ class BoundDataParallel(DataParallel):
                 self._replicas = self.replicate(self.module, self.device_ids)
             elif kwargs.get("x") is not None and kwargs.get("IBP") is True:  #
                 self._replicas = self.replicate(self.module, self.device_ids)
+            # Update the input nodes to the ones within each replica respectively
+            for bounded_module in self._replicas:
+                for node in bounded_module._modules.values():
+                    node.inputs = [bounded_module._modules[name] for name in node.input_name]
 
         for t in chain(self.module.parameters(), self.module.buffers()):
             if t.device != self.src_device_obj:
@@ -2323,3 +2020,4 @@ class BoundDataParallel(DataParallel):
 
     def _named_members(self, get_members_fn, prefix='', recurse=True):
         return self.module._named_members(get_members_fn, prefix, recurse)
+

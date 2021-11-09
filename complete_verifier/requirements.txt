@@ -1,0 +1,8 @@
+git+git://github.com/Sarimuko/onnx2pytorch@8879f72c41ba960ff6495ae754d885eac2ebf656#egg=onnx2pytorch
+onnx==1.10.0
+onnxruntime==1.8.1
+protobuf==3.17.3
+sortedcontainers==2.4.0
+appdirs==1.4.4
+flatbuffers==2.0
+pyyaml>=6.0

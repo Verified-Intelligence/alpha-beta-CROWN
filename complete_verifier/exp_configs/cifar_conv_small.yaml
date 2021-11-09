@@ -1,0 +1,17 @@
+general:
+  mode: verified-acc
+model:
+  name: cifar_conv_small
+  path: models/eran/cifar_conv_small_pgd.pth
+data:
+  dataset: CIFAR_ERAN
+specification:
+  epsilon: 0.00784313725  # 2./255.
+attack:
+  pgd_restarts: 100
+solver:
+  beta-crown:
+    batch_size: 2048
+    iteration: 20
+bab:
+  timeout: 120

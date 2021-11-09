@@ -6,3 +6,6 @@ dist
 *.swp
 *.log
 .trace_graph
+Verified_ret*.npy
+Verified-acc*.npy
+vnn-comp_*.npz

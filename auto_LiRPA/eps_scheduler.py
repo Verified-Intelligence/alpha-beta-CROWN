@@ -1,5 +1,5 @@
 import random
-from auto_LiRPA.utils import logger
+from .utils import logger
 
 class BaseScheduler(object):
     def __init__(self, max_eps, opt_str):

@@ -1,0 +1,17 @@
+general:
+  mode: verified-acc
+  root_path: ../../vnncomp2021/benchmarks/eran  # Please update this path to point to the VNN-COMP 2021 repo
+  csv_name: eran_instances.csv
+  complete_verifier: skip  # Only incomplete verification for this model.
+  loss_reduction_func: min
+data:
+  dataset: MNIST
+  start: 36
+  end: 71
+solver:
+  alpha-crown:
+    iteration: 1000
+  beta-crown:
+    lr_decay: 0.999  # Less decay since we have 1000 iterations.
+attack:
+  pgd_order: before

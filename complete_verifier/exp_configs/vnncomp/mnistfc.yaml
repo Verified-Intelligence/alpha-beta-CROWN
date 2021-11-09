@@ -1,0 +1,21 @@
+general:
+  mode: verified-acc
+  root_path: ../../vnncomp2021/benchmarks/mnistfc  # Please update this path to point to the VNN-COMP 2021 repo
+  csv_name: mnistfc_instances.csv
+  complete_verifier: bab-refine
+data:
+  dataset: MNIST
+  start: 30
+  end: 90
+solver:
+  beta-crown:
+    batch_size: 500
+    iteration: 20
+    lr_beta: 0.03
+  mip:
+    parallel_solvers: 16
+    refine_neuron_time_percentage: 0.8
+bab:
+  branching:
+    candidates: 5
+    reduceop: max
