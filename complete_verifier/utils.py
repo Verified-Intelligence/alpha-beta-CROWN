@@ -224,12 +224,12 @@ def load_cifar_sample_data(normalized=True, MODEL="a_mix"):
     Load sampled cifar data: 100 images that are classified correctly by each MODEL
     """
     database_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'datasets/sample100_unnormalized')
-    X = np.load(os.path.join(database_path, MODEL, "/X.npy"))
+    X = np.load(os.path.join(database_path, MODEL, "X.npy"))
     if normalized:
         X = preprocess_cifar(X)
     X = np.transpose(X, (0, 3, 1, 2))
-    y = np.load(os.path.join(database_path, MODEL, "/y.npy"))
-    runnerup = np.load(os.path.join(database_path, MODEL, "/runnerup.npy"))
+    y = np.load(os.path.join(database_path, MODEL, "y.npy"))
+    runnerup = np.load(os.path.join(database_path, MODEL, "runnerup.npy"))
     X = torch.from_numpy(X.astype(np.float32))
     y = torch.from_numpy(y.astype(int))
     runnerup = torch.from_numpy(runnerup.astype(int))
@@ -249,10 +249,10 @@ def load_mnist_sample_data(MODEL="mnist_a_adv"):
     Load sampled mnist data: 100 images that are classified correctly by each MODEL
     """
     database_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'datasets/sample100_unnormalized')
-    X = np.load(os.path.join(database_path, MODEL, "/X.npy"))
+    X = np.load(os.path.join(database_path, MODEL, "X.npy"))
     X = np.transpose(X, (0, 3, 1, 2))
-    y = np.load(os.path.join(database_path, MODEL, "/y.npy"))
-    runnerup = np.load(os.path.join(database_path, MODEL, "/runnerup.npy"))
+    y = np.load(os.path.join(database_path, MODEL, "y.npy"))
+    runnerup = np.load(os.path.join(database_path, MODEL, "runnerup.npy"))
     X = torch.from_numpy(X.astype(np.float32))
     y = torch.from_numpy(y.astype(int))
     runnerup = torch.from_numpy(runnerup.astype(int))
