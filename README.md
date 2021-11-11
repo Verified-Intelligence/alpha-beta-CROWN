@@ -122,7 +122,7 @@ It is easy to load and run your customized model using our verifier.
    careful with dataset normalization. (This step is not needed if you use
    a `vnnlib` format input with `bab_verification_general.py`, which already contains the data)
 3. Set verification specifications and hypereparameters in the config file. All parameters are
-   documented [here](/complete_verifier/docs/robustness_verifier_all_params.yaml). The default hyperparameters should work reasonably well.
+   documented [here](/docs/robustness_verifier_all_params.yaml). The default hyperparameters should work reasonably well.
 4. Run the verifier with your configuration file, e.g. `python
    robustness_verifier.py --config your_model.yaml`.
 
