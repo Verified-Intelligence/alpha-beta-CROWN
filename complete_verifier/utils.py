@@ -15,7 +15,9 @@ from collections import OrderedDict
 
 import os
 import gzip
+from functools import partial
 import torch
+import torchvision
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 import numpy as np
@@ -46,30 +48,40 @@ def conv_output_shape(h_w, kernel_size=1, stride=1, pad=0, dilation=1):
     w = (h_w[1] + (2 * pad[1]) - (dilation * (kernel_size[1] - 1)) - 1) // stride[1] + 1
     return h, w
 
-def get_test_acc(model, input_shape, is_channel_last=False, batch_size=1):
-    import torchvision
-    import torchvision.transforms as transforms
+def get_test_acc(model, input_shape, is_channel_last=False, batch_size=256):
+    database_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'datasets')
+    mean = torch.tensor(arguments.Config["data"]["mean"])
+    std = torch.tensor(arguments.Config["data"]["std"])
+    device = arguments.Config["general"]["device"]
+    normalize = transforms.Normalize(mean=mean, std=std)
     if input_shape == (3, 32, 32):
-        MEANS = torch.tensor([125.3, 123.0, 113.9], dtype=torch.float32) / 255  # From SDP paper.
-        STD = torch.tensor([63.0, 62.1, 66.7], dtype=torch.float32) / 255
-        # normalize = transforms.Normalize(mean=[0., 0., 0.], std=[1., 1., 1.])  # TODO: do correct normalization.
-        normalize = transforms.Normalize(mean=MEANS, std=STD)  # TODO: do correct normalization.
-        testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transforms.Compose([transforms.ToTensor(), normalize]))
+        testset = torchvision.datasets.CIFAR10(root=database_path, train=False, download=True, transform=transforms.Compose([transforms.ToTensor(), normalize]))
     elif input_shape == (1, 28, 28):
-        testset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transforms.Compose([transforms.ToTensor()]))
+        testset = torchvision.datasets.MNIST(root=database_path, train=False, download=True, transform=transforms.Compose([transforms.ToTensor(), normalize]))
     else:
         raise RuntimeError("Unable to determine dataset for test accuracy.")
     testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=2)
     total = 0
     correct = 0
-    for data in testloader:
-        images, labels = data
-        if is_channel_last:
-            images = images.permute(0,2,3,1)
-        outputs = model(images)
-        _, predicted = torch.max(outputs.data, 1)
-        total += labels.size(0)
-        correct +=  (predicted == labels).sum().item()
+    if device != 'cpu':
+        model = model.to(device)
+    print_first_batch = True
+    with torch.no_grad():
+        for data in testloader:
+            images, labels = data
+            if device != 'cpu':
+                images = images.to(device)
+                labels = labels.to(device)
+            if is_channel_last:
+                images = images.permute(0,2,3,1)
+            outputs = model(images)
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            if print_first_batch:
+                print_first_batch = False
+                for i in range(min(outputs.size(0), 10)):
+                    print(f"Image {i} norm {images[i].abs().sum().item()} label {labels[i].item()} correct {labels[i].item() == outputs[i].argmax().item()}\nprediction {outputs[i].cpu().numpy()}")
     print(f'correct {correct} of {total}')
 
 
@@ -177,6 +189,7 @@ def load_model(weights_loaded=True):
     """
     # You can customize this function to load your own model based on model name.
     model_ori = eval(arguments.Config['model']['name'])()
+    model_ori.eval()
     print(model_ori)
 
     if not weights_loaded:
@@ -185,12 +198,10 @@ def load_model(weights_loaded=True):
     sd = torch.load(arguments.Config["model"]["path"], map_location=torch.device('cpu'))
     if 'state_dict' in sd:
         sd = sd['state_dict']
-    if type(sd) == list:
+    if isinstance(sd, list):
         sd = sd[0]
-    elif type(sd) == OrderedDict:
-        pass
-    else:
-        raise NotImplementedError
+    if not isinstance(sd, dict):
+        raise NotImplementedError("Unknown model format, please modify model loader yourself.")
     model_ori.load_state_dict(sd)
 
     return model_ori
@@ -268,26 +279,19 @@ def load_dataset():
     Load regular data; Robustness region defined in results pickle 
     """
     database_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'datasets')
-
+    normalize = transforms.Normalize(mean=arguments.Config["data"]["mean"], std=arguments.Config["data"]["std"])
     if arguments.Config["data"]["dataset"] == 'MNIST':
-        # dummy_input = torch.randn(1, 1, 28, 28)
-        test_data = datasets.MNIST(database_path, train=False, download=True, transform=transforms.ToTensor())
-        test_data.mean = torch.tensor(arguments.Config["data"]["mean"])
-        test_data.std = torch.tensor(arguments.Config["data"]["std"])
-        data_max = torch.tensor(1.)
-        data_min = torch.tensor(0.)
+        loader = datasets.MNIST
     elif arguments.Config["data"]["dataset"] == 'CIFAR':
-        # dummy_input = torch.randn(1, 3, 32, 32)
-        normalize = transforms.Normalize(mean=arguments.Config["data"]["mean"], std=arguments.Config["data"]["std"])
-        test_data = datasets.CIFAR10(database_path, train=False, download=True,
-                                     transform=transforms.Compose([transforms.ToTensor(), normalize]))
-        test_data.mean = torch.tensor(arguments.Config["data"]["mean"])
-        test_data.std = torch.tensor(arguments.Config["data"]["std"])
-        # set data_max and data_min to be None if no clip
-        data_max = torch.reshape((1. - test_data.mean) / test_data.std, (1, -1, 1, 1))
-        data_min = torch.reshape((0. - test_data.mean) / test_data.std, (1, -1, 1, 1))
+        loader = datasets.CIFAR10
     else:
         raise ValueError("Dataset {} not supported.".format(arguments.Config["data"]["dataset"]))
+    test_data = loader(database_path, train=False, download=True, transform=transforms.Compose([transforms.ToTensor(), normalize]))
+    test_data.mean = torch.tensor(arguments.Config["data"]["mean"])
+    test_data.std = torch.tensor(arguments.Config["data"]["std"])
+    # set data_max and data_min to be None if no clip
+    data_max = torch.reshape((1. - test_data.mean) / test_data.std, (1, -1, 1, 1))
+    data_min = torch.reshape((0. - test_data.mean) / test_data.std, (1, -1, 1, 1))
     return test_data, data_max, data_min
 
 
@@ -355,6 +359,21 @@ def load_sdp_dataset(eps_temp=None):
         exit("sdp dataset not supported!")
 
     return X, y, runnerup, data_max, data_min, eps_temp
+
+
+def load_generic_dataset(eps_temp=None):
+    """Load MNIST/CIFAR test set with normalization."""
+    print("Trying generic MNIST/CIFAR data loader.")
+    test_data, data_max, data_min = load_dataset()
+    if eps_temp is None:
+        raise ValueError('You must specify an epsilon')
+    testloader = torch.utils.data.DataLoader(test_data, batch_size=10000, shuffle=False, num_workers=4)
+    X, labels = next(iter(testloader))
+    runnerup = None
+    # Rescale epsilon.
+    eps_temp = torch.reshape(eps_temp / torch.tensor(arguments.Config["data"]["std"], dtype=torch.get_default_dtype()), (1, -1, 1, 1))
+
+    return X, labels, runnerup, data_max, data_min, eps_temp
 
 
 def load_eran_dataset(eps_temp=None):
@@ -461,14 +480,7 @@ def load_eran_dataset(eps_temp=None):
         print("############################")
 
     else:
-        print("Trying generic MNIST/CIFAR data loader.")
-        test_data, data_max, data_min = load_dataset()
-        if eps_temp is None:
-            raise ValueError('You must specify an epsilon')
-        testloader = torch.utils.data.DataLoader(test_data, batch_size=10000, shuffle=False, num_workers=4)
-        X, labels = next(iter(testloader))
-        runnerup = None
-        eps_temp = torch.reshape(eps_temp / torch.tensor(arguments.Config["data"]["std"], dtype=torch.get_default_dtype()), (1, -1, 1, 1))
+        raise(f'Unsupported dataset {arguments.Config["data"]["dataset"]}')
 
     return X, labels, runnerup, data_max, data_min, eps_temp
 
@@ -501,7 +513,7 @@ def load_verification_dataset(eps_before_normalization):
         X, labels, runnerup, data_max, data_min, eps_new = load_sampled_dataset()
     elif "CIFAR" in arguments.Config["data"]["dataset"] or "MNIST" in arguments.Config["data"]["dataset"]:
         # general MNIST and CIFAR dataset with mean/std defined in config file.
-        X, labels, runnerup, data_max, data_min, eps_new = load_eran_dataset(eps_temp=eps_before_normalization)
+        X, labels, runnerup, data_max, data_min, eps_new = load_generic_dataset(eps_temp=eps_before_normalization)
     else:
         exit("Dataset not supported in this file! Please customize load_verification_dataset() function in utils.py.")
 
