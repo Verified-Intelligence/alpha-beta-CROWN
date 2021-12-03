@@ -439,10 +439,9 @@ def main():
                     attack_success.append(imag_idx)
                     break
                 elif l < arguments.Config["bab"]["decision_thresh"]:
-                    if not arguments.Config["bab"]["attack"]["enabled"]:
-                        pidx_all_verified = False
-                        # break to run next sample save time if any label is not verified.
-                        break
+                    pidx_all_verified = False
+                    # break to run next sample save time if any label is not verified.
+                    break
             except KeyboardInterrupt:
                 print('time:', imag_idx, time.time()-start_inner, "\n",)
                 print(ret)
