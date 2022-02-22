@@ -424,16 +424,6 @@ class LiRPAConvNet:
             decision = np.array([i.squeeze() for i in decision])
 
         batch = len(decision)
-        # print(split, "diving" in split)
-        if "diving" in split:
-            diving_batch = split["diving"]
-            print(f"regular batch size: 2*{batch}, diving batch size 1*{diving_batch}")
-            # betas and history: regular batch + diving batch number of constraints
-            # new_sparse_betas: (2 * regular batch + diving batch number of constraints, max splits per layer)
-            # print("betas", len(betas), betas)
-            # print("history", len(history), history)
-            # history = [[[[], []], [[], []], [[], []]], [[[], []], [[], []], [[], []]]]
-            # betas = [None, None]
 
         # initial results with empty list
         ret_l = [[] for _ in range(batch * 2 + diving_batch)]
@@ -516,8 +506,6 @@ class LiRPAConvNet:
         else:
             for m in self.net.relus:
                 m.beta = None
-
-        # if diving_batch > 0: import pdb; pdb.set_trace()
 
         # pre_ub_all[:-1] means pre-set bounds for all intermediate layers
         with torch.no_grad():

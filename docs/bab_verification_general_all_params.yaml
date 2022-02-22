@@ -19,7 +19,7 @@ model:
 data:
   start: 0  # Start from the i-th property in specified dataset.
   end: 10000  # End with the (i-1)-th property in the dataset.
-  num_classes: 10  # Number of classes for classification problem.
+  num_outputs: 10  # Number of classes for classification problem.
   mean: [0.0, 0.0, 0.0]  # Mean vector used in data preprocessing.
   std: [1.0, 1.0, 1.0]  # Std vector used in data preprocessing.
   pkl_path: null  # Load properties to verify from a .pkl file (only used for oval20 dataset).

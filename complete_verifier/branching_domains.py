@@ -124,18 +124,21 @@ class ReLUDomain:
                 self.slope[layer][intermediate_layer] = self.slope[layer][intermediate_layer].half().to(device='cpu', non_blocking=True)
 
         if self.split_history:
-            for lidx in range(len(self.split_history["beta"])):
-                if self.split_history["single_beta"][lidx] is not None:
-                    self.split_history["single_beta"][lidx]["nonzero"] = self.split_history["single_beta"][lidx]["nonzero"].to(device='cpu', non_blocking=True)
-                    self.split_history["single_beta"][lidx]["value"] = self.split_history["single_beta"][lidx]["value"].to(device='cpu', non_blocking=True)
-                    self.split_history["single_beta"][lidx]["c"] = self.split_history["single_beta"][lidx]["c"].to(device='cpu', non_blocking=True)
-                if self.split_history["beta"][lidx] is not None:
-                    self.split_history["beta"][lidx] = self.split_history["beta"][lidx].to(device='cpu', non_blocking=True)
-                    self.split_history["c"][lidx] = self.split_history["c"][lidx].to(device='cpu', non_blocking=True)
-                    self.split_history["coeffs"][lidx]["nonzero"] = self.split_history["coeffs"][lidx]["nonzero"].to(device='cpu', non_blocking=True)
-                    self.split_history["coeffs"][lidx]["coeffs"] = self.split_history["coeffs"][lidx]["coeffs"].to(device='cpu', non_blocking=True)
-                if self.split_history["bias"][lidx] is not None:
-                    self.split_history["bias"][lidx] = self.split_history["bias"][lidx].to(device='cpu', non_blocking=True)
+            if "beta" in self.split_history:
+                for lidx in range(len(self.split_history["beta"])):
+                    if self.split_history["single_beta"][lidx] is not None:
+                        self.split_history["single_beta"][lidx]["nonzero"] = self.split_history["single_beta"][lidx]["nonzero"].to(device='cpu', non_blocking=True)
+                        self.split_history["single_beta"][lidx]["value"] = self.split_history["single_beta"][lidx]["value"].to(device='cpu', non_blocking=True)
+                        self.split_history["single_beta"][lidx]["c"] = self.split_history["single_beta"][lidx]["c"].to(device='cpu', non_blocking=True)
+                    if self.split_history["beta"][lidx] is not None:
+                        self.split_history["beta"][lidx] = self.split_history["beta"][lidx].to(device='cpu', non_blocking=True)
+                        self.split_history["c"][lidx] = self.split_history["c"][lidx].to(device='cpu', non_blocking=True)
+                        self.split_history["coeffs"][lidx]["nonzero"] = self.split_history["coeffs"][lidx]["nonzero"].to(device='cpu', non_blocking=True)
+                        self.split_history["coeffs"][lidx]["coeffs"] = self.split_history["coeffs"][lidx]["coeffs"].to(device='cpu', non_blocking=True)
+                    if self.split_history["bias"][lidx] is not None:
+                        self.split_history["bias"][lidx] = self.split_history["bias"][lidx].to(device='cpu', non_blocking=True)
+            if "general_beta" in self.split_history:
+                self.split_history["general_beta"] = self.split_history["general_beta"].to(device="cpu", non_blocking=True)
 
         if self.intermediate_betas is not None:
             for split_layer in self.intermediate_betas:
@@ -164,18 +167,21 @@ class ReLUDomain:
             for intermediate_layer in self.slope[layer]:
                 self.slope[layer][intermediate_layer] = self.slope[layer][intermediate_layer].to(device, non_blocking=True, dtype=torch.get_default_dtype())
         if self.split_history:
-            for lidx in range(len(self.split_history["beta"])):
-                if self.split_history["single_beta"][lidx] is not None:
-                    self.split_history["single_beta"][lidx]["nonzero"] = self.split_history["single_beta"][lidx]["nonzero"].to(device=device, non_blocking=True)
-                    self.split_history["single_beta"][lidx]["value"] = self.split_history["single_beta"][lidx]["value"].to(device=device, non_blocking=True)
-                    self.split_history["single_beta"][lidx]["c"] = self.split_history["single_beta"][lidx]["c"].to(device=device, non_blocking=True)
-                if self.split_history["beta"][lidx] is not None:
-                    self.split_history["beta"][lidx] = self.split_history["beta"][lidx].to(device=device, non_blocking=True)
-                    self.split_history["c"][lidx] = self.split_history["c"][lidx].to(device=device, non_blocking=True)
-                    self.split_history["coeffs"][lidx]["nonzero"] = self.split_history["coeffs"][lidx]["nonzero"].to(device=device, non_blocking=True)
-                    self.split_history["coeffs"][lidx]["coeffs"] = self.split_history["coeffs"][lidx]["coeffs"].to(device=device, non_blocking=True)
-                if self.split_history["bias"][lidx] is not None:
-                    self.split_history["bias"][lidx] = self.split_history["bias"][lidx].to(device=device, non_blocking=True)
+            if "beta" in self.split_history:
+                for lidx in range(len(self.split_history["beta"])):
+                    if self.split_history["single_beta"][lidx] is not None:
+                        self.split_history["single_beta"][lidx]["nonzero"] = self.split_history["single_beta"][lidx]["nonzero"].to(device=device, non_blocking=True)
+                        self.split_history["single_beta"][lidx]["value"] = self.split_history["single_beta"][lidx]["value"].to(device=device, non_blocking=True)
+                        self.split_history["single_beta"][lidx]["c"] = self.split_history["single_beta"][lidx]["c"].to(device=device, non_blocking=True)
+                    if self.split_history["beta"][lidx] is not None:
+                        self.split_history["beta"][lidx] = self.split_history["beta"][lidx].to(device=device, non_blocking=True)
+                        self.split_history["c"][lidx] = self.split_history["c"][lidx].to(device=device, non_blocking=True)
+                        self.split_history["coeffs"][lidx]["nonzero"] = self.split_history["coeffs"][lidx]["nonzero"].to(device=device, non_blocking=True)
+                        self.split_history["coeffs"][lidx]["coeffs"] = self.split_history["coeffs"][lidx]["coeffs"].to(device=device, non_blocking=True)
+                    if self.split_history["bias"][lidx] is not None:
+                        self.split_history["bias"][lidx] = self.split_history["bias"][lidx].to(device=device, non_blocking=True)
+            if "general_beta" in self.split_history:
+                self.split_history["general_beta"] = self.split_history["general_beta"].to(device=device, non_blocking=True)
         if self.intermediate_betas is not None:
             for split_layer in self.intermediate_betas:
                 for intermediate_layer in self.intermediate_betas[split_layer]:
