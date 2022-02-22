@@ -5,7 +5,7 @@ general:
   mode: verified-acc
 model:
   # Use the simple_box() model in "custom_model_data.py".
-  name: Customized("custom_model_data", "simple_box", in_dim=2, out_dim=2)
+  name: Customized("custom_model_data", "two_relu_toy_model", in_dim=2, out_dim=2)
 data:
   # Use the simple_box_data() loader in "custom_model_data.py".
   dataset: Customized("custom_model_data", "simple_box_data")

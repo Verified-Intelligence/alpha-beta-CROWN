@@ -1645,9 +1645,9 @@ class LiRPAConvNet:
         return build_solver_model(self, lower_bounds, upper_bounds, timeout, mip_multi_proc, mip_threads, input_domain, target, model_type, simplified)
 
 
-    def build_the_model_mip(self, lower_bounds, upper_bounds, simplified=False):
+    def build_the_model_mip(self, lower_bounds, upper_bounds, simplified=False, labels_to_verify=None):
         # using the built gurobi model to solve mip formulation
-        return build_the_model_mip(self, lower_bounds, upper_bounds, simplified)
+        return build_the_model_mip(self, lower_bounds, upper_bounds, simplified, labels_to_verify=labels_to_verify)
     
 
     def build_the_model_lp(self, lower_bounds, upper_bounds, using_integer=True, simplified=True):

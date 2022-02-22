@@ -29,7 +29,7 @@ import arguments
 import numpy as np
 
 
-def simple_conv(in_channel, out_dim):
+def simple_conv_model(in_channel, out_dim):
     """Simple Convolutional model."""
     model = nn.Sequential(
         nn.Conv2d(in_channel, 16, 4, stride=2, padding=0),
@@ -44,7 +44,7 @@ def simple_conv(in_channel, out_dim):
     return model
 
 
-def simple_box(in_dim=2, out_dim=2):
+def two_relu_toy_model(in_dim=2, out_dim=2):
     """A very simple model, 2 inputs, 2 ReLUs, 2 outputs"""
     model = nn.Sequential(
         nn.Linear(in_dim, 2),

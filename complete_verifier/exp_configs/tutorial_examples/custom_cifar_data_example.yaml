@@ -5,7 +5,7 @@ general:
   mode: verified-acc
 model:
   # Use the simple_conv() model in "custom_model_data.py".
-  name: Customized("custom_model_data", "simple_conv", in_channel=3, out_dim=10)
+  name: Customized("custom_model_data", "simple_conv_model", in_channel=3, out_dim=10)
   path: models/eran/cifar_conv_small_pgd.pth
 data:
   # Use the cifar10() loader in "custom_model_data.py".
