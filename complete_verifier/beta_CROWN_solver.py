@@ -561,7 +561,6 @@ class LiRPAConvNet:
             return lb
 
         return_A = True if get_upper_bound else False  # we need A matrix to consturct adv example
-        # FIXME (assigned to Shiqi): Please remove most parameters of this function, and use arguments.Config instead. Also change other places of this file.
         if layer_set_bound:
             start_beta_bound_time = time.time()
             self.net.set_bound_opts({'optimize_bound_args':

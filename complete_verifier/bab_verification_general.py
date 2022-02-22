@@ -149,7 +149,6 @@ def incomplete_verifier(model_ori, data, y, data_ub=None, data_lb=None, eps=0.0)
     ptb = PerturbationLpNorm(norm=norm, eps=eps, x_L=data_lb, x_U=data_ub)
     x = BoundedTensor(data, ptb).to(data_lb.device)
     domain = torch.stack([data_lb.squeeze(0), data_ub.squeeze(0)], dim=-1)
-    # global_ub, global_lb, _, _, _, updated_mask, lA, lower_bounds, upper_bounds, pre_relu_indices, slope, history
     _, global_lb, _, _, _, mask, lA, lower_bounds, upper_bounds, pre_relu_indices, slope, history = model.build_the_model(
             domain, x, stop_criterion_func=stop_criterion_min(arguments.Config["bab"]["decision_thresh"]))
 
@@ -254,7 +253,6 @@ def bab(unwrapped_model, data, target, y, eps=None, data_ub=None, data_lb=None, 
 
     num_outputs = arguments.Config["data"]["num_outputs"]
     # assert num_outputs > 1
-    # FIXME (01/12/22): Clean up specification matrix generation.
     if y is not None:
         if num_outputs > 1:
             c = torch.zeros((1, 1, num_outputs), device=arguments.Config["general"]["device"])  # we only support c with shape of (1, 1, n)
@@ -512,7 +510,6 @@ def main():
                         # Multiple properties in a "and" clause (e.g., marabou-cifar10). Only need to verify one of the easiest properties.
                         select_using_verified_bounds = True
                         if select_using_verified_bounds:
-                            # FIXME: we should make sure the incomplete bound is using the prop_mat as the C matrix!
                             selection_metric = init_global_lb.detach().clone().squeeze(0)
                             selection_metric[y] = float("-inf")  # This this the groundtruth label (0 in the margin bounds).
                             pidx = selection_metric.argmax().item()  # Choose the label with bound closest to 0.

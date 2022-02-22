@@ -561,7 +561,6 @@ def Customized(def_file, callable_name, *args, **kwargs):
 
 def load_verification_dataset(eps_before_normalization):
     if arguments.Config["data"]["dataset"].startswith("Customized("):
-        # FIXME (01/10/22): fully document customized data loader.
         # Returns: X, labels, runnerup, data_max, data_min, eps, target_label.
         # X is the data matrix in (batch, ...).
         # labels are the groud truth labels, a tensor of integers.
@@ -570,7 +569,10 @@ def load_verification_dataset(eps_before_normalization):
         # data_min is the per-example perturbation lower bound, shape (batch, ...) or (1, ...).
         # eps is the Lp norm perturbation epsilon. Can be set to None if element-wise perturbation (specified by data_max and data_min) is used.
         # Target label is the targeted attack label; can be set to None.
-        data_config = eval(arguments.Config["data"]["dataset"])(eps=eps_before_normalization)
+        if arguments.Config["specification"]["type"] == "lp":
+            data_config = eval(arguments.Config["data"]["dataset"])(eps=eps_before_normalization)
+        elif arguments.Config["specification"]["type"] == "bound":
+            data_config = eval(arguments.Config["data"]["dataset"])()
         if len(data_config) == 5:
             X, labels, data_max, data_min, eps_new = data_config 
             runnerup, target_label = None, None
@@ -588,7 +590,6 @@ def load_verification_dataset(eps_before_normalization):
     target_label = None
     # Add your customized dataset here.
     if arguments.Config["data"]["pkl_path"] is not None:
-        # FIXME (01/10/22): "pkl_path" should not exist in public code!
         # for oval20 base, wide, deep or other datasets saved in .pkl file, we load the pkl file here.
         assert arguments.Config["specification"]["epsilon"] is None, 'will use epsilon saved in .pkl file'
         gt_results = pd.read_pickle(arguments.Config["data"]["pkl_path"])
@@ -632,7 +633,6 @@ def load_verification_dataset(eps_before_normalization):
         arguments.Config["data"]["std"] = arguments.Config["data"]["std"][0]
         eps_new = eps_new[0, 0, 0, 0]  # only support eps as a scalar for non-Linf norm
 
-    # FIXME (01/10/22): we should have a common interface for dataloader.
     return X, labels, runnerup, data_max, data_min, eps_new, target_label
 
 

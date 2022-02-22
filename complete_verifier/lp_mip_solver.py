@@ -409,7 +409,6 @@ def build_solver_model(m, lower_bounds, upper_bounds, timeout, mip_multi_proc=No
         m.pool.kill()
         m.pool = None
         m.pool_termination_flag = None
-    # FIXME (10/03): Optimize slow LP construction similar to here.
     new_relu_mask = []
     input_domain = input_domain if input_domain is not None else m.input_domain
     input_domain = input_domain.cpu().numpy()

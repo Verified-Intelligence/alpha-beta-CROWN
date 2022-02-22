@@ -59,14 +59,16 @@ def two_relu_toy_model(in_dim=2, out_dim=2):
     return model
 
 
-def simple_box_data(eps=2.):
-    """a customized box data: x=[-1, 1], y=[-1, 1]"""
+def simple_box_data():
+    """a customized box data: x=[-1.5, 1], y=[-1, 1.5]"""
     X = torch.tensor([[0., 0.]]).float()
     labels = torch.tensor([0]).long()
-    eps_temp = torch.tensor(eps).reshape(1, -1)
-    data_max = torch.tensor(10.).reshape(1, -1)
-    data_min = torch.tensor(-10.).reshape(1, -1)
-    return X, labels, data_max, data_min, eps_temp
+    # customized element-wise upper bounds
+    data_max = torch.tensor([[1., 1.5]]).reshape(1, -1)
+    # customized elment-wise lower bounds
+    data_min = torch.tensor([[-1.5, -1.]]).reshape(1, -1)
+    eps = None
+    return X, labels, data_max, data_min, eps
 
 
 def box_data(dim, low=0., high=1., segments=10, num_classes=10, eps=None):
