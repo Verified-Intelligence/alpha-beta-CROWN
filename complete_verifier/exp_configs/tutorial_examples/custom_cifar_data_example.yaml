@@ -4,7 +4,7 @@
 general:
   mode: verified-acc
 model:
-  # Use the simple_conv() model in "custom_model_data.py".
+  # Use the simple_conv_model() model in "custom_model_data.py".
   name: Customized("custom_model_data", "simple_conv_model", in_channel=3, out_dim=10)
   path: models/eran/cifar_conv_small_pgd.pth
 data:
