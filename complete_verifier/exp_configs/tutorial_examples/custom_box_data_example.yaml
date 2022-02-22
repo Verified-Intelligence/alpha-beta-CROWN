@@ -11,7 +11,7 @@ data:
   dataset: Customized("custom_model_data", "simple_box_data")
   num_outputs: 2
 specification:
-  # element-wise perturbation range assignment
+  # element-wise perturbation bound assignment
   type: bound
 attack:
   pgd_order: skip

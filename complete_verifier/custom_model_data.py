@@ -65,7 +65,7 @@ def simple_box_data():
     labels = torch.tensor([0]).long()
     # customized element-wise upper bounds
     data_max = torch.tensor([[1., 1.5]]).reshape(1, -1)
-    # customized elment-wise lower bounds
+    # customized element-wise lower bounds
     data_min = torch.tensor([[-1.5, -1.]]).reshape(1, -1)
     eps = None
     return X, labels, data_max, data_min, eps
