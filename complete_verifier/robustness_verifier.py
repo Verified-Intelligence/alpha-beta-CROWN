@@ -286,9 +286,8 @@ def main():
 
         if arguments.Config["attack"]["pgd_order"] == "before":
             start_attack = time.time()
-            if True:
-                attack_args = {'dataset': attack_dataset, 'model': model_ori, 'x': x, 'max_eps': perturb_eps, 'data_min': data_min, 'data_max': data_max, 'y': y}
-                attack_ret, attack_images, attack_margin = pgd_attack(**attack_args)
+            attack_args = {'dataset': attack_dataset, 'model': model_ori, 'x': x, 'max_eps': perturb_eps, 'data_min': data_min, 'data_max': data_max, 'y': y}
+            attack_ret, attack_images, attack_margin = pgd_attack(**attack_args)
             ret.append([imag_idx, 0, 0, time.time()-start_attack, new_idx, -3, np.inf, np.inf])
             if attack_ret:
                 # Attack success.
@@ -341,11 +340,8 @@ def main():
 
         if arguments.Config["attack"]["pgd_order"] == "after":
             start_attack = time.time()
-            if True:
-                attack_args = {'dataset': attack_dataset, 'model': model_ori, 'x': x, 'max_eps': perturb_eps, 'data_min': data_min, 'data_max': data_max, 'y': y}
-                if arguments.Config["attack"]["use_diversed_pgd"]:
-                    attack_args["initialization"] = "osi"
-                attack_ret, attack_images, attack_margin = pgd_attack(**attack_args)
+            attack_args = {'dataset': attack_dataset, 'model': model_ori, 'x': x, 'max_eps': perturb_eps, 'data_min': data_min, 'data_max': data_max, 'y': y}
+            attack_ret, attack_images, attack_margin = pgd_attack(**attack_args)
             ret.append([imag_idx, 0, 0, time.time()-start_attack, new_idx, -3, np.inf, np.inf])
             if attack_ret:
                 # Attack success.
@@ -432,7 +428,7 @@ def main():
             elif verified_status == "unsafe-mip":
                 verified_acc -= 1
                 mip_unsafe.append(imag_idx)
-            elif verified_status == "safe-mip":
+            elif verified_status == "safe-mip" or verified_status == "safe-incomplete-refine":
                 mip_safe.append(imag_idx)
             arguments.Config["bab"]["timeout"] -= (time.time()-start_refine)
             ret.append([imag_idx, 0, 0, time.time()-start_refine, new_idx, -2, np.inf, np.inf])
@@ -442,9 +438,15 @@ def main():
             if verified_status == "safe-mip":
                 print(f"Result: image {imag_idx} verification success (with mip)!")
                 verified_success_list.append(imag_idx)
-            else:
+            elif verified_status == "safe-incomplete-refine":
+                print(f"Result: image {imag_idx} verification success (with mip refine)!")
+                verified_success_list.append(imag_idx)
+            elif verified_status == "unsafe-mip":
                 print(f"Result: image {imag_idx} attack success (with mip)!")
                 attack_success.append(imag_idx)
+            else:
+                print(f"Warning: verified status {verified_status} not supported!")
+                exit()
             example_time.append(time.time() - example_start_time)
             print(f'Wall time: {example_time[-1]}')
             continue
@@ -530,10 +532,9 @@ def main():
                     bab_attack_success = True
                     break
                 elif l < arguments.Config["bab"]["decision_thresh"]:
-                    if True:
-                        pidx_all_verified = False
-                        # break to run next sample save time if any label is not verified.
-                        break
+                    pidx_all_verified = False
+                    # break to run next sample save time if any label is not verified.
+                    break
             except KeyboardInterrupt:
                 print('time:', imag_idx, time.time()-start_inner, "\n",)
                 print(ret)
@@ -550,9 +551,8 @@ def main():
                 verified_failed.append(imag_idx)
                 print(f'Result: image {imag_idx} verification failure (with branch and bound).')
         else:
-            if True:
-                verified_success_list.append(imag_idx)
-                print(f'Result: image {imag_idx} verification success (with branch and bound)!')
+            verified_success_list.append(imag_idx)
+            print(f'Result: image {imag_idx} verification success (with branch and bound)!')
         # Make sure ALL tensors used in this loop are deleted here.
         del init_global_lb, saved_bounds, saved_slopes
         print(f'Wall time: {example_time[-1]}')

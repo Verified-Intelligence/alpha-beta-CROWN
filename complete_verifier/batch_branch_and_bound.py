@@ -29,8 +29,7 @@ all_node_split = False
 DFS_enabled = False
 
 
-def batch_verification(d, net, batch, pre_relu_indices, growth_rate, layer_set_bound=True,
-                       dive_domains=[], adv_pool=None):
+def batch_verification(d, net, batch, pre_relu_indices, growth_rate, layer_set_bound=True, adv_pool=None):
     global Visited, Flag_first_split
     global Use_optimized_split
     global DFS_enabled
@@ -47,7 +46,6 @@ def batch_verification(d, net, batch, pre_relu_indices, growth_rate, layer_set_b
     total_time = time.time()
 
     pickout_time = time.time()
-    #### add new domains into dive_domains
 
     domains_params = pick_out_batch(d, decision_thresh, batch=batch * (1 - dive_rate), device=net.x.device, DFS_percent=DFS_percent if DFS_enabled else 0)
     mask, lAs, orig_lbs, orig_ubs, slopes, betas, intermediate_betas, selected_domains = domains_params
@@ -213,7 +211,6 @@ def relu_bab_parallel(net, domain, x, use_neuron_set_strategy=False, refined_low
     # This is the first (initial) domain.
     candidate_domain = ReLUDomain(lA, global_lb, global_ub, lower_bounds, upper_bounds, slope, history=history, depth=0, primals=primals).to_cpu()
     domains = DFS_SortedList() if DFS_percent > 0 else SortedList()
-    dive_domains = DFS_SortedList() if DFS_percent > 0 else SortedList()
     domains.add(candidate_domain)
 
     tot_ambi_nodes = 0
@@ -231,12 +228,10 @@ def relu_bab_parallel(net, domain, x, use_neuron_set_strategy=False, refined_low
         if len(domains) > 80000 and len(domains) % 10000 < batch * 2 and use_neuron_set_strategy:  # do two batch of neuron set bounds  per 10000 domains
             # neuron set  bounds cost more memory, we set a smaller batch here
             global_lb, batch_ub = batch_verification(domains, net, int(batch/2), pre_relu_indices, 0, layer_set_bound=False,
-                                        dive_domains=dive_domains,
                                         adv_pool=adv_pool)
         else:
             global_lb, batch_ub = batch_verification(domains, net, batch, pre_relu_indices, 0,
                                         layer_set_bound=not opt_intermediate_beta,
-                                        dive_domains=dive_domains,
                                         adv_pool=adv_pool)
         print(f"Global ub: {global_ub}, batch ub: {batch_ub}")
         global_ub = min(global_ub, batch_ub)
