@@ -108,7 +108,7 @@ file](/complete_verifier/exp_configs/cifar_resnet_2b.yaml). For detailed usage p
 [Usage Documentation](docs/usage.md).  We also provide a large range of examples in
 the [`complete_verifier/exp_configs`](/complete_verifier/exp_configs) folder.
 
-We have also provided [a tutorial example](PaperCode.cc/a-b-CROWN-Tutorial) on colab for running α,β-CROWN.
+We have also provided [a tutorial example](https://PaperCode.cc/a-b-CROWN-Tutorial) on colab for running α,β-CROWN.
 
 
 Run α,β-CROWN (alpha-beta-CROWN) Verifier on Your Own Model
@@ -134,7 +134,7 @@ It is easy to load and run your customized model using our verifier.
 
 For all supported options in config files, please see the [Usage Documentation](docs/usage.md).
 
-We have also provided [tutorial examples](PaperCode.cc/a-b-CROWN-Tutorial) on colab for α,β-CROWN customization.
+We have also provided [tutorial examples](https://PaperCode.cc/a-b-CROWN-Tutorial) on colab for α,β-CROWN customization.
 
 Publications
 ----------------------
