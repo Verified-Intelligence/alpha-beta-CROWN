@@ -2,7 +2,7 @@
 ======================
 
 <p align="center">
-<a href="https://arxiv.org/pdf/2103.06624.pdf"><img src="https://www.huan-zhang.com/images/upload/alpha-beta-crown/banner.png" width="100%"></a>
+<a href="https://arxiv.org/pdf/2103.06624.pdf"><img src="https://www.cs.columbia.edu/~tcwangshiqi/images/abcrown_logo.png" width="28%"></a>
 </p>
 
 α,β-CROWN (alpha-beta-CROWN) is a neural network verifier based on an efficient
@@ -22,6 +22,10 @@ other neural network verifiers on a wide range of benchmarks.  Details of
 competition results can be found [in the slides
 here](https://docs.google.com/presentation/d/1oM3NqqU03EUqgQVc3bGK2ENgHa57u-W6Q63Vflkv000/edit#slide=id.ge4496ad360_14_21)
 and [the report here](https://arxiv.org/abs/2109.00498).
+
+<p align="center">
+<a href="https://arxiv.org/pdf/2103.06624.pdf"><img src="https://www.huan-zhang.com/images/upload/alpha-beta-crown/banner.png" width="100%"></a>
+</p>
 
 Supported Features
 ----------------------
@@ -104,6 +108,8 @@ file](/complete_verifier/exp_configs/cifar_resnet_2b.yaml). For detailed usage p
 [Usage Documentation](docs/usage.md).  We also provide a large range of examples in
 the [`complete_verifier/exp_configs`](/complete_verifier/exp_configs) folder.
 
+We have also provided [a tutorial example](PaperCode.cc/a-b-CROWN-Tutorial) on colab for running α,β-CROWN.
+
 
 Run α,β-CROWN (alpha-beta-CROWN) Verifier on Your Own Model
 ----------------------
@@ -127,6 +133,8 @@ It is easy to load and run your customized model using our verifier.
    robustness_verifier.py --config your_model.yaml`.
 
 For all supported options in config files, please see the [Usage Documentation](docs/usage.md).
+
+We have also provided [tutorial examples](PaperCode.cc/a-b-CROWN-Tutorial) on colab for α,β-CROWN customization.
 
 Publications
 ----------------------
