@@ -1,0 +1,22 @@
+general:
+  mode: verified-acc
+model:
+  name: mnist_cnn_4layer
+  path: models/sdp/mnist_cnn_a_adv.model
+data:
+  dataset: MNIST
+  start: 0
+  end: 100
+  std: [1.]
+  mean: [0.]
+specification:
+  epsilon: 0.3
+  norm: .inf
+attack:
+  pgd_restarts: 50
+solver:
+  beta-crown:
+    batch_size: 1024
+    iteration: 20
+bab:
+  timeout: 180

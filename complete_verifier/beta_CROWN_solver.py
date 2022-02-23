@@ -424,16 +424,6 @@ class LiRPAConvNet:
             decision = np.array([i.squeeze() for i in decision])
 
         batch = len(decision)
-        # print(split, "diving" in split)
-        if "diving" in split:
-            diving_batch = split["diving"]
-            print(f"regular batch size: 2*{batch}, diving batch size 1*{diving_batch}")
-            # betas and history: regular batch + diving batch number of constraints
-            # new_sparse_betas: (2 * regular batch + diving batch number of constraints, max splits per layer)
-            # print("betas", len(betas), betas)
-            # print("history", len(history), history)
-            # history = [[[[], []], [[], []], [[], []]], [[[], []], [[], []], [[], []]]]
-            # betas = [None, None]
 
         # initial results with empty list
         ret_l = [[] for _ in range(batch * 2 + diving_batch)]
@@ -517,8 +507,6 @@ class LiRPAConvNet:
             for m in self.net.relus:
                 m.beta = None
 
-        # if diving_batch > 0: import pdb; pdb.set_trace()
-
         # pre_ub_all[:-1] means pre-set bounds for all intermediate layers
         with torch.no_grad():
             # Setting the neuron upper/lower bounds with a split to 0.
@@ -573,7 +561,6 @@ class LiRPAConvNet:
             return lb
 
         return_A = True if get_upper_bound else False  # we need A matrix to consturct adv example
-        # FIXME (assigned to Shiqi): Please remove most parameters of this function, and use arguments.Config instead. Also change other places of this file.
         if layer_set_bound:
             start_beta_bound_time = time.time()
             self.net.set_bound_opts({'optimize_bound_args':
@@ -1657,9 +1644,9 @@ class LiRPAConvNet:
         return build_solver_model(self, lower_bounds, upper_bounds, timeout, mip_multi_proc, mip_threads, input_domain, target, model_type, simplified)
 
 
-    def build_the_model_mip(self, lower_bounds, upper_bounds, simplified=False):
+    def build_the_model_mip(self, lower_bounds, upper_bounds, simplified=False, labels_to_verify=None):
         # using the built gurobi model to solve mip formulation
-        return build_the_model_mip(self, lower_bounds, upper_bounds, simplified)
+        return build_the_model_mip(self, lower_bounds, upper_bounds, simplified, labels_to_verify=labels_to_verify)
     
 
     def build_the_model_lp(self, lower_bounds, upper_bounds, using_integer=True, simplified=True):

@@ -16,6 +16,7 @@ from collections import OrderedDict
 import os
 import gzip
 from functools import partial
+import importlib
 import torch
 import torchvision
 import torchvision.datasets as datasets
@@ -26,6 +27,7 @@ import onnx2pytorch
 import onnx
 import onnxruntime as ort
 import arguments
+from attack_pgd import attack_pgd
 
 # Import all model architectures.
 from model_defs import *
@@ -48,19 +50,79 @@ def conv_output_shape(h_w, kernel_size=1, stride=1, pad=0, dilation=1):
     w = (h_w[1] + (2 * pad[1]) - (dilation * (kernel_size[1] - 1)) - 1) // stride[1] + 1
     return h, w
 
-def get_test_acc(model, input_shape, is_channel_last=False, batch_size=256):
-    database_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'datasets')
-    mean = torch.tensor(arguments.Config["data"]["mean"])
-    std = torch.tensor(arguments.Config["data"]["std"])
-    device = arguments.Config["general"]["device"]
-    normalize = transforms.Normalize(mean=mean, std=std)
-    if input_shape == (3, 32, 32):
-        testset = torchvision.datasets.CIFAR10(root=database_path, train=False, download=True, transform=transforms.Compose([transforms.ToTensor(), normalize]))
-    elif input_shape == (1, 28, 28):
-        testset = torchvision.datasets.MNIST(root=database_path, train=False, download=True, transform=transforms.Compose([transforms.ToTensor(), normalize]))
+
+def get_pgd_acc(model, X, labels, eps, data_min, data_max, batch_size):
+    start = 0
+    total = X.size(0)
+    clean_correct = 0
+    robust_correct = 0
+    model = model.to(device=arguments.Config["general"]["device"])
+    X = X.to(device=arguments.Config["general"]["device"])
+    labels = labels.to(device=arguments.Config["general"]["device"])
+    if isinstance(data_min, torch.Tensor):
+        data_min = data_min.to(device=arguments.Config["general"]["device"])
+    if isinstance(data_max, torch.Tensor):
+        data_max = data_max.to(device=arguments.Config["general"]["device"])
+    if isinstance(eps, torch.Tensor):
+        eps = eps.to(device=arguments.Config["general"]["device"])
+    if arguments.Config["attack"]["pgd_alpha"] == 'auto':
+        alpha = eps.mean() / 4 if isinstance(eps, torch.Tensor) else eps / 4
     else:
-        raise RuntimeError("Unable to determine dataset for test accuracy.")
-    testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=2)
+        alpha = float(arguments.Config["attack"]["pgd_alpha"])
+    while start < total:
+        end = min(start + batch_size, total)
+        batch_X = X[start:end]
+        batch_labels = labels[start:end]
+        if arguments.Config["specification"]["type"] == "lp":
+            # Linf norm only so far.
+            data_ub = torch.min(batch_X + eps, data_max)
+            data_lb = torch.max(batch_X - eps, data_min)
+        else:
+            # Per-example, per-element lower and upper bounds.
+            data_ub = data_max[start:end]
+            data_lb = data_min[start:end]
+        clean_output = model(batch_X)
+        best_deltas, last_deltas = attack_pgd(model, X=batch_X, y=batch_labels, epsilon=float("inf"), alpha=alpha,
+                attack_iters=arguments.Config["attack"]["pgd_steps"], num_restarts=arguments.Config["attack"]["pgd_restarts"],
+                upper_limit=data_ub, lower_limit=data_lb, multi_targeted=True, lr_decay=arguments.Config["attack"]["pgd_lr_decay"],
+                target=None, early_stop=arguments.Config["attack"]["pgd_early_stop"])
+        attack_images = torch.max(torch.min(batch_X + best_deltas, data_ub), data_lb)
+        attack_output = model(attack_images)
+        clean_labels = clean_output.argmax(1)
+        attack_labels = attack_output.argmax(1)
+        batch_clean_correct = (clean_labels == batch_labels).sum().item()
+        batch_robust_correct = (attack_labels == batch_labels).sum().item()
+        if start == 0:
+            print("Clean prediction for first a few examples:")
+            print(clean_output[:10].detach().cpu().numpy())
+            print("PGD prediction for first a few examples:")
+            print(attack_output[:10].detach().cpu().numpy())
+        print(f'batch size {end - start}, clean correct {batch_clean_correct}, robust correct {batch_robust_correct}')
+        clean_correct += batch_clean_correct
+        robust_correct += batch_robust_correct
+        start += batch_size
+        del clean_output, best_deltas, last_deltas, attack_images, attack_output
+    print(f'data size {total}, clean correct {clean_correct}, robust correct {robust_correct}')
+    return clean_correct, robust_correct
+
+
+def get_test_acc(model, input_shape=None, X=None, labels=None, is_channel_last=False, batch_size=256):
+    device = arguments.Config["general"]["device"]
+    if X is None and labels is None:
+        # Load MNIST or CIFAR, used for quickly debugging.
+        database_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'datasets')
+        mean = torch.tensor(arguments.Config["data"]["mean"])
+        std = torch.tensor(arguments.Config["data"]["std"])
+        normalize = transforms.Normalize(mean=mean, std=std)
+        if input_shape == (3, 32, 32):
+            testset = torchvision.datasets.CIFAR10(root=database_path, train=False, download=True, transform=transforms.Compose([transforms.ToTensor(), normalize]))
+        elif input_shape == (1, 28, 28):
+            testset = torchvision.datasets.MNIST(root=database_path, train=False, download=True, transform=transforms.Compose([transforms.ToTensor(), normalize]))
+        else:
+            raise RuntimeError("Unable to determine dataset for test accuracy.")
+        testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=2)
+    else:
+        testloader = [(X, labels)]
     total = 0
     correct = 0
     if device != 'cpu':
@@ -195,14 +257,17 @@ def load_model(weights_loaded=True):
     if not weights_loaded:
         return model_ori
 
-    sd = torch.load(arguments.Config["model"]["path"], map_location=torch.device('cpu'))
-    if 'state_dict' in sd:
-        sd = sd['state_dict']
-    if isinstance(sd, list):
-        sd = sd[0]
-    if not isinstance(sd, dict):
-        raise NotImplementedError("Unknown model format, please modify model loader yourself.")
-    model_ori.load_state_dict(sd)
+    if arguments.Config["model"]["path"] is not None:
+        sd = torch.load(arguments.Config["model"]["path"], map_location=torch.device('cpu'))
+        if 'state_dict' in sd:
+            sd = sd['state_dict']
+        if isinstance(sd, list):
+            sd = sd[0]
+        if not isinstance(sd, dict):
+            raise NotImplementedError("Unknown model format, please modify model loader yourself.")
+        model_ori.load_state_dict(sd)
+    else:
+        print("Warning: pretrained model path is not given!")
 
     return model_ori
 
@@ -276,7 +341,7 @@ def load_mnist_sample_data(MODEL="mnist_a_adv"):
 
 def load_dataset():
     """
-    Load regular data; Robustness region defined in results pickle 
+    Load regular datasets such as MNIST and CIFAR.
     """
     database_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'datasets')
     normalize = transforms.Normalize(mean=arguments.Config["data"]["mean"], std=arguments.Config["data"]["std"])
@@ -311,7 +376,7 @@ def load_sampled_dataset():
         data_min = torch.tensor(0.).reshape(1,-1,1,1)
         eps_temp = 0.3
         eps_temp = torch.tensor(eps_temp).reshape(1,-1,1,1)
-    return X, labels, runnerup, data_max, data_min, eps_temp
+    return X, labels, data_max, data_min, eps_temp, runnerup
 
 
 def load_sdp_dataset(eps_temp=None):
@@ -358,7 +423,7 @@ def load_sdp_dataset(eps_temp=None):
     else:
         exit("sdp dataset not supported!")
 
-    return X, y, runnerup, data_max, data_min, eps_temp
+    return X, y, data_max, data_min, eps_temp, runnerup
 
 
 def load_generic_dataset(eps_temp=None):
@@ -373,7 +438,7 @@ def load_generic_dataset(eps_temp=None):
     # Rescale epsilon.
     eps_temp = torch.reshape(eps_temp / torch.tensor(arguments.Config["data"]["std"], dtype=torch.get_default_dtype()), (1, -1, 1, 1))
 
-    return X, labels, runnerup, data_max, data_min, eps_temp
+    return X, labels, data_max, data_min, eps_temp, runnerup
 
 
 def load_eran_dataset(eps_temp=None):
@@ -482,10 +547,46 @@ def load_eran_dataset(eps_temp=None):
     else:
         raise(f'Unsupported dataset {arguments.Config["data"]["dataset"]}')
 
-    return X, labels, runnerup, data_max, data_min, eps_temp
+    return X, labels, data_max, data_min, eps_temp, runnerup
+
+
+def Customized(def_file, callable_name, *args, **kwargs):
+    """Fully customized model or dataloader."""
+    # Load model from a specified file.
+    model_func = getattr(importlib.import_module(def_file), callable_name)
+    customized_func = partial(model_func, *args, **kwargs)
+    # We need to return a Callable which returns the model.
+    return customized_func
 
 
 def load_verification_dataset(eps_before_normalization):
+    if arguments.Config["data"]["dataset"].startswith("Customized("):
+        # Returns: X, labels, runnerup, data_max, data_min, eps, target_label.
+        # X is the data matrix in (batch, ...).
+        # labels are the groud truth labels, a tensor of integers.
+        # runnerup is the runnerup label used for quickly verify against the runnerup (second largest) label, can be set to None.
+        # data_max is the per-example perturbation upper bound, shape (batch, ...) or (1, ...).
+        # data_min is the per-example perturbation lower bound, shape (batch, ...) or (1, ...).
+        # eps is the Lp norm perturbation epsilon. Can be set to None if element-wise perturbation (specified by data_max and data_min) is used.
+        # Target label is the targeted attack label; can be set to None.
+        if arguments.Config["specification"]["type"] == "lp":
+            data_config = eval(arguments.Config["data"]["dataset"])(eps=eps_before_normalization)
+        elif arguments.Config["specification"]["type"] == "bound":
+            data_config = eval(arguments.Config["data"]["dataset"])()
+        if len(data_config) == 5:
+            X, labels, data_max, data_min, eps_new = data_config 
+            runnerup, target_label = None, None
+        elif len(data_config) == 6:
+            X, labels, data_max, data_min, eps_new, runnerup = data_config
+            target_label = None
+        elif len(data_config) == 7:
+            X, labels, data_max, data_min, eps_new, runnerup, target_label = data_config 
+        else:
+            print("Data config types not correct!")
+            exit()
+        assert X.size(0) == labels.size(0), "batch size of X and labels should be the same!"
+        assert (data_max - data_min).min()>=0, "data_max should always larger or equal to data_min!"
+        return X, labels, runnerup, data_max, data_min, eps_new, target_label
     target_label = None
     # Add your customized dataset here.
     if arguments.Config["data"]["pkl_path"] is not None:
@@ -503,19 +604,28 @@ def load_verification_dataset(eps_before_normalization):
         eps_new = gt_results['Eps'].to_list()
         print('Overwrite epsilon that saved in .pkl file, they should be after normalized!')
         eps_new = [torch.reshape(torch.tensor(i, dtype=torch.get_default_dtype()), (1, -1, 1, 1)) for i in eps_new]
+        data_config = (X, labels, data_max, data_min, eps_new, runnerup, target_label)
     # Some special model loaders.
     elif "ERAN" in arguments.Config["data"]["dataset"] or "MADRY" in arguments.Config["data"]["dataset"]:
-        X, labels, runnerup, data_max, data_min, eps_new = load_eran_dataset(eps_temp=eps_before_normalization)
+        data_config = load_eran_dataset(eps_temp=eps_before_normalization)
     elif "SDP" in arguments.Config["data"]["dataset"]:
-        X, labels, runnerup, data_max, data_min, eps_new = load_sdp_dataset(eps_temp=eps_before_normalization)
+        data_config = load_sdp_dataset(eps_temp=eps_before_normalization)
     elif "SAMPLE" in arguments.Config["data"]["dataset"]:
         # Sampled datapoints (a small subset of MNIST/CIFAR), only for reproducing some paper results.
-        X, labels, runnerup, data_max, data_min, eps_new = load_sampled_dataset()
+        data_config = load_sampled_dataset()
     elif "CIFAR" in arguments.Config["data"]["dataset"] or "MNIST" in arguments.Config["data"]["dataset"]:
         # general MNIST and CIFAR dataset with mean/std defined in config file.
-        X, labels, runnerup, data_max, data_min, eps_new = load_generic_dataset(eps_temp=eps_before_normalization)
+        data_config = load_generic_dataset(eps_temp=eps_before_normalization)
     else:
         exit("Dataset not supported in this file! Please customize load_verification_dataset() function in utils.py.")
+
+    if len(data_config) == 5:
+        (X, labels, data_max, data_min, eps_new) = data_config
+        runnerup = None
+    elif len(data_config) == 6:
+        (X, labels, data_max, data_min, eps_new, runnerup) = data_config
+    elif len(data_config) == 7:
+        (X, labels, data_max, data_min, eps_new, runnerup, target_label) = data_config
 
     if arguments.Config["specification"]["norm"] != np.inf:
         assert arguments.Config["data"]["std"].count(arguments.Config["data"]["std"][0]) == len(
@@ -588,3 +698,15 @@ def convert_nn4sys_model(model_ori):
     # import pdb; pdb.set_trace()
     model_ori = (model_v1, model_v2, model_ori)   
     return model_ori
+
+
+class Normalization(nn.Module):
+    def __init__(self, mean, std, model):
+        super(Normalization, self).__init__()
+        self.mean = nn.Parameter(mean, requires_grad=False)
+        self.std = nn.Parameter(std, requires_grad=False)
+        self.model = model
+    
+    def forward(self, x):
+        return self.model((x - self.mean)/self.std)
+

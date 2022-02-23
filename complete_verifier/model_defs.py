@@ -11,10 +11,13 @@
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
+import torch
 from torch.nn import functional as F
 import torch.nn as nn
 from collections import OrderedDict
 import math
+import importlib
+from functools import partial
 
 ########################################
 # Defined the model architectures
@@ -88,6 +91,44 @@ class BasicBlock(nn.Module):
         out = F.relu(out)
         # print("residual relu:", out.shape, out[0].view(-1).shape)
         return out
+
+
+class ResNet(nn.Module):
+    def __init__(self, block, num_blocks, num_classes=10, in_planes=64):
+        super(ResNet, self).__init__()
+        self.in_planes = in_planes
+
+        self.conv1 = nn.Conv2d(3, in_planes, kernel_size=3,
+                               stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(in_planes)
+        self.layer1 = self._make_layer(block, in_planes, num_blocks[0], stride=1)
+        self.layer2 = self._make_layer(block, in_planes * 2, num_blocks[1], stride=2)
+        self.layer3 = self._make_layer(block, in_planes * 4, num_blocks[2], stride=2)
+        self.layer4 = self._make_layer(block, in_planes * 8, num_blocks[3], stride=2)
+        self.linear = nn.Linear(in_planes * 8 * block.expansion, num_classes)
+
+    def _make_layer(self, block, planes, num_blocks, stride):
+        strides = [stride] + [1]*(num_blocks-1)
+        layers = []
+        for stride in strides:
+            layers.append(block(self.in_planes, planes, stride))
+            self.in_planes = planes * block.expansion
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+        out = F.avg_pool2d(out, 4)
+        out = out.view(out.size(0), -1)
+        out = self.linear(out)
+        return out
+
+
+def ResNet18(in_planes=2):
+    return ResNet(BasicBlock, [2, 2, 2, 2], in_planes=in_planes)
 
 
 class CResNet5(nn.Module):
@@ -353,7 +394,6 @@ def model_resnet(in_ch=3, in_dim=32, width=1, mult=16, N=1):
 
 
 def mnist_fc():
-    # cifar base
     model = nn.Sequential(
         Flatten(),
         nn.Linear(784, 10),
@@ -495,6 +535,55 @@ def cifar_conv_big():
         nn.Linear(512, 10)
     )
     return model
+
+
+def cifar_marabou_small():
+    model = nn.Sequential(
+        nn.Conv2d(3, 8, 4, stride=2),
+        nn.ReLU(),
+        nn.Conv2d(8, 16, 4, stride=2,),
+        nn.ReLU(),
+        Flatten(),
+        nn.Linear(576, 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, 10)
+    )
+    return model
+
+
+def cifar_marabou_medium():
+    model = nn.Sequential(
+        nn.Conv2d(3, 16, 4, stride=2),
+        nn.ReLU(),
+        nn.Conv2d(16, 32, 4, stride=2,),
+        nn.ReLU(),
+        Flatten(),
+        nn.Linear(1152, 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, 10)
+    )
+    return model
+
+
+def cifar_marabou_large():
+    model = nn.Sequential(
+        nn.Conv2d(3, 32, 4, stride=2),
+        nn.ReLU(),
+        nn.Conv2d(32, 64, 4, stride=2,),
+        nn.ReLU(),
+        Flatten(),
+        nn.Linear(2304, 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, 10)
+    )
+    return model
+
 
 def mnist_conv_small():
     model = nn.Sequential(
@@ -1106,4 +1195,136 @@ class TradesCNN_no_maxpool(nn.Module):
         logits = self.classifier(features.view(-1, 64 * 4 * 4))
         return logits
 
+############### Models from CROWN-IBP paper (Zhang et al. 2020) ###################
 
+def crown_ibp_model_a_b(in_ch=3, in_dim=32, width=2, linear_size=256):
+    model = nn.Sequential(
+        nn.Conv2d(in_ch, 4*width, 4, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(4*width, 8*width, 4, stride=2, padding=1),
+        nn.ReLU(),
+        Flatten(),
+        nn.Linear(8*width*(in_dim // 4)*(in_dim // 4),linear_size),
+        nn.ReLU(),
+        nn.Linear(linear_size, 10)
+    )
+    return model
+
+
+def crown_ibp_model_c_d_e_f(in_ch=3, in_dim=32, kernel_size=3, width=2, linear_size=64):
+    if linear_size is None:
+        linear_size = width * 64
+    if kernel_size == 5:
+        h = (in_dim - 4) // 4
+    elif kernel_size == 3:
+        h = in_dim // 4
+    else:
+        raise ValueError("Unsupported kernel size")
+    model = nn.Sequential(
+        nn.Conv2d(in_ch, 4*width, kernel_size=kernel_size, stride=1, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(4*width, 8*width, kernel_size=kernel_size, stride=1, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(8*width, 8*width, kernel_size=4, stride=4, padding=0),
+        nn.ReLU(),
+        Flatten(),
+        nn.Linear(8*width*h*h, linear_size),
+        nn.ReLU(),
+        nn.Linear(linear_size, 10)
+    )
+    return model
+
+
+def crown_ibp_model_g_h_i_j(in_ch=3, in_dim=32, width=1, linear_size=256):
+    model = nn.Sequential(
+        nn.Conv2d(in_ch, 4*width, 3, stride=1, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(4*width, 4*width, 4, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(4*width, 8*width, 3, stride=1, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(8*width, 8*width, 4, stride=2, padding=1),
+        nn.ReLU(),
+        Flatten(),
+        nn.Linear(8*width*(in_dim // 4)*(in_dim // 4),linear_size),
+        nn.ReLU(),
+        nn.Linear(linear_size,linear_size),
+        nn.ReLU(),
+        nn.Linear(linear_size,10)
+    )
+    return model
+
+
+def crown_ibp_dm_large(in_ch, in_dim, linear_size=512):
+    model = nn.Sequential(
+        nn.Conv2d(in_ch, 64, 3, stride=1, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(64, 64, 3, stride=1, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(64, 128, 3, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(128, 128, 3, stride=1, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(128, 128, 3, stride=1, padding=1),
+        nn.ReLU(),
+        Flatten(),
+        nn.Linear((in_dim//2) * (in_dim//2) * 128, linear_size),
+        nn.ReLU(),
+        nn.Linear(linear_size,10)
+    )
+    return model
+
+
+############### Models from auto_LiRPA paper (Xu et al. 2020) ###################
+
+def crown_ibp_dm_large_bn(in_ch=3, in_dim=32, width=64, linear_size=512):
+    """The same as the DM-large model but with batch normalization layers."""
+    model = nn.Sequential(
+        nn.Conv2d(in_ch, width, 3, stride=1, padding=1),
+        nn.BatchNorm2d(width),
+        nn.ReLU(),
+        nn.Conv2d(width, width, 3, stride=1, padding=1),
+        nn.BatchNorm2d(width),
+        nn.ReLU(),
+        nn.Conv2d(width, 2 * width, 3, stride=2, padding=1),
+        nn.BatchNorm2d(2 * width),
+        nn.ReLU(),
+        nn.Conv2d(2 * width, 2 * width, 3, stride=1, padding=1),
+        nn.BatchNorm2d(2 * width),
+        nn.ReLU(),
+        nn.Conv2d(2 * width, 2 * width, 3, stride=1, padding=1),
+        nn.BatchNorm2d(2 * width),
+        nn.ReLU(),
+        Flatten(),
+        nn.Linear((in_dim//2) * (in_dim//2) * 2 * width, linear_size),
+        nn.ReLU(),
+        nn.Linear(linear_size,10)
+    )
+    return model
+
+############# Models from IBP with short warmup (Shi et al. 2021) ####################
+
+def crown_ibp_dm_large_bn_full(in_ch=3, in_dim=32, width=64, linear_size=512, num_class=10):
+    model = nn.Sequential(
+        nn.Conv2d(in_ch, width, 3, stride=1, padding=1),
+        nn.BatchNorm2d(width),
+        nn.ReLU(),
+        nn.Conv2d(width, width, 3, stride=1, padding=1),
+        nn.BatchNorm2d(width),
+        nn.ReLU(),
+        nn.Conv2d(width, 2 * width, 3, stride=2, padding=1),
+        nn.BatchNorm2d(2 * width),
+        nn.ReLU(),
+        nn.Conv2d(2 * width, 2 * width, 3, stride=1, padding=1),
+        nn.BatchNorm2d(2 * width),
+        nn.ReLU(),
+        nn.Conv2d(2 * width, 2 * width, 3, stride=1, padding=1),
+        nn.BatchNorm2d(2 * width),
+        nn.ReLU(),
+        Flatten(),
+        nn.Linear((in_dim//2) * (in_dim//2) * 2 * width, linear_size),
+        nn.BatchNorm1d(linear_size),
+        nn.ReLU(),
+        nn.Linear(linear_size,num_class)
+    )
+    return model

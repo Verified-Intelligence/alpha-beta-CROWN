@@ -304,47 +304,35 @@ def mip_solver_lb(candidate):
     """ Solving MIP for adversarial attack/complete verification. """
     model = multiprocess_mip_model.copy()
     v = model.getVarByName(candidate)
-    out_lb = v.LB
-    global stop_multiprocess
+    vlb = out_lb = v.LB
+    vub = out_ub = v.UB
+    global stop_multiprocess, mip_solve_time_start
     if stop_multiprocess:
-        return out_lb, -1  # Solver skipped.
+        return out_lb, out_ub, -1  # Solver skipped.
     refine_time = time.time()
     model.setParam('BestBdStop', 1e-5)  # Terminiate as long as we find a positive lower bound.
     model.setParam('BestObjStop', -1e-5)  # Terminiate as long as we find a adversarial example.
     model.setObjective(v, grb.GRB.MINIMIZE)
     try:
         model.optimize()
-    except grb.GurobiError as e: 
+    except grb.GurobiError as e:
         handle_gurobi_error(e.message)
-    if model.status == 9:
-        # Timed out. Get current bound.
-        vlb = max(model.objbound, out_lb)
-        # The caller must check for model.status to detect timeout; a negative return may also indicate an adversarial example.
-        assert vlb <= 1e-5
-    elif model.status == 2:
-        vlb = model.objval
-    elif model.status == 15:
-        assert model.objval >= model.objbound
-        if model.objval < 0:
-            # Upper bound < 0, adversarial example is found.
-            vlb = model.objval
-        elif model.objbound > 0:
-            # lower bound > 0, verified successfully.
-            vlb = model.objbound
-        else:
-            raise ValueError("Bug detected, lower bound <=0 and upper bound >=0.")
-    else:
-        vlb = out_lb
-    if vlb < 0 and model.status != 9:
+
+    vlb = max(model.objbound, out_lb)
+    if model.solcount > 0:
+        vub = min(model.objval, out_ub)
+    if vub < 0:
         # An adversarial example is found
         # print("stop: adv found!")
         stop_multiprocess = True
 
     assert model.status != 3, "should not be infeasible"
-    print("solving MIP for {}, status:{}, [{}]=>[{}], time: {}s".format(v.VarName, model.status,
-                    out_lb, vlb, time.time()-refine_time))
+    print("solving MIP for {}, status:{}, [{}, {}]=>[{}, {}], time: {}s".format(v.VarName, model.status,
+                    out_lb, out_ub, vlb, vub, time.time()-refine_time))
     sys.stdout.flush()
-    return vlb, model.status
+    if time.time() - mip_solve_time_start > arguments.Config["bab"]["timeout"]:
+        stop_multiprocess = True
+    return vlb, vub, model.status
 
 
 def lp_solver(candidate):
@@ -421,7 +409,6 @@ def build_solver_model(m, lower_bounds, upper_bounds, timeout, mip_multi_proc=No
         m.pool.kill()
         m.pool = None
         m.pool_termination_flag = None
-    # FIXME (10/03): Optimize slow LP construction similar to here.
     new_relu_mask = []
     input_domain = input_domain if input_domain is not None else m.input_domain
     input_domain = input_domain.cpu().numpy()
@@ -989,7 +976,8 @@ def build_the_model_lp(m, lower_bounds, upper_bounds, using_integer=True, simpli
     return glb
 
 
-def build_the_model_mip(m, lower_bounds, upper_bounds, simplified=False):
+@torch.no_grad()
+def build_the_model_mip(m, lower_bounds, upper_bounds, simplified=False, labels_to_verify=None):
     """
     Using the built gurobi model to solve mip formulation in parallel
     lower_bounds, upper_bounds: intermediate relu bounds from beta-crown
@@ -1019,7 +1007,7 @@ def build_the_model_mip(m, lower_bounds, upper_bounds, simplified=False):
         # m.model.write("save.mip")
         try:
             m.model.optimize()
-        except grb.GurobiError as e: 
+        except grb.GurobiError as e:
             handle_gurobi_error(e.message)
         # for c in m.model.getConstrs():
         #     print('The dual value of %s : %g %g'%(c.constrName,c.pi, c.slack))
@@ -1058,12 +1046,19 @@ def build_the_model_mip(m, lower_bounds, upper_bounds, simplified=False):
         m.model.update()
         print('finished building Gurobi MIP model, calling optimize function')
         lb = lower_bounds[-1][0]
+        ub = upper_bounds[-1][0]
         print('lower bounds for all target labels:', lb)
         candidates, candidate_neuron_ids = [], []
-        for pidx, lbi in enumerate(lb):
-            if lbi >= 0: continue
-            candidates.append(m.gurobi_vars[-1][pidx].VarName)
-            candidate_neuron_ids.append(pidx)
+        if labels_to_verify is not None: # sort the labels
+            for pidx in labels_to_verify:
+                if lb[pidx] >= 0: continue # skip the label with intial bound >= 0
+                candidates.append(m.gurobi_vars[-1][pidx].VarName)
+                candidate_neuron_ids.append(pidx)
+        else:
+            for pidx, lbi in enumerate(lb):
+                if lbi >= 0: continue
+                candidates.append(m.gurobi_vars[-1][pidx].VarName)
+                candidate_neuron_ids.append(pidx)
             # SINGLE THREAD
             # mip_time = time.time()
             # m.model.setObjective(m.gurobi_vars[-1][pidx], grb.GRB.MINIMIZE)
@@ -1076,24 +1071,25 @@ def build_the_model_mip(m, lower_bounds, upper_bounds, simplified=False):
             # if glb<0: break
 
         # Solve the worst label first.
-        candidates, candidate_neuron_ids = zip(*sorted(zip(candidates, candidate_neuron_ids), key=lambda x: lb[x[1]]))
+        # candidates, candidate_neuron_ids = zip(*sorted(zip(candidates, candidate_neuron_ids), key=lambda x: lb[x[1]]))
         print('Starting MIP solver for these labels:', candidate_neuron_ids)
 
         # MULTITHREAD
         global multiprocess_mip_model, stop_multiprocess
         multiprocess_mip_model = m.model
+        global mip_solve_time_start
+        mip_solve_time_start = time.time()
         with multiprocessing.Pool(mip_multi_proc) as pool:
-            solver_result = pool.map(mip_solver_lb, candidates)
-        
+            solver_result = pool.map(mip_solver_lb, candidates, chunksize=1)
         multiprocess_mip_model = None
         stop_multiprocess = False
 
         status = [-1 for i in lb]
-        for (vlb, s), pidx in zip(solver_result, candidate_neuron_ids):
+        for (vlb, vub, s), pidx in zip(solver_result, candidate_neuron_ids):
             lb[pidx] = vlb
-            status[pidx]  = s
-        return lb, status
-
+            ub[pidx] = vub
+            status[pidx] = s
+        return lb, ub, status
 
 def check_optimization_success(model, introduced_constrs_all=None):
     """

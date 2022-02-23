@@ -52,7 +52,7 @@ class ConfigHandler:
         # Global Configurations, not specific for a particular algorithm.
 
         # The "--config" option does not exist in our parameter dictionar.
-        self.add_argument('--config', type=str, help='path to YAML format config file.', hierarchy=None)
+        self.add_argument('--config', type=str, help='Path to YAML format config file.', hierarchy=None)
 
         h = ["general"]
         self.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"], help='Select device to run verifier, cpu or cuda (GPU).', hierarchy=h + ["device"])
@@ -71,12 +71,13 @@ class ConfigHandler:
         h = ["data"]
         self.add_argument("--start", type=int, default=0, help='Start from the i-th property in specified dataset.', hierarchy=h + ["start"])
         self.add_argument("--end", type=int, default=10000, help='End with the (i-1)-th property in the dataset.', hierarchy=h + ["end"])
-        self.add_argument('--num_classes', type=int, default=10, help="Number of classes for classification problem.", hierarchy=h + ["num_classes"])
-        self.add_argument("--mean", nargs='+', type=float, default=[0.0, 0.0, 0.0], help='Mean vector used in data preprocessing.', hierarchy=h + ["mean"])
-        self.add_argument("--std", nargs='+', type=float, default=[1.0, 1.0, 1.0], help='Std vector used in data preprocessing.', hierarchy=h + ["std"])
+        self.add_argument('--num_outputs', type=int, default=10, help="Number of classes for classification problem.", hierarchy=h + ["num_outputs"])
+        self.add_argument("--mean", nargs='+', type=float, default=0.0, help='Mean vector used in data preprocessing.', hierarchy=h + ["mean"])
+        self.add_argument("--std", nargs='+', type=float, default=1.0, help='Std vector used in data preprocessing.', hierarchy=h + ["std"])
         self.add_argument('--pkl_path', type=str, default=None, help="Load properties to verify from a .pkl file (only used for oval20 dataset).", hierarchy=h + ["pkl_path"])
 
         h = ["specification"]
+        self.add_argument("--spec_type", type=str, default='lp', choices=['lp', 'bound'], help='Type of verification specification. "lp" = L_p norm, "bounds" = element-wise lower and upper bound provided by dataloader.', hierarchy=h + ["type"])
         self.add_argument("--norm", type=float, default='inf', help='Lp-norm for epsilon perturbation in robustness verification (1, 2, inf).', hierarchy=h + ["norm"])
         self.add_argument("--epsilon", type=float, default=None, help='Set perturbation size (Lp norm). If not set, a default value may be used based on dataset loader.', hierarchy=h + ["epsilon"])
 
@@ -84,7 +85,7 @@ class ConfigHandler:
         self.add_argument("--lr_init_alpha", type=float, default=0.1, help='Learning rate for the optimizable parameter alpha in alpha-CROWN bound.', hierarchy=h + ["lr_alpha"])
         self.add_argument('--init_iteration', type=int, default=100, help='Number of iterations for alpha-CROWN incomplete verifier.', hierarchy=h + ["iteration"])
         self.add_argument("--share_slopes", action='store_true', help='Share some alpha variables to save memory at the cost of slightly looser bounds.', hierarchy=h + ["share_slopes"])
-        self.add_argument("--no_joint_opt", action='store_true', help='alpha-CROWN bounds without joint optimization (only optimize alpha for the last layer bound).', hierarchy=h + ["no_joint_opt"])
+        self.add_argument("--no_joint_opt", action='store_true', help='Run alpha-CROWN bounds without joint optimization (only optimize alpha for the last layer bound).', hierarchy=h + ["no_joint_opt"])
 
         h = ["solver", "beta-crown"]
         self.add_argument("--batch_size", type=int, default=64, help='Batch size in beta-CROWN (number of parallel splits).', hierarchy=h + ["batch_size"])
@@ -96,7 +97,6 @@ class ConfigHandler:
         self.add_argument('--no_beta', action='store_false', dest='beta', help='Disable/Enable beta split constraint (this option is for ablation study only and should not be used normally).', hierarchy=h + ["beta"])
         self.add_argument('--no_beta_warmup', action='store_false', dest='beta_warmup', help='Do not use beta warmup from branching history (this option is for ablation study only and should not be used normally).', hierarchy=h + ["beta_warmup"])
 
-
         h = ["solver", "mip"]
         self.add_argument('--mip_multi_proc', type=int, default=None,
                 help='Number of multi-processes for mip solver. Each process computes a mip bound for an intermediate neuron. Default (None) is to auto detect the number of CPU cores (note that each process may use multiple threads, see the next option).', hierarchy=h + ["parallel_solvers"])
@@ -104,6 +104,7 @@ class ConfigHandler:
                 help='Number of threads for echo mip solver process (default is to use 1 thread for each solver process).', hierarchy=h + ["solver_threads"])
         self.add_argument('--mip_perneuron_refine_timeout', type=float, default=15, help='MIP timeout threshold for improving each intermediate layer bound (in seconds).', hierarchy=h + ["refine_neuron_timeout"])
         self.add_argument('--mip_refine_timeout', type=float, default=0.8, help='Percentage (x100%) of time used for improving all intermediate layer bounds using mip. Default to be 0.8*timeout.', hierarchy=h + ["refine_neuron_time_percentage"])
+        self.add_argument('--no_mip_early_stop', action='store_false', dest='mip_early_stop', help='Not early stop when finding a positive lower bound or a adversarial example during MIP.', hierarchy=h + ["early_stop"], private=True)
 
         h = ["bab"]
         self.add_argument("--max_domains", type=int, default=200000, help='Max number of subproblems in branch and bound.', hierarchy=h + ["max_domains"])
@@ -117,7 +118,6 @@ class ConfigHandler:
         self.add_argument("--branching_candidates", type=int, default=3, help='Number of candidates to consider when using fsb or kfsb. More leads to slower but better branching.', hierarchy=h + ["candidates"])
         self.add_argument("--branching_reduceop", choices=["min", "max", "mean", "auto"], default="min", help='Reduction operation to compute branching scores from two sides of a branch (min or max). max can work better on some models.', hierarchy=h + ["reduceop"])
 
-
         h = ["attack"]
         self.add_argument('--pgd_order', choices=["before", "after", "skip"], default="before",  help='Run PGD before/after incomplete verification, or skip it.', hierarchy=h + ["pgd_order"])
 
@@ -128,6 +128,12 @@ class ConfigHandler:
         hierarchy = kwargs.pop('hierarchy')
         help = kwargs.get('help', '')
         private_option = kwargs.pop('private', False)
+        # Make sure valid help is given
+        if not private_option:
+            if len(help.strip()) < 10:
+                raise ValueError(f'Help message must not be empty, and must be detailed enough. "{help}" is not good enough.')
+            elif (not help[0].isupper()) or help[-1] != '.':
+                raise ValueError(f'Help message must start with an upper case letter and end with a dot (.); your message "{help}" is invalid.')
         self.defaults_parser.add_argument(*args, **kwargs)
         # Build another parser without any defaults.
         if 'default' in kwargs:
@@ -179,31 +185,35 @@ class ConfigHandler:
             # Reached the leaf level. Set the corresponding key.
             self.set_dict_by_hierarchy(old_args_dict, levels, new_args_dict, nonexist_ok=False)
 
-    def generate_template(self, args_dict, level=[]):
-        """Generate a template config file with help information."""
+    def dump_config(self, args_dict, level=[], out_to_doc=False, show_help=False):
+        """Generate a config file based on aargs_dict with help information."""
         ret_string = ''
         for key, val in args_dict.items():
             if isinstance(val, dict):
-                ret = self.generate_template(val, level + [key])
+                ret = self.dump_config(val, level + [key], out_to_doc, show_help)
                 if len(ret) > 0:
                     # Next level is not empty, print it.
                     ret_string += ' ' * (len(level) * 2) + f'{key}:\n' + ret
             else:
-                h = self.help_messages[','.join(level + [key])]
-                if 'debug' in key or 'not use' in h or 'not be use' in h or 'debug' in h or len(h) == 0:
-                    # Skip some debugging options.
-                    continue
-                h = f'  # {h}'
+                if show_help:
+                    h = self.help_messages[','.join(level + [key])]
+                    if 'debug' in key or 'not use' in h or 'not be use' in h or 'debug' in h or len(h) == 0:
+                        # Skip some debugging options.
+                        continue
+                    h = f'  # {h}'
+                else:
+                    h = ''
                 yaml_line = yaml.safe_dump({key: val}, default_flow_style=None).strip().replace('{', '').replace('}', '')
                 ret_string += ' ' * (len(level) * 2) + f'{yaml_line}{h}\n'
         if len(level) > 0:
             return ret_string
         else:
             # Top level, output to file.
-            output_name = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs',
-                    os.path.splitext(os.path.basename(sys.argv[0]))[0] + '_all_params.yaml')
-            with open(output_name, 'w') as f:
-                f.write(ret_string)
+            if out_to_doc:
+                output_name = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'docs',
+                        os.path.splitext(os.path.basename(sys.argv[0]))[0] + '_all_params.yaml')
+                with open(output_name, 'w') as f:
+                    f.write(ret_string)
             return ret_string
 
     def parse_config(self):
@@ -217,7 +227,7 @@ class ConfigHandler:
         # Create the dictionary of all parameters, all set to their default values.
         self.construct_config_dict(default_args)
         # Update documents.
-        # self.generate_template(self.all_args)
+        # self.dump_config(self.all_args, out_to_doc=True, show_help=True)
         # These are arguments specified in command line.
         specified_args = vars(self.no_defaults_parser.parse_args())
         # Read the yaml config files.
@@ -230,6 +240,9 @@ class ConfigHandler:
         self.construct_config_dict(specified_args, nonexist_ok=False)
         # For compatibility, we still return all the arguments from argparser.
         parsed_args = self.defaults_parser.parse_args()
+        # Print all configuration.
+        print('Configurations:\n')
+        print(self.dump_config(self.all_args))
         return parsed_args
 
     def keys(self):

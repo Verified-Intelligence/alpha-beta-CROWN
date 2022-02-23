@@ -15,16 +15,17 @@ general:
   root_path: null  # Root path of VNN-COMP benchmarks (VNN-COMP specific).
 model:
   path: null  # Load pretrained model from this specified path.
-  name: mnist_9_200  # model name
+  name: mnist_9_200  # Model name.
 data:
   start: 0  # Start from the i-th property in specified dataset.
   end: 10000  # End with the (i-1)-th property in the dataset.
-  num_classes: 10  # Number of classes for classification problem.
-  mean: [0.0, 0.0, 0.0]  # Mean vector used in data preprocessing.
-  std: [1.0, 1.0, 1.0]  # Std vector used in data preprocessing.
+  num_outputs: 10  # Number of classes for classification problem.
+  mean: 0.0  # Mean vector used in data preprocessing.
+  std: 1.0  # Std vector used in data preprocessing.
   pkl_path: null  # Load properties to verify from a .pkl file (only used for oval20 dataset).
   dataset: CIFAR  # Dataset name. Dataset must be defined in utils.py.
 specification:
+  type: lp  # Type of verification specification. "lp" = L_p norm, "bounds" = element-wise lower and upper bound provided by dataloader.
   norm: .inf  # Lp-norm for epsilon perturbation in robustness verification (1, 2, inf).
   epsilon: null  # Set perturbation size (Lp norm). If not set, a default value may be used based on dataset loader.
 solver:
@@ -32,7 +33,7 @@ solver:
     lr_alpha: 0.1  # Learning rate for the optimizable parameter alpha in alpha-CROWN bound.
     iteration: 100  # Number of iterations for alpha-CROWN incomplete verifier.
     share_slopes: false  # Share some alpha variables to save memory at the cost of slightly looser bounds.
-    no_joint_opt: false  # alpha-CROWN bounds without joint optimization (only optimize alpha for the last layer bound).
+    no_joint_opt: false  # Run alpha-CROWN bounds without joint optimization (only optimize alpha for the last layer bound).
   beta-crown:
     batch_size: 64  # Batch size in beta-CROWN (number of parallel splits).
     lr_alpha: 0.01  # Learning rate for optimizing alpha during branch and bound.

@@ -1,0 +1,25 @@
+# Example for using customized model and data loader.
+# Model and data loader defined in custom_model_data.py
+# python robustness_verifier.py --config exp_configs/custom_model_data_example.yaml
+general:
+  mode: verified-acc
+model:
+  # Use the simple_conv_model() model in "custom_model_data.py".
+  name: Customized("custom_model_data", "simple_conv_model", in_channel=3, out_dim=10)
+  path: models/eran/cifar_conv_small_pgd.pth
+data:
+  # Use the cifar10() loader in "custom_model_data.py".
+  dataset: Customized("custom_model_data", "simple_cifar10")
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2023, 0.1994, 0.201]
+specification:
+  epsilon: 0.00784313725  # 2./255.
+attack:
+  pgd_restarts: 100
+solver:
+  beta-crown:
+    batch_size: 2048
+    iteration: 20
+bab:
+  max_domains: 5000000
+  timeout: 300

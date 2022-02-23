@@ -28,7 +28,7 @@ def clamp(X, lower_limit=None, upper_limit=None):
     return torch.max(torch.min(X, upper_limit), lower_limit)
 
 
-def OSI_init(model, X, y, eps, num_classes, iter_steps=50, lower_limit=0.0, upper_limit=1.0, extra_dim=None):
+def OSI_init(model, X, y, eps, alpha, num_classes, iter_steps=50, lower_limit=0.0, upper_limit=1.0, extra_dim=None):
     input_shape = X.size()
     if extra_dim is not None:
         X = X.unsqueeze(1).unsqueeze(1).expand(-1, *extra_dim, *(-1,) * (X.ndim - 1))
@@ -36,26 +36,35 @@ def OSI_init(model, X, y, eps, num_classes, iter_steps=50, lower_limit=0.0, uppe
 
     X_init = X.clone().detach()
 
-    sample_lower_limit = torch.clamp(lower_limit - X, min=-eps)
-    sample_upper_limit = torch.clamp(upper_limit - X, max= eps)
+    # sample_lower_limit = torch.clamp(lower_limit - X, min=-eps)
+    # sample_upper_limit = torch.clamp(upper_limit - X, max= eps)
         
-    delta = (torch.empty_like(X).uniform_() * (sample_upper_limit - sample_lower_limit) + sample_lower_limit)
+    delta = (torch.empty_like(X).uniform_() * (upper_limit - lower_limit) + lower_limit)
     X_init = X_init + delta
 
     X = X.reshape(-1, *input_shape[1:])
     X_init = X_init.reshape(-1, *input_shape[1:])
-    w_d = torch.rand([X.shape[0], num_classes], device=X.device)
+    # Random vector from [-1, 1].
+    w_d = (torch.rand([X.shape[0], num_classes], device=X.device) - 0.5) * 2
+
+    if eps != float('inf'):
+        lower_limit = torch.clamp(X-eps, min=lower_limit)
+        upper_limit = torch.clamp(X+eps, max=upper_limit)
 
     for i in range(iter_steps):
         X_init = X_init.detach().requires_grad_()
         output = model(X_init)
         dot = (w_d * output).sum()
         grad = torch.autograd.grad(dot, X_init)[0]
-        v_ods = grad/grad.norm(dim=(-1,-2), keepdim=True)
 
-        X_init = X_init + 0.05 * torch.sign(v_ods)
-        X_init = torch.max(torch.min(X_init, X+eps), X-eps)
-        X_init = torch.clamp(X_init, max=1.0, min=0.0)
+        X_init = X_init + alpha * torch.sign(grad)
+        X_init = torch.max(torch.min(X_init, upper_limit), lower_limit)
+
+    assert (X_init <= upper_limit).all()
+    assert (X_init >= lower_limit).all()
+
+    assert (X_init <= X+eps).all()
+    assert (X_init >= X-eps).all()
 
     return X_init.view(expand_shape)
 
@@ -70,7 +79,7 @@ def attack_pgd(model, X, y, epsilon, alpha, attack_iters, num_restarts,
             extra_dim = (num_restarts, num_classes - 1,)
         else:
             extra_dim = (num_restarts)
-        X_init = OSI_init(model, X, y, epsilon, num_classes, extra_dim=extra_dim)
+        X_init = OSI_init(model, X, y, epsilon, alpha, num_classes, iter_steps=attack_iters, extra_dim=extra_dim, upper_limit=upper_limit, lower_limit=lower_limit)
 
     best_loss = torch.empty(X.size(0), device=X.device).fill_(float("-inf"))
     best_delta = torch.zeros_like(X, device=X.device)
@@ -91,7 +100,13 @@ def attack_pgd(model, X, y, epsilon, alpha, attack_iters, num_restarts,
         # c has shape (batch, restarts, num_classes - 1, num_classes).
         c = c.unsqueeze(1).expand(-1, num_restarts, -1, -1)
         target_y = y.view(-1,*(1,) * len(extra_dim),1).expand(-1, *extra_dim, 1)
+        # Restart is processed in a batch and no need to do individual restarts.
         num_restarts = 1
+        # If element-wise lower and upper limits are given, we should reshape them to the same as X.
+        if lower_limit.ndim == len(input_shape):
+            lower_limit = lower_limit.unsqueeze(1).unsqueeze(1)
+        if upper_limit.ndim == len(input_shape):
+            upper_limit = upper_limit.unsqueeze(1).unsqueeze(1)
     else:
         if target is not None:
             # An attack target for targeted attack, in dimension (batch, ).
@@ -102,6 +117,11 @@ def attack_pgd(model, X, y, epsilon, alpha, attack_iters, num_restarts,
             # Only run 1 restart, since we run all restarts together.
             extra_dim = (num_restarts, )
             num_restarts = 1
+            # If element-wise lower and upper limits are given, we should reshape them to the same as X.
+            if lower_limit.ndim == len(input_shape):
+                lower_limit = lower_limit.unsqueeze(1)
+            if upper_limit.ndim == len(input_shape):
+                upper_limit = upper_limit.unsqueeze(1)
 
     # This is the maximal/minimal delta values for each sample, each element.
     sample_lower_limit = torch.clamp(lower_limit - X, min=-epsilon)
@@ -378,6 +398,7 @@ class AdamClipping(Optimizer):
 
 def pgd_attack(dataset, model, x, max_eps, data_min, data_max, vnnlib=None, y=None,
                target=None, only_target_attack=False, initialization="uniform"):
+    # FIXME (01/11/2022): any parameter that can be read from config should not be passed in.
     r"""Interface to PGD attack.
 
     Args:
@@ -402,16 +423,19 @@ def pgd_attack(dataset, model, x, max_eps, data_min, data_max, vnnlib=None, y=No
         attack_images (torch.tensor): last adversarial examples so far, may not be a real adversarial example if attack failed
     """
     assert arguments.Config["specification"]["norm"] == np.inf, print('We only support Linf-norm attack.')
-    if dataset in ["MNIST", "CIFAR"]:
+    if dataset in ["MNIST", "CIFAR", "UNKNOWN"]:  # FIXME (01/11/2022): Make the attack function generic, not for the two datasets only!
+        # FIXME (01/11/2022): Generic specification PGD.
         if y is not None and target is None:
             # Use y as the groundtruth label.
             pidx_list = ["all"]
-            if data_max is None:
-                data_max = x + max_eps
-                data_min = x - max_eps
-            else:
-                data_max = torch.min(x + max_eps, data_max)
-                data_min = torch.max(x - max_eps, data_min)
+            if arguments.Config["specification"]["type"] == "lp":
+                if data_max is None:
+                    data_max = x + max_eps
+                    data_min = x - max_eps
+                else:
+                    data_max = torch.min(x + max_eps, data_max)
+                    data_min = torch.max(x - max_eps, data_min)
+            # If arguments.Config["specification"]["type"] == "bound", then we keep data_min and data_max.
         else:
             pidx_list = []
             if vnnlib is not None:

@@ -36,7 +36,6 @@ from auto_LiRPA.utils import reduction_min, stop_criterion_min
 from read_vnnlib import read_vnnlib_simple
 from nn4sys_verification import nn4sys_verification
 
-
 def config_args():
     # Add arguments specific for this front-end.
     h = ["general"]
@@ -55,7 +54,7 @@ def config_args():
     arguments.Config.add_argument("--root_path", type=str, default=None, help='Root path of VNN-COMP benchmarks (VNN-COMP specific).', hierarchy=h + ["root_path"])
 
     h = ["model"]
-    arguments.Config.add_argument("--model", type=str, default="mnist_9_200", help='model name', hierarchy=h + ["name"])
+    arguments.Config.add_argument("--model", type=str, default="mnist_9_200", help='Model name.', hierarchy=h + ["name"])
 
     h = ["data"]
     arguments.Config.add_argument("--dataset", type=str, default="CIFAR", choices=["MNIST", "CIFAR", "CIFAR_SDP_FULL", "CIFAR_RESNET", "CIFAR_SAMPLE", "MNIST_SAMPLE", "CIFAR_ERAN", "MNIST_ERAN",
@@ -123,16 +122,21 @@ def reshape_bounds(lower_bounds, upper_bounds, y, global_lb=None):
     return lower_bounds, upper_bounds, global_lb
 
 
-def incomplete_verifier(model_ori, data, norm, y, data_ub=None, data_lb=None, eps=0.0):
+def incomplete_verifier(model_ori, data, y, data_ub=None, data_lb=None, eps=0.0):
+    norm = arguments.Config["specification"]["norm"]
     # LiRPA wrapper
+    num_outputs = arguments.Config["data"]["num_outputs"]
     if y is not None:
-        num_class = arguments.Config["data"]["num_classes"]
         labels = torch.tensor([y]).long()
-        # Building a spec for all target labels.
-        c = torch.eye(num_class).type_as(data)[labels].unsqueeze(1) - torch.eye(num_class).type_as(data).unsqueeze(0)
-        I = (~(labels.data.unsqueeze(1) == torch.arange(num_class).type_as(labels.data).unsqueeze(0)))
-        # Remove spec to self.
-        c = (c[I].view(data.size(0), num_class - 1, num_class))
+        if num_outputs == 1:
+            # Binary classifier, only 1 output. Assume negative label means label 0, postive label means label 1.
+            c = (float(y) - 0.5) * 2 * torch.ones(size=(data.size(0), 1, 1))
+        else:
+            # Building a spec for all target labels.
+            c = torch.eye(num_outputs).type_as(data)[labels].unsqueeze(1) - torch.eye(num_outputs).type_as(data).unsqueeze(0)
+            I = (~(labels.data.unsqueeze(1) == torch.arange(num_outputs).type_as(labels.data).unsqueeze(0)))
+            # Remove spec to self.
+            c = (c[I].view(data.size(0), num_outputs - 1, num_outputs))
     else:
         c = None
     model = LiRPAConvNet(model_ori, y, None, device=arguments.Config["general"]["device"],
@@ -145,21 +149,12 @@ def incomplete_verifier(model_ori, data, norm, y, data_ub=None, data_lb=None, ep
     ptb = PerturbationLpNorm(norm=norm, eps=eps, x_L=data_lb, x_U=data_ub)
     x = BoundedTensor(data, ptb).to(data_lb.device)
     domain = torch.stack([data_lb.squeeze(0), data_ub.squeeze(0)], dim=-1)
-    # global_ub, global_lb, _, _, _, updated_mask, lA, lower_bounds, upper_bounds, pre_relu_indices, slope, history
-    _, global_lb, _, _, _, mask, lA, lower_bounds, upper_bounds, pre_relu_indices, slope, _ = model.build_the_model(
+    _, global_lb, _, _, _, mask, lA, lower_bounds, upper_bounds, pre_relu_indices, slope, history = model.build_the_model(
             domain, x, stop_criterion_func=stop_criterion_min(arguments.Config["bab"]["decision_thresh"]))
 
     if global_lb.min() >= arguments.Config["bab"]["decision_thresh"]:
         print("verified with init bound!")
         return "safe-incomplete", None, None, None
-
-    if y is not None:
-        # For the last layer, since we missed one label, we add them back here.
-        assert lower_bounds[-1].size(0) == 1  # this function only handles batchsize = 1.
-        lower_bounds, upper_bounds, global_lb = reshape_bounds(lower_bounds, upper_bounds, y, global_lb)
-        saved_bounds = (model, lower_bounds, upper_bounds, mask, pre_relu_indices, lA)
-    else:
-        saved_bounds = (model, lower_bounds, upper_bounds, mask, pre_relu_indices, lA)
 
     # Save the alpha variables during optimization. Here the batch size is 1.
     saved_slopes = defaultdict(dict)
@@ -168,29 +163,44 @@ def incomplete_verifier(model_ori, data, norm, y, data_ub=None, data_lb=None, ep
             # each slope size is (2, spec, 1, *shape); batch size is 1.
             saved_slopes[m.name][spec_name] = alpha.detach().clone()
 
+    if y is not None and num_outputs > 1:
+        # For the last layer, since we missed one label, we add them back here.
+        assert lower_bounds[-1].size(0) == 1  # this function only handles batchsize = 1.
+        lower_bounds, upper_bounds, global_lb = reshape_bounds(lower_bounds, upper_bounds, y, global_lb)
+        saved_bounds = (model, lower_bounds, upper_bounds, mask, pre_relu_indices, lA)
+    else:
+        saved_bounds = (model, lower_bounds, upper_bounds, mask, pre_relu_indices, lA)
+
     return "unknown", global_lb, saved_bounds, saved_slopes
 
 
-def mip(saved_bounds, y):
+def mip(saved_bounds, y, labels_to_verify=None):
 
     lirpa_model, lower_bounds, upper_bounds, mask, pre_relu_indices, lA = saved_bounds
 
     if arguments.Config["general"]["complete_verifier"] == "mip":
-        mip_global_lb, mip_status = lirpa_model.build_the_model_mip(lower_bounds, upper_bounds)
+        mip_global_lb, mip_global_ub, mip_status = lirpa_model.build_the_model_mip(lower_bounds, upper_bounds, labels_to_verify=labels_to_verify)
 
         if mip_global_lb.ndim == 1:
             mip_global_lb = mip_global_lb.unsqueeze(0)  # Missing batch dimension.
-        print(f'MIP solved global bound={mip_global_lb}')
+        if mip_global_ub.ndim == 1:
+            mip_global_ub = mip_global_ub.unsqueeze(0)  # Missing batch dimension.
+        print(f'MIP solved lower bound: {mip_global_lb}')
+        print(f'MIP solved upper bound: {mip_global_ub}')
         
         verified_status = "safe-mip"
+        # Batch size is always 1.
         for pidx in range(len(mip_status)):
             if mip_global_lb[0, pidx] >=0:
+                # Lower bound > 0, verified.
                 continue
-            
-            if mip_status[pidx] in [2, 15]:
+            # Lower bound < 0, now check upper bound.
+            if mip_global_ub[0, pidx] <=0:
+                # Must be 2 cases: solved with adv example, or early terminate with adv example.
+                assert mip_status[pidx] in [2, 15]
                 print("verified unsafe-mip with init mip!")
                 return "unsafe-mip", mip_global_lb, None, None
-            
+            # Lower bound < 0 and upper bound > 0, must be a timeout.
             assert mip_status[pidx] == 9 or mip_status[pidx] == -1, "should only be timeout for label pidx"
             verified_status = "unknown-mip"
         
@@ -201,9 +211,12 @@ def mip(saved_bounds, y):
         print("Start solving intermediate bounds with MIP...")
         score = FSB_score(lirpa_model.net, lower_bounds, upper_bounds, mask, pre_relu_indices, lA)
 
-        refined_lower_bounds, refined_upper_bounds = lirpa_model.build_the_model_mip_refine(lower_bounds, upper_bounds, 
+        refined_lower_bounds, refined_upper_bounds = lirpa_model.build_the_model_mip_refine(lower_bounds, upper_bounds,
                             score=score, stop_criterion_func=stop_criterion_min(1e-4))
-        lower_bounds, upper_bounds, global_lb = reshape_bounds(refined_lower_bounds, refined_upper_bounds, y)
+        if arguments.Config["data"]["num_outputs"] > 1:
+            lower_bounds, upper_bounds, _ = reshape_bounds(refined_lower_bounds, refined_upper_bounds, y)
+        else:
+            lower_bounds, upper_bounds, = refined_lower_bounds, refined_upper_bounds
         refined_global_lb = lower_bounds[-1]
         print("refined global lb:", refined_global_lb, "min:", refined_global_lb.min())
         if refined_global_lb.min()>=0:
@@ -215,30 +228,42 @@ def mip(saved_bounds, y):
         return "unknown", -float("inf"), lower_bounds, upper_bounds
 
 
-def bab(unwrapped_model, data, target, norm, y, eps=None, data_ub=None, data_lb=None, lower_bounds=None, upper_bounds=None, reference_slopes=None, attack_images=None):
-
-    if norm == np.inf:
-        if data_ub is None:
-            data_ub = data + eps
-            data_lb = data - eps
-        elif eps is not None:
-            data_ub = torch.min(data + eps, data_ub)
-            data_lb = torch.max(data - eps, data_lb)
+def bab(unwrapped_model, data, target, y, eps=None, data_ub=None, data_lb=None, lower_bounds=None, upper_bounds=None, reference_slopes=None, attack_images=None):
+    norm = arguments.Config["specification"]["norm"]
+    if arguments.Config["specification"]["type"] == 'lp':
+        if norm == np.inf:
+            if data_ub is None:
+                data_ub = data + eps
+                data_lb = data - eps
+            elif eps is not None:
+                data_ub = torch.min(data + eps, data_ub)
+                data_lb = torch.max(data - eps, data_lb)
+        else:
+            data_ub = data_lb = data
+            assert torch.unique(eps).numel() == 1  # For other norms, the eps must be the same for each channel.
+            eps = torch.mean(eps).item()
+    elif arguments.Config["specification"]["type"] == 'bound':
+        assert norm == np.inf
+        # Use data_lb and data_ub directly.
     else:
-        data_ub = data_lb = data
-        assert torch.unique(eps).numel() == 1  # For other norms, the eps must be the same for each channel.
-        eps = torch.mean(eps).item()
+        raise ValueError(f'Unsupported perturbation type {arguments.Config["specification"]["type"]}')
 
     if arguments.Config["debug"]["lp_test"] not in ["LP_intermediate_refine", "MIP_intermediate_refine"]:
         arguments.Config["debug"]["lp_test"] = None
 
+    num_outputs = arguments.Config["data"]["num_outputs"]
+    # assert num_outputs > 1
     if y is not None:
-        c = torch.zeros((1, 1, arguments.Config["data"]["num_classes"]), device=arguments.Config["general"]["device"])  # we only support c with shape of (1, 1, n)
-        c[0, 0, y] = 1
-        c[0, 0, target] = -1
+        if num_outputs > 1:
+            c = torch.zeros((1, 1, num_outputs), device=arguments.Config["general"]["device"])  # we only support c with shape of (1, 1, n)
+            c[0, 0, y] = 1
+            c[0, 0, target] = -1
+        else:
+            # Binary classifier, only 1 output. Assume negative label means label 0, postive label means label 1.
+            c = (float(y) - 0.5) * 2 * torch.ones(size=(1, 1, 1))
     else:
         # if there is no ture label, we only verify the target output
-        c = torch.zeros((1, 1, arguments.Config["data"]["num_classes"]), device=arguments.Config["general"]["device"])  # we only support c with shape of (1, 1, n)
+        c = torch.zeros((1, 1, num_outputs), device=arguments.Config["general"]["device"])  # we only support c with shape of (1, 1, n)
         c[0, 0, target] = -1
 
     # This will use the refined bounds if the complete verifier is "bab-refine".
@@ -404,6 +429,7 @@ def main():
             print(f'Loaded from {path}')
             vnnlib = read_vnnlib_simple(os.path.join(file_root, vnnlib_path), 1, 1, regression=True)
 
+        model_ori.eval()
         if arguments.Config["data"]["dataset"] == 'NN4SYS':
             res = nn4sys_verification(model_ori, vnnlib, onnx_path=os.path.join(file_root, onnx_path))
             print(res)
@@ -455,7 +481,7 @@ def main():
             # Incomplete verification is enabled by default. The intermediate lower and upper bounds will be reused in bab and mip.
             if not verified_success and (arguments.Config["general"]["enable_incomplete_verification"] or arguments.Config["general"]["complete_verifier"] == "bab-refine"):
                 y, pidx_list = get_labels(model_ori, x, vnnlib)
-                verified_status, init_global_lb, saved_bounds, saved_slopes = incomplete_verifier(model_ori, x, arguments.Config["specification"]["norm"], y, data_ub=data_max, data_lb=data_min)
+                verified_status, init_global_lb, saved_bounds, saved_slopes = incomplete_verifier(model_ori, x, y, data_ub=data_max, data_lb=data_min)
                 verified_success = verified_status != "unknown"
                 if not verified_success:
                     lower_bounds, upper_bounds = saved_bounds[1], saved_bounds[2]
@@ -484,7 +510,6 @@ def main():
                         # Multiple properties in a "and" clause (e.g., marabou-cifar10). Only need to verify one of the easiest properties.
                         select_using_verified_bounds = True
                         if select_using_verified_bounds:
-                            # FIXME: we should make sure the incomplete bound is using the prop_mat as the C matrix!
                             selection_metric = init_global_lb.detach().clone().squeeze(0)
                             selection_metric[y] = float("-inf")  # This this the groundtruth label (0 in the margin bounds).
                             pidx = selection_metric.argmax().item()  # Choose the label with bound closest to 0.
@@ -535,11 +560,11 @@ def main():
                             l, nodes = rlb[-1].item(), 0
                         else:
                             # feed initialed bounds to save time
-                            l, u, nodes, _ = bab(model_ori, x, pidx, arguments.Config["specification"]["norm"], y, data_ub=data_max, data_lb=data_min,
+                            l, u, nodes, _ = bab(model_ori, x, pidx, y, data_ub=data_max, data_lb=data_min,
                                                  lower_bounds=lower_bounds, upper_bounds=upper_bounds, reference_slopes=saved_slopes)
                     else:
                         assert arguments.Config["general"]["complete_verifier"] == "bab"  # for MIP and BaB-Refine.
-                        l, u, nodes, _ = bab(model_ori, x, pidx, arguments.Config["specification"]["norm"], y, data_ub=data_max, data_lb=data_min)
+                        l, u, nodes, _ = bab(model_ori, x, pidx, y, data_ub=data_max, data_lb=data_min)
                     time_cost = time.time() - start
                     print('Image {} against label {} verification end, Time cost: {}'.format(new_idx, pidx, time_cost))
                     bab_ret.append([new_idx, l, nodes, time_cost, pidx])
