@@ -95,5 +95,5 @@ dependencies:
   - pip:
     - flatbuffers==2.0
     - onnx==1.10.2
-    - git+git://github.com/Sarimuko/onnx2pytorch@8879f72c41ba960ff6495ae754d885eac2ebf656#egg=onnx2pytorch
+    - git+https://github.com/Sarimuko/onnx2pytorch@8879f72c41ba960ff6495ae754d885eac2ebf656#egg=onnx2pytorch
     - onnxruntime==1.9.0

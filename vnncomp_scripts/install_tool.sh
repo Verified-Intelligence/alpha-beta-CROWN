@@ -54,7 +54,7 @@ tqdm>=4.6
 sortedcontainers>=2.4
 onnx==1.9.0
 onnxruntime==1.8.0
-git+git://github.com/Sarimuko/onnx2pytorch@master#egg=onnx2pytorch
+git+https://github.com/Sarimuko/onnx2pytorch@master#egg=onnx2pytorch
 EOF
 ${VNNCOMP_PYTHON_PATH}/python -m pip install -r ${HOME}/vnncomp_requirements.txt
 # Install our auto_LiRPA library.
