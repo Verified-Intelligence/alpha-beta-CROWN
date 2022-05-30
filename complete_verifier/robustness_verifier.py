@@ -421,8 +421,8 @@ def main():
         if not verified_success and (arguments.Config["general"]["complete_verifier"] == "mip" or arguments.Config["general"]["complete_verifier"] == "bab-refine"):
             start_refine = time.time()
             verified_status, init_global_lb, lower_bounds, upper_bounds = mip(saved_bounds=saved_bounds, y=y, labels_to_verify=labels_to_verify)
-            verified_success = verified_status != "unknown-mip"
-            if verified_status == "unknown-mip": 
+            verified_success = "unknown" not in verified_status
+            if verified_status == "unknown-mip" or verified_status == "unknown":
                 verified_acc -= 1
                 mip_unknown.append(imag_idx)
             elif verified_status == "unsafe-mip":
