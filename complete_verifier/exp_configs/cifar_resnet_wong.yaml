@@ -1,5 +1,3 @@
-general:
-  mode: verified-acc
 model:
   name: model_resnet
   path: models/eran/cifar_resnet_8px.pth
@@ -13,10 +11,10 @@ specification:
 attack:
   pgd_restarts: 30
 solver:
+  batch_size: 8
   alpha-crown:
-    share_slopes: true
+    share_slopes: false
   beta-crown:
-    batch_size: 8
     iteration: 20
 bab:
   timeout: 180

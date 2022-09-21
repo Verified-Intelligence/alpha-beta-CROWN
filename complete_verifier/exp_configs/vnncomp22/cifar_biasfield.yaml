@@ -1,0 +1,34 @@
+# Configuration file for running the cifar_biasfield benchmark (all properties).
+general:
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/cifar_biasfield
+  csv_name: instances.csv
+  enable_incomplete_verification: False
+model:
+  onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
+data:
+  dataset: Cifar_biasfield
+  num_outputs: 10
+solver:
+  batch_size: 4  # Number of parallel domains to compute on GPU.
+  bound_prop_method: crown
+  beta-crown:
+    iteration: 10  # Iterations for computing intermediate layer bounds.
+bab:
+  initial_max_domains: 10
+  branching:
+    method: sb
+    sb_coeff_thresh: 2.0
+    input_split:
+      enable: True
+      enhanced_bound_prop_method: alpha-crown
+attack:
+  pgd_order: after
+  attack_mode: diversed_PGD
+  pgd_steps: 20
+  pgd_restarts: 300
+  input_split:
+    pgd_restarts: 30
+    pgd_steps: 20
+  input_split_check_adv:
+    pgd_restarts: 10
+    pgd_steps: 1

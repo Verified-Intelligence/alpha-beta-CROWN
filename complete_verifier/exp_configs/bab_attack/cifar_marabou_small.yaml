@@ -1,0 +1,45 @@
+model:
+  name: cifar_marabou_small
+  path: models/marabou_cifar10/cifar_marabou_small.pth  # Clean acc is 6314.
+data:
+  dataset: CIFAR
+  std: 1.0
+  mean: 0.0
+  data_idx_file: exp_configs/bab_attack/attack_idx/cifar_marabou_small/all.txt
+specification:
+  norm: .inf  # Linf norm (can also be 2 or 1).
+  epsilon: 0.00784313725  # 2./255.
+attack:  # Currently attack is only implemented for Linf norm.
+  pgd_steps: 100  # Increase for a stronger attack. A PGD attack will be used before verification to filter on non-robust data examples.
+  pgd_restarts: 100  # Increase for a stronger attack.
+  attack_mode: diverse_pgd
+  pgd_order: before
+solver:
+  batch_size: 8192  # Number of subdomains to compute in parallel in beta-CROWN. Decrease if you run out of memory.
+  alpha-crown:
+    iteration: 100   # Number of iterations for alpha-CROWN optimization. Alpha-CROWN is used to compute all intermediate layer bounds before branch and bound starts.
+    lr_alpha: 0.1    # Learning rate for alpha in alpha-CROWN. The default (0.1) is typically ok.
+  beta-crown:
+    lr_alpha: 0.01  # Learning rate for optimizing the alpha parameters, the default (0.01) is typically ok, but you can try to tune this parameter to get better lower bound.
+    lr_beta: 0.05  # Learning rate for optimizing the beta parameters, the default (0.05) is typically ok, but you can try to tune this parameter to get better lower bound.
+    lr_decay: 0.99
+    iteration: 100  # Number of iterations for beta-CROWN optimization. 20 is often sufficient, 50 or 100 can also be used.
+  mip:
+    parallel_solvers: 8
+    solver_threads: 4
+bab:
+  timeout: 1800  # Timeout threshold for branch and bound. Increase for verifying more points.
+  max_domains: 5000000
+  get_upper_bound: true  # Needed for Bab-Attack.
+  batched_domain_list: false  # Needed for BaB-Attack.
+  attack:
+    enabled: true
+    beam_candidates: 32
+    beam_depth: 8
+    max_dive_fix_ratio: 0.0
+    min_local_free_ratio: 0.5
+    mip_timeout: 360
+    mip_start_iteration: 3
+    refined_mip_attacker: true
+  branching:  # Parameters for branching heuristics.
+    reduceop: max  # Reduction function for the branching heuristic scores, min or max. Using max can be better on some models.

@@ -1,0 +1,20 @@
+model:
+  name: cnn_4layer_b
+  path: models/sdp/cifar_cnn_b_adv.model
+data:
+  dataset: CIFAR_SDP
+specification:
+  epsilon: 0.00784313725  # 2./255.
+attack:
+  pgd_restarts: 50
+solver:
+  batch_size: 512
+  beta-crown:
+    iteration: 20 # 20
+bab:
+  timeout: 200 # 90
+  cut:
+    enabled: True
+    cplex_cuts: True
+    bab_cut: True
+    lr_decay: 0.9

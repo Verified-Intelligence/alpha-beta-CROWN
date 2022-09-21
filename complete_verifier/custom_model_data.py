@@ -1,11 +1,12 @@
 #########################################################################
-##         This file is part of the alpha-beta-CROWN verifier          ##
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021, Huan Zhang <huan@huan-zhang.com>                ##
-##                     Kaidi Xu <xu.kaid@northeastern.edu>             ##
-##                     Shiqi Wang <sw3215@columbia.edu>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Yihan Wang <yihanwang@ucla.edu>                 ##
+## Copyright (C) 2021-2022, Huan Zhang <huan@huan-zhang.com>           ##
+##                     Kaidi Xu, Zhouxing Shi, Shiqi Wang              ##
+##                     Linyi Li, Jinqi (Kathryn) Chen                  ##
+##                     Zhuolin Yang, Yihan Wang                        ##
+##                                                                     ##
+##      See CONTRIBUTORS for author contacts and affiliations.         ##
 ##                                                                     ##
 ##     This program is licenced under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -16,7 +17,7 @@ This file shows how to use customized models and customized dataloaders.
 
 An example config file, `exp_configs/custom_model.py` has been provided.
 
-python robustness_verifier.py --config exp_configs/custom_model_data_example.yaml
+python abcrown.py --config exp_configs/custom_model_data_example.yaml
 """
 
 import os
@@ -59,16 +60,14 @@ def two_relu_toy_model(in_dim=2, out_dim=2):
     return model
 
 
-def simple_box_data():
-    """a customized box data: x=[-1.5, 1], y=[-1, 1.5]"""
+def simple_box_data(eps=2.):
+    """a customized box data: x=[-1, 1], y=[-1, 1]"""
     X = torch.tensor([[0., 0.]]).float()
     labels = torch.tensor([0]).long()
-    # customized element-wise upper bounds
-    data_max = torch.tensor([[1., 1.5]]).reshape(1, -1)
-    # customized element-wise lower bounds
-    data_min = torch.tensor([[-1.5, -1.]]).reshape(1, -1)
-    eps = None
-    return X, labels, data_max, data_min, eps
+    eps_temp = torch.tensor(eps).reshape(1, -1)
+    data_max = torch.tensor(10.).reshape(1, -1)
+    data_min = torch.tensor(-10.).reshape(1, -1)
+    return X, labels, data_max, data_min, eps_temp
 
 
 def box_data(dim, low=0., high=1., segments=10, num_classes=10, eps=None):

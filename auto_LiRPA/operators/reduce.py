@@ -3,8 +3,8 @@ from .base import *
 
 
 class BoundReduceMax(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.axis = attr['axes']
         # for torch.max, `dim` must be an int
         if isinstance(self.axis, list):
@@ -18,10 +18,8 @@ class BoundReduceMax(Bound):
         in Softmax of Transformers."""   
         self.fixed_max_index = options.get('fixed_reducemax_index', False)
 
-    @Bound.save_io_shape
     def forward(self, x):
-        if self.axis < 0:
-            self.axis += len(self.input_shape)
+        self.axis = self.make_axis_non_negative(self.axis)
         assert self.axis > 0
         res = torch.max(x, dim=self.axis, keepdim=self.keepdim)
         self.indices = res.indices
@@ -53,20 +51,19 @@ class BoundReduceMax(Bound):
 
 
 class BoundReduceMean(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.axis = attr['axes']
         self.keepdim = bool(attr['keepdims']) if 'keepdims' in attr else True
         self.use_default_ibp = True        
 
-    @Bound.save_io_shape
     def forward(self, x):
         return torch.mean(x, dim=self.axis, keepdim=self.keepdim)
 
     def bound_backward(self, last_lA, last_uA, x):
         for i in range(len(self.axis)):
             if self.axis[i] < 0:
-                self.axis[i] = len(self.input_shape) + self.axis[i]
+                self.axis[i] = self.make_axis_non_negative(self.axis[i])
                 assert self.axis[i] > 0
 
         def _bound_oneside(last_A):
@@ -89,9 +86,7 @@ class BoundReduceMean(Bound):
     def bound_forward(self, dim_in, x):
         assert (self.keepdim)
         assert (len(self.axis) == 1)
-        axis = self.axis[0]
-        if axis < 0:
-            axis = len(self.input_shape) + axis
+        axis = self.make_axis_non_negative(self.axis[0])
         assert (axis > 0)
         size = self.input_shape[axis]
         lw = x.lw.sum(dim=axis + 1, keepdim=True) / size
@@ -107,13 +102,12 @@ class BoundReduceMean(Bound):
         return x[0]
 
 class BoundReduceSum(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.axis = attr['axes'] if 'axes' in attr else None
         self.keepdim = bool(attr['keepdims'])
         self.use_default_ibp = True        
 
-    @Bound.save_io_shape
     def forward(self, x):
         if self.axis is not None:
             return torch.sum(x, dim=self.axis, keepdim=self.keepdim)
@@ -143,14 +137,13 @@ class BoundReduceSum(Bound):
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA))], 0, 0
 
     def bound_forward(self, dim_in, x):
-        assert self.keepdim
         assert len(self.axis) == 1
-        axis = self.axis[0]
-        if axis < 0:
-            axis = len(self.input_shape) + axis
-        assert (axis > 0)
-        lw, lb = x.lw.sum(dim=axis + 1, keepdim=True), x.lb.sum(dim=axis, keepdim=True)
-        uw, ub = x.uw.sum(dim=axis + 1, keepdim=True), x.ub.sum(dim=axis, keepdim=True)
+        axis = self.make_axis_non_negative(self.axis[0])
+        assert axis > 0
+        lw = x.lw.sum(dim=axis + 1, keepdim=self.keepdim)
+        lb = x.lb.sum(dim=axis, keepdim=self.keepdim)
+        uw = x.uw.sum(dim=axis + 1, keepdim=self.keepdim)
+        ub = x.ub.sum(dim=axis, keepdim=self.keepdim)
         return LinearBound(lw, lb, uw, ub)
 
     def infer_batch_dim(self, batch_size, *x):

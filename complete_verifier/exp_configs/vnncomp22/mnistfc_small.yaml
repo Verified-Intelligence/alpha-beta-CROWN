@@ -1,0 +1,24 @@
+# Configuration file for running the mnist_fc benchmark (small model).
+general:
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/mnist_fc
+  csv_name: instances.csv
+  complete_verifier: mip
+model:
+  input_shape: [-1, 1, 28, 28]  # This onnx model has input shape [-1, 784] which is not compatible with our MIP solution
+data:
+  dataset: MNIST
+  start: 0
+  end: 30
+solver:
+  batch_size: 500
+  beta-crown:
+    iteration: 20
+    lr_beta: 0.03
+  mip:
+    parallel_solvers: 8
+    solver_threads: 4
+    refine_neuron_time_percentage: 0.8
+bab:
+  branching:
+    candidates: 5
+    reduceop: max

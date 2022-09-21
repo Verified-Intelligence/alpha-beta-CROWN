@@ -1,26 +1,60 @@
 """ Shape operators """
 from .base import *
+from ..patches import Patches, patches_to_matrix
+from .linear import BoundLinear
 
 class BoundReshape(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
+        # It can be set to `view`, so that `view` instead of `reshape` will be used.
+        self.option = options.get('reshape', 'reshape')
 
-    @Bound.save_io_shape
     def forward(self, x, shape):
         shape = list(shape)
         for i in range(len(shape)):
             if shape[i] == -1:
                 shape[i] = prod(x.shape) // int(prod(shape[:i]) * prod(shape[(i + 1):]))
         self.shape = shape
-        return x.reshape(shape)
+        if self.option == 'view':
+            return x.contiguous().view(shape)
+        else:
+            return x.reshape(shape)
 
     def bound_backward(self, last_lA, last_uA, x, shape):
         def _bound_oneside(A):
             if A is None:
                 return None
-            # A shape is (spec, batch, *node_shape)
-            return A.reshape(A.shape[0], A.shape[1], *self.input_shape[1:])
-
+            if type(A) == Patches:
+                if type(self.inputs[0]) == BoundLinear:
+                    # Save the shape and it will be converted to matrix in Linear layer.
+                    return A.create_similar(input_shape=self.output_shape)
+                if A.unstable_idx is None:
+                    patches = A.patches
+                    # non-sparse: [batch, out_dim, out_c, out_H, out_W, out_dim, in_c, H, W]
+                    # [batch, out_dim*out_c, out_H, out_W, out_dim*in_c, H, W]
+                    patches = patches.reshape(
+                        patches.shape[0],
+                        patches.shape[1]*patches.shape[2], patches.shape[3], patches.shape[4],
+                        patches.shape[5]*patches.shape[6], patches.shape[7], patches.shape[8])
+                    # expected next_A shape [batch, spec, in_c, in_H , in_W].
+                    next_A = patches_to_matrix(
+                        patches, [
+                            self.input_shape[0]*self.input_shape[1],
+                            patches.shape[-3],
+                            int(math.sqrt(self.input_shape[-1]//A.patches.shape[-3])),
+                            int(math.sqrt(self.input_shape[-1]//A.patches.shape[-3]))],
+                        A.stride, A.padding)
+                else:
+                    # sparse: [spec, batch, in_c, patch_H, patch_W] (specs depends on the number of unstable neurons).
+                    patches = A.patches
+                    # expected next_A shape [batch, spec, input_c, in_H, in_W].
+                    next_A = patches_to_matrix(patches, [self.input_shape[0]*self.input_shape[1], patches.shape[-3], int(math.sqrt(self.input_shape[-1]//patches.shape[-3])), int(math.sqrt(self.input_shape[-1]//patches.shape[-3]))], A.stride, A.padding, output_shape=A.output_shape, unstable_idx=A.unstable_idx)
+                # Reshape it to [batch, spec, *input_shape]  (input_shape is the shape before Reshape operation).
+                next_A = next_A.reshape(A.shape[1], -1, *self.input_shape[1:])
+                return next_A.transpose(0,1)
+            else:
+                return A.reshape(A.shape[0], A.shape[1], *self.input_shape[1:])
+        #FIXME check reshape or view
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA)), (None, None)], 0, 0
 
     def bound_forward(self, dim_in, x, shape):
@@ -32,15 +66,9 @@ class BoundReshape(Bound):
         return LinearBound(lw, lb, uw, ub)
 
     def interval_propagate(self, *v):
-        if Interval.use_relative_bounds(*v):
-            return Interval(
-                None, None,
-                v[0].nominal.reshape(self.shape),
-                v[0].lower_offset.reshape(self.shape),
-                v[0].upper_offset.reshape(self.shape),
-                ptb=v[0].ptb
-            )
-        return Interval.make_interval(v[0][0].reshape(*v[1][0]), v[0][1].reshape(*v[1][0]), v[0])
+        return Interval.make_interval(
+            self.forward(v[0][0], v[1][0]),
+            self.forward(v[0][1], v[1][0]), v[0])
 
     def infer_batch_dim(self, batch_size, *x):
         if x[0] == -1:
@@ -51,29 +79,48 @@ class BoundReshape(Bound):
             self.input_shape, self.shape, x[0]
         ))
 
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        if isinstance(v[0], Tensor):
+            self.solver_vars = self.forward(*v)
+            return
+        gvar_array = np.array(v[0])
+        gvar_array = gvar_array.reshape(v[1].detach().cpu().numpy())[0]
+        self.solver_vars = gvar_array.tolist()
+
 
 class BoundUnsqueeze(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.axes = attr['axes']
         assert (len(self.axes) == 1)
         self.axes = self.axes[0]
         self.use_default_ibp = True
 
-    @Bound.save_io_shape
     def forward(self, x):
-        if self.axes < 0:
-            self.axes = len(self.input_shape) + self.axes + 1
-        return x.unsqueeze(self.axes) 
+        return x.unsqueeze(self.axes)
 
     def bound_backward(self, last_lA, last_uA, x):
+        self.axes = self.make_axis_non_negative(self.axes, 'output')
         if self.axes == 0:
-            return last_lA, 0, last_uA, 0
+            # TODO: unsqueeze on batch dimension can be problematic.
+            return [(last_lA, last_uA)], 0, 0
         else:
-            return [(last_lA.squeeze(self.axes + 1) if last_lA is not None else None,
-                     last_uA.squeeze(self.axes + 1) if last_uA is not None else None)], 0, 0
+            if type(last_lA) == Patches:
+                lA = Patches(last_lA.patches.squeeze(self.axes - 5), last_lA.stride, last_lA.padding, last_lA.shape, last_lA.identity, last_lA.unstable_idx, last_lA.output_shape)
+            elif last_lA is not None:
+                lA = last_lA.squeeze(self.axes+1)
+            else:
+                lA = None
+            if type(last_uA) == Patches:
+                uA = Patches(last_uA.patches.squeeze(self.axes - 5), last_uA.stride, last_uA.padding, last_uA.shape, last_uA.identity, last_uA.unstable_idx, last_uA.output_shape)
+            elif last_uA is not None:
+                uA = last_uA.squeeze(self.axes+1)
+            else:
+                uA = None
+            return [(lA, uA)], 0, 0
 
     def bound_forward(self, dim_in, x):
+        self.axes = self.make_axis_non_negative(self.axes, 'output')
         if len(self.input_shape) == 0:
             lw, lb = x.lw.unsqueeze(1), x.lb.unsqueeze(0)
             uw, ub = x.uw.unsqueeze(1), x.ub.unsqueeze(0)
@@ -88,19 +135,20 @@ class BoundUnsqueeze(Bound):
         elif self.axes > x[0]:
             return x[0]
         raise NotImplementedError
-    
+
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        self.solver_vars = self.forward(v[0])
 
 class BoundSqueeze(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.axes = attr['axes']
         assert (len(self.axes) == 1)
         self.axes = self.axes[0]
         self.use_default_ibp = True
 
-    @Bound.save_io_shape
     def forward(self, x):
-        return x.squeeze(self.axes) 
+        return x.squeeze(self.axes)
 
     def bound_backward(self, last_lA, last_uA, x):
         assert (self.axes != 0)
@@ -119,12 +167,11 @@ class BoundSqueeze(Bound):
 
 
 class BoundFlatten(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.use_default_ibp = True
         self.axis = attr['axis']
 
-    @Bound.save_io_shape
     def forward(self, x):
         return torch.flatten(x, self.axis)
 
@@ -133,22 +180,42 @@ class BoundFlatten(Bound):
             if A is None:
                 return None
             return A.reshape(A.shape[0], A.shape[1], *self.input_shape[1:])
-
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA)), (None, None)], 0, 0
+
+    def bound_dynamic_forward(self, x, max_dim=None, offset=0):
+        w = torch.flatten(x.lw, self.axis + 1)
+        b = torch.flatten(x.lb, self.axis)
+        x_L = torch.flatten(x.x_L, self.axis)
+        x_U = torch.flatten(x.x_U, self.axis)
+        return LinearBound(w, b, w, b, x_L=x_L, x_U=x_U, tot_dim=x.tot_dim)
+
+    def bound_forward(self, dim_in, x):
+        self.axis = self.make_axis_non_negative(self.axis)
+        assert self.axis > 0
+        return LinearBound(
+            torch.flatten(x.lw, self.axis + 1),
+            torch.flatten(x.lb, self.axis),
+            torch.flatten(x.uw, self.axis + 1),
+            torch.flatten(x.ub, self.axis),
+        )
+
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        # e.g., v[0] input shape (16, 8, 8) => output shape (1024,)
+        self.solver_vars = np.array(v[0]).reshape(-1).tolist()
+        model.update()
+
 
 
 class BoundConcat(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.axis = attr['axis']
         self.IBP_rets = None
 
-    @Bound.save_io_shape
     def forward(self, *x):  # x is a list of tensors
-        x = [(item if isinstance(item, torch.Tensor) else torch.tensor(item)) for item in x]
+        x = [(item if isinstance(item, Tensor) else torch.tensor(item)) for item in x]
         self.input_size = [item.shape[self.axis] for item in x]
-        if self.axis < 0:
-            self.axis = x[0].ndim + self.axis
+        self.axis = self.make_axis_non_negative(self.axis)
         return torch.cat(x, dim=int(self.axis))
 
     def interval_propagate(self, *v):
@@ -169,15 +236,6 @@ class BoundConcat(Bound):
         all_inf = all(map(lambda x: x is None or x == np.inf, norms))
         all_2 = all(map(lambda x: x is None or x == 2, norms))
 
-        if Interval.use_relative_bounds(*v):
-            assert all_inf # Only LINF supported for now
-            return Interval(
-                None, None,
-                self.forward(*[_v.nominal for _v in v]),
-                self.forward(*[_v.lower_offset for _v in v]),
-                self.forward(*[_v.upper_offset for _v in v]),
-            )
-
         h_L = [_v[0] for _v in v]
         h_U = [_v[1] for _v in v]
         if all_inf:
@@ -195,14 +253,22 @@ class BoundConcat(Bound):
             raise RuntimeError("BoundConcat does not support inputs with norm {}".format(norms))
 
     def bound_backward(self, last_lA, last_uA, *x):
-        if self.axis < 0:
-            self.axis = len(self.output_shape) + self.axis
-        assert (self.axis > 0)
+        self.axis = self.make_axis_non_negative(self.axis, 'output')
+        assert self.axis > 0
 
         def _bound_oneside(last_A):
             if last_A is None:
                 return None
-            return torch.split(last_A, self.input_size, dim=self.axis + 1)
+            if isinstance(last_A, torch.Tensor):
+                return torch.split(last_A, self.input_size, dim=self.axis + 1)
+            elif isinstance(last_A, Patches):
+                assert len(self.input_shape) == 4 and self.axis == 1, "Split channel dimension is supported; others are unimplemented."
+                # Patches shape can be [out_c, batch, out_h, out_w, in_c, patch_h, patch_w]
+                # Or [spec, batch, in_c, patch_h, patch_w]  (sparse)
+                new_patches = torch.split(last_A.patches, self.input_size, dim=-3)  # split the in_c dimension is easy.
+                return [last_A.create_similar(p) for p in new_patches]
+            else:
+                raise RuntimeError(f'Unsupported type for last_A: {type(last_A)}')
 
         uA = _bound_oneside(last_uA)
         lA = _bound_oneside(last_lA)
@@ -213,8 +279,7 @@ class BoundConcat(Bound):
         return [(lA[i], uA[i]) for i in range(len(lA))], 0, 0
 
     def bound_forward(self, dim_in, *x):
-        if self.axis < 0:
-            self.axis = x[0].lb.ndim + self.axis
+        self.axis = self.make_axis_non_negative(self.axis)
         assert (self.axis == 0 and not self.from_input or self.from_input)
         lw = torch.cat([item.lw for item in x], dim=self.axis + 1)
         lb = torch.cat([item.lb for item in x], dim=self.axis)
@@ -222,19 +287,25 @@ class BoundConcat(Bound):
         ub = torch.cat([item.ub for item in x], dim=self.axis)
         return LinearBound(lw, lb, uw, ub)
 
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        self.solver_vars = self.forward(*v)
+
     def infer_batch_dim(self, batch_size, *x):
         assert np.min(x) == np.max(x)
         assert x[0] != self.axis
         return x[0]
 
+
+BoundConcatFromSequence = BoundConcat
+
 class BoundShape(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
-        self.use_default_ibp = True        
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
+        self.use_default_ibp = True
 
     @staticmethod
     def shape(x):
-        return x.shape if isinstance(x, torch.Tensor) else torch.tensor(x).shape
+        return x.shape if isinstance(x, Tensor) else torch.tensor(x).shape
 
     def forward(self, x):
         self.from_input = False
@@ -247,59 +318,88 @@ class BoundShape(Bound):
         return -1
 
     def interval_propagate(self, *v):
-        if Interval.use_relative_bounds(*v):
-            shape = self.forward(v[0].nominal)
-            if not isinstance(shape, torch.Tensor):
-                shape = torch.tensor(shape, device=self.device)
-            return Interval(
-                None, None,
-                shape, torch.zeros_like(shape), torch.zeros_like(shape)
-            )
-
         return super().interval_propagate(*v)
+
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        if not isinstance(v[0], Tensor):
+            # e.g., v[0] input shape (8, 7, 7) => output its shape (1, 8, 7, 7)
+            gvars_array = np.array(v[0])
+            self.solver_vars = torch.tensor(np.expand_dims(gvars_array, axis=0).shape).long()
+        else:
+            self.solver_vars = torch.tensor(self.forward(v[0])).long()
 
 
 class BoundGather(Bound):
-    def __init__(self, input_name, name, ori_name, attr, x, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, x, output_index, options, device)
+    def __init__(self, attr, x, output_index, options):
+        super().__init__(attr, x, output_index, options)
         self.axis = attr['axis'] if 'axis' in attr else 0
-        self.nonlinear = False  # input shape required
 
-    @Bound.save_io_shape
     def forward(self, x, indices):
         self.indices = indices
+        if self.axis == -1:
+            self.axis = len(x.shape) - 1
         x = x.to(self.indices.device)  # BoundShape.shape() will return value on cpu only
         if indices.ndim == 0:
-            # `index_select` requires `indices` to be a 1-D tensor
             return torch.index_select(x, dim=self.axis, index=indices).squeeze(self.axis)
         elif self.axis == 0:
             return torch.index_select(x, dim=self.axis, index=indices.reshape(-1)) \
                 .reshape(*indices.shape, x.shape[-1])
-        raise ValueError(
-            'Unsupported shapes in Gather: data {}, indices {}, axis {}'.format(x.shape, indices.shape, self.axis))
+        elif self.indices.ndim == 1:
+            # `index_select` requires `indices` to be a 1-D tensor
+            return torch.index_select(x, dim=self.axis, index=indices)
+
+        raise ValueError('Unsupported shapes in Gather: data {}, indices {}, axis {}'.format(x.shape, indices.shape, self.axis))
 
     def bound_backward(self, last_lA, last_uA, x, indices):
         assert self.from_input
-        assert self.indices.ndim == 0  # TODO
+
+        def _expand_A_with_zeros(A, axis, idx, max_axis_size):
+            # Need to recreate A with three parts: before the gathered element, gathered element, and after gathered element.
+            tensors = []
+            if idx > 0:
+                shape_pre = list(A.shape)
+                shape_pre[axis] *= idx
+                # Create the same shape as A, except for the dimension to be gathered.
+                tensors.append(torch.zeros(shape_pre, device=A.device))
+            # The gathered element itself, in the middle.
+            tensors.append(A)
+            if max_axis_size - idx - 1 > 0:
+                shape_next = list(A.shape)
+                shape_next[axis] *= max_axis_size - idx - 1
+                # Create the rest part of A.
+                tensors.append(torch.zeros(shape_next, device=A.device))
+            # Concatenate all three parts together.
+            return torch.cat(tensors, dim=axis)
 
         def _bound_oneside(A):
             if A is None:
                 return None
-            assert (self.indices.ndim == 0)
 
-            A = A.unsqueeze(self.axis + 1)
-            idx = int(self.indices)
-            tensors = []
-            if idx > 0:
-                shape_pre = list(A.shape)
-                shape_pre[self.axis + 1] *= idx
-                tensors.append(torch.zeros(shape_pre, device=self.device))
-            tensors.append(A)
-            if self.input_shape[self.axis] - idx - 1 > 0:
-                shape_next = list(A.shape)
-                shape_next[self.axis + 1] *= self.input_shape[self.axis] - idx - 1
-                tensors.append(torch.zeros(shape_next, device=self.device))
-            return torch.cat(tensors, dim=self.axis + 1)
+            if isinstance(A, torch.Tensor):
+                if self.indices.ndim == 0:
+                    A = A.unsqueeze(self.axis + 1)
+                    idx = int(self.indices)
+                    return _expand_A_with_zeros(A, self.axis + 1, idx, self.input_shape[self.axis])
+                else:
+                    shape = list(A.shape)
+                    final_A = torch.zeros(*shape[:self.axis + 1], self.input_shape[self.axis], *shape[self.axis + 2:], device=A.device)
+                    idx = self.indices.view([*[1]*(self.axis+1), -1, *[1]*len(shape[self.axis + 2:])])
+                    idx = idx.repeat([*A.shape[:self.axis+1], 1, *A.shape[self.axis+2:]])
+                    final_A.scatter_(dim=self.axis+1, index=idx, src=A)
+                    return final_A
+            elif isinstance(A, Patches):
+                if self.indices.ndim == 0:
+                    idx = int(self.indices)
+                    assert len(self.input_shape) == 4 and self.axis == 1, "Gather is only supported on the channel dimension for Patches mode."
+                    # For gather in the channel dimension, we only need to deal with the in_c dimension (-3) in patches.
+                    patches = A.patches
+                    # -3 is the in_c dimension.
+                    new_patches = _expand_A_with_zeros(patches, axis=-3, idx=idx, max_axis_size=self.input_shape[self.axis])
+                    return A.create_similar(new_patches)
+                else:
+                    raise NotImplementedError
+            else:
+                raise ValueError(f'Unknown last_A type {type(A)}')
 
         return [(_bound_oneside(last_lA), _bound_oneside(last_uA)), (None, None)], 0, 0
 
@@ -321,15 +421,6 @@ class BoundGather(Bound):
 
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(1)
-
-        if Interval.use_relative_bounds(*v):
-            return Interval(
-                None, None,
-                self.forward(v[0].nominal, v[1].nominal),
-                self.forward(v[0].lower_offset, v[1].nominal),
-                self.forward(v[0].upper_offset, v[1].nominal)
-            )
-        
         return self.forward(v[0][0], v[1][0]), self.forward(v[0][1], v[1][0])
 
     def infer_batch_dim(self, batch_size, *x):
@@ -339,27 +430,22 @@ class BoundGather(Bound):
         else:
             return x[1]
 
-    def infer_batch_dim(self, batch_size, *x):
-        if x[0] != -1:
-            assert self.axis != x[0]
-            return x[0]
-        else:
-            return x[1]
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        self.solver_vars = self.forward(v[0], v[1])
 
 
 class BoundGatherElements(Bound):
-    def __init__(self, input_name, name, ori_name, attr, input, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, input, output_index, options, device)
+    def __init__(self, attr, input, output_index, options):
+        super().__init__(attr, input, output_index, options)
         self.axis = attr['axis']
 
-    @Bound.save_io_shape
     def forward(self, x, index):
         self.index = index
         return torch.gather(x, dim=self.axis, index=index)
 
     def bound_backward(self, last_lA, last_uA, x, index):
         assert self.from_input
-        
+
         dim = self._get_dim()
 
         def _bound_oneside(last_A):
@@ -377,15 +463,6 @@ class BoundGatherElements(Bound):
 
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(1)
-
-        if Interval.use_relative_bounds(*v):
-            return Interval(
-                None, None,
-                self.forward(v[0].nominal, v[1].nominal),
-                self.forward(v[0].lower_offset, v[1].nominal),
-                self.forward(v[0].upper_offset, v[1].nominal)
-            )
-
         return self.forward(v[0][0], v[1][0]), \
                self.forward(v[0][1], v[1][1])
 
@@ -401,7 +478,7 @@ class BoundGatherElements(Bound):
     def infer_batch_dim(self, batch_size, *x):
         assert self.axis != x[0]
         return x[0]
-    
+
     def _get_dim(self):
         dim = self.axis
         if dim < 0:
@@ -409,16 +486,15 @@ class BoundGatherElements(Bound):
         return dim
 
 class BoundTranspose(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.perm = attr['perm']
         self.perm_inv_inc_one = [-1] * (len(self.perm) + 1)
         self.perm_inv_inc_one[0] = 0
         for i in range(len(self.perm)):
             self.perm_inv_inc_one[self.perm[i] + 1] = i + 1
-        self.use_default_ibp = True            
+        self.use_default_ibp = True
 
-    @Bound.save_io_shape
     def forward(self, x):
         return x.permute(*self.perm)
 
@@ -441,6 +517,9 @@ class BoundTranspose(Bound):
 
         return LinearBound(lw, lb, uw, ub)
 
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        self.solver_vars = self.forward(*v)
+
     def infer_batch_dim(self, batch_size, *x):
         if x[0] == -1:
             return -1
@@ -449,21 +528,14 @@ class BoundTranspose(Bound):
 
 
 class BoundSlice(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.start = attr["starts"][0] if "starts" in attr else None
         self.end = attr["ends"][0] if "ends" in attr else None
         self.axes = attr["axes"][0] if "axes" in attr else None
         self.use_default_ibp = False
 
-    # Older Pytorch version only passes steps as input.
-    @Bound.save_io_shape
-    def forward(self, x, start=None, end=None, axes=None, steps=1):
-        start = self.start if start is None else start
-        end = self.end if end is None else end
-        axes = self.axes if axes is None else axes
-        assert (steps == 1 or steps == -1) and axes == int(axes) and start == int(start) and end == int(end)
-        shape = x.shape if isinstance(x, torch.Tensor) else [len(x)]
+    def _fixup_params(self, shape, start, end, axes, steps):
         if start < 0:
             start += shape[axes]
         if end < 0:
@@ -471,18 +543,31 @@ class BoundSlice(Bound):
                 end = 0  # only possible when step == -1
             else:
                 end += shape[axes]
-        if steps == -1:        
+        if steps == -1:
             start, end = end, start + 1  # TODO: more test more negative step size.
         end = min(end, shape[axes])
+        return start, end
+
+    # Older Pytorch version only passes steps as input.
+    def forward(self, x, start=None, end=None, axes=None, steps=1):
+        start = self.start if start is None else start
+        end = self.end if end is None else end
+        axes = self.axes if axes is None else axes
+        assert (steps == 1 or steps == -1) and axes == int(axes) and start == int(start) and end == int(end)
+        shape = x.shape if isinstance(x, Tensor) else [len(x)]
+        start, end = self._fixup_params(shape, start, end, axes, steps)
         final = torch.narrow(x, dim=int(axes), start=int(start), length=int(end - start))
         if steps == -1:
             final = torch.flip(final, dims=tuple(axes))
         return final
-    
-    def interval_propagate(self, *v):       
+
+    def interval_propagate(self, *v):
         lb = tuple(map(lambda x:x[0],v))
         ub = tuple(map(lambda x:x[1],v))
         return Interval.make_interval(self.forward(*lb), self.forward(*ub))
+
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        self.solver_vars = self.forward(*v)
 
     def infer_batch_dim(self, batch_size, *x):
         if x[0] == -1:
@@ -491,12 +576,71 @@ class BoundSlice(Bound):
             assert self.axes != x[0]
             return x[0]
 
+    def bound_backward(self, last_lA, last_uA, *x):
+        def _bound_oneside(A, start, end, axes, steps):
+            if A is None:
+                return None
+            if isinstance(A, torch.Tensor):
+                # Reuse the batch and spec dimension of A, and replace other shapes with input.
+                A_shape = A.shape[:2] + self.input_shape[1:]
+                new_A = torch.zeros(size=A_shape, device=A.device, requires_grad=A.requires_grad)
+                # Fill part of the new_A based on start, end, axes and steps.
+                # Skip the spec dimension at the front (axes + 1).
+                dim = axes if axes < 0 else axes + 1
+                indices = torch.arange(start, end, device=A.device)
+                new_A = torch.index_copy(new_A, dim=dim, index=indices, source=A)
+            elif isinstance(A, Patches):
+                assert A.unstable_idx is None
+                assert len(self.input_shape) == 4 and axes == 1, "Slice is only supported on channel dimension."
+                patches = A.patches
+                # patches shape is [out_c, batch, out_h, out_w, in_c, patch_h, patch_w].
+                new_patches_shape = patches.shape[:4] + (self.input_shape[1], ) + patches.shape[-2:]
+                new_patches = torch.zeros(size=new_patches_shape, device=patches.device, requires_grad=patches.requires_grad)
+                indices = torch.arange(start, end, device=patches.device)
+                new_patches = torch.index_copy(new_patches, dim=-3, index=indices, source=patches)
+                # Only the in_c dimension is changed.
+                new_A = A.create_similar(new_patches)
+            else:
+                raise ValueError(f'Unsupport A type {type(A)}')
+            return new_A
+
+        start, end, axes = x[1].value.item(), x[2].value.item(), x[3].value.item()
+        steps = x[4].value.item() if len(x) == 5 else 1  # If step is not specified, it is 1.
+        # Other step size untested, do not enable for now.
+        assert steps == 1 and axes == int(axes) and start == int(start) and end == int(end)
+        start, end = self._fixup_params(self.input_shape, start, end, axes, steps)
+        # Find the original shape of A.
+        lA = _bound_oneside(last_lA, start, end, axes, steps)
+        uA = _bound_oneside(last_uA, start, end, axes, steps)
+        return [(lA, uA), (None, None), (None, None), (None, None), (None, None)], 0, 0
+
+    def bound_forward(self, dim_in, *inputs):
+        assert len(inputs) == 5 or len(inputs) == 4
+        start = inputs[1].lb.item()
+        end = inputs[2].lb.item()
+        axis = self.make_axis_non_negative(inputs[3].lb.item())
+        assert axis > 0, "Slicing along the batch dimension is not supported yet"
+        steps = inputs[4].lb.item() if len(inputs) == 5 else 1  # If step is not specified, it is 1.
+        assert steps in [1, -1]
+        x = inputs[0]
+        shape = x.lb.shape
+        start, end = self._fixup_params(shape, start, end, axis, steps)
+        lw = torch.narrow(x.lw, dim=axis+1, start=start, length=end - start)
+        uw = torch.narrow(x.uw, dim=axis+1, start=start, length=end - start)
+        lb = torch.narrow(x.lb, dim=axis, start=start, length=end - start)
+        ub = torch.narrow(x.ub, dim=axis, start=start, length=end - start)
+        if steps == -1:
+            lw = torch.flip(lw, dims=tuple(axis+1))
+            uw = torch.flip(uw, dims=tuple(axis+1))
+            lb = torch.flip(lb, dims=tuple(axis))
+            ub = torch.flip(ub, dims=tuple(axis))
+        return LinearBound(lw, lb, uw, ub)
+
 
 class BoundExpand(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
 
-    @Bound.save_io_shape
     def forward(self, x, y):
         y = y.clone()
         assert y.ndim == 1
@@ -518,18 +662,19 @@ class BoundExpand(Bound):
 
 
 class BoundSplit(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.axis = attr['axis']
         self.split = attr['split']
         self.use_default_ibp = True
 
-    @Bound.save_io_shape
     def forward(self, x):
+        if self.axis == -1:
+            self.axis = len(x.shape) - 1
         return torch.split(x, self.split, dim=self.axis)[self.output_index]
 
     def bound_backward(self, last_lA, last_uA, x):
-        assert (self.axis > 0)
+        assert self.axis > 0
         pre = sum(self.split[:self.output_index])
         suc = sum(self.split[(self.output_index + 1):])
 

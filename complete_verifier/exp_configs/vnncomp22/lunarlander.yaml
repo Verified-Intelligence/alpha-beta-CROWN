@@ -1,0 +1,24 @@
+# Configuration file for running the rl_benchmarks benchmark (lunarlander model).
+general:
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/rl_benchmarks
+  csv_name: instances.csv
+  enable_incomplete_verification: False
+  loss_reduction_func: max
+  conv_mode: matrix
+data:
+  dataset: Lunarlander
+  num_outputs: 4
+  start: 100
+  end: 200
+solver:
+  batch_size: 100  # Number of parallel domains to compute on GPU.
+  bound_prop_method: forward+backward
+  beta-crown:
+    iteration: 10  # Iterations for computing intermediate layer bounds.
+bab:
+  branching:
+    method: sb  # Split on input space.
+    input_split:
+      enable: True
+attack:
+  pgd_order: skip

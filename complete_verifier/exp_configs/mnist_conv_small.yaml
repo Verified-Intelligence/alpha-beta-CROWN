@@ -1,5 +1,3 @@
-general:
-  mode: verified-acc
 model:
   name: mnist_conv_small
   path: models/eran/mnist_conv_small_nat.pth
@@ -10,8 +8,8 @@ specification:
 attack:
   pgd_restarts: 100
 solver:
+  batch_size: 2048
   beta-crown:
-    batch_size: 2048
     iteration: 20
 bab:
   timeout: 180

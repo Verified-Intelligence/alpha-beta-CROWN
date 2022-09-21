@@ -1,0 +1,12 @@
+# Example of verifying a sinlge ONNX model with multiple VNNLIB specifications in a csv file (data are defined in VNNLIB).
+general:
+  root_path: exp_configs/tutorial_examples  # Root path of the csv file.
+  csv_name: cifar10_resnet2b_instances.csv  # Name of the csv file (ONLY one column listed paths to vnnlibs).
+model:
+  # Assuming you have cloned the vnncomp2021 repository: https://github.com/stanleybak/vnncomp2021
+  onnx_path: ../../vnncomp2021/benchmarks/cifar10_resnet/onnx/resnet_2b.onnx  # Path to ONNX model.
+  input_shape: [ -1, 3, 32, 32 ]  # The vnnlib does not have input shape information, user should specify here.
+solver:
+  batch_size: 2048  # Number of subdomains to compute in parallel in bound solver. Decrease if you run out of memory.
+bab:
+  timeout: 120  # Timeout threshold for branch and bound. Increase for verifying more points.

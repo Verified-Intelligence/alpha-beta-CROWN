@@ -1,8 +1,6 @@
 # Example for using customized model and data loader.
 # Model and data loader defined in custom_model_data.py
-# python robustness_verifier.py --config exp_configs/custom_model_data_example.yaml
-general:
-  mode: verified-acc
+# python abcrown.py --config exp_configs/tutorial_examples/custom_box_data_example.yaml
 model:
   # Use the two_relu_toy_model() model in "custom_model_data.py".
   name: Customized("custom_model_data", "two_relu_toy_model", in_dim=2, out_dim=2)
@@ -11,15 +9,12 @@ data:
   dataset: Customized("custom_model_data", "simple_box_data")
   num_outputs: 2
 specification:
-  # element-wise perturbation bound assignment
-  type: bound
+  epsilon: 1.
 attack:
   pgd_order: skip
 solver:
+  batch_size: 2048
   beta-crown:
-    batch_size: 2048
     iteration: 20
 bab:
   timeout: 30
-  branching:
-    method: fsb

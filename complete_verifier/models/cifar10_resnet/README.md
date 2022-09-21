@@ -15,15 +15,24 @@ develop better tools.
 
 - ResNet-2B with 2 residual blocks: 5 convolutional layers + 2 linear layers
 - ResNet-4B with 4 residual blocks: 9 convolutional layers + 2 linear layers
+- ResNet 18
 
-The models can be found in this. PyTorch model definitions are available
-[here](resnet.py). Networks are trained using adversarial training with L∞
-perturbation epsilon (2/255). We report basic model performance numbers below:
+ResNet-2B and ResNet-4B models can be found in this folder. PyTorch model
+definitions are available [here](resnet.py). Networks are trained using
+adversarial training with L∞ perturbation epsilon (2/255). We report basic
+model performance numbers below:
+
 
 | Model      | # ReLUs | Clean acc. |  PGD acc. <br> ε=2/255  |  PGD acc. <br> ε=1/255 | CROWN/DeepPoly <br> verified acc. <br> ε=2/255 | CROWN/DeepPoly <br> verified acc. <br> ε=1/255 |
 |------------|---------|------------|-----------------|----------------|-----------------------------------|-----------------------------------|
 | ResNet-2B  |   6244  |    69.25%  |      54.82%     |      62.24%    |   26.88%                          |   57.16%                          |
 | ResNet-4B  |  14436  |    77.20%  |      61.41%     |      69.75%    |    0.24%                          |   23.28%                          |
+
+ResNet 18 models can be downloaded here:
+
+```bash
+wget -O resnet18_natural_width2.pth http://download.huan-zhang.com/models/auto_lirpa/resnet18_natural.pth
+```
 
 **Data Format**: The input images should be normalized using mean and std
 computed from CIFAR-10 training set. The perturbation budget is element-wise,

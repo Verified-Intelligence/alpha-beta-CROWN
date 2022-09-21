@@ -1,0 +1,13 @@
+general:
+  root_path: ../../vnncomp2021/benchmarks/test  # Please update this path to point to the VNN-COMP 2021 repo
+  csv_name: test_instances.csv
+  conv_mode: matrix
+model:
+  onnx_loader: Customized("custom_model_loader", "customized_TEST_loader")
+  input_shape: [-1, 1]
+bab:
+  branching:
+    input_split:
+      enable: True
+attack:
+  pgd_order: skip

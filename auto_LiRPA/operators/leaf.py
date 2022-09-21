@@ -1,14 +1,17 @@
-""" Leaf nodes (indepedent nodes in the auto_LiRPA paper),
-including input, parameter, buffer, etc."""
+""" Leaf nodes (indepedent nodes in the auto_LiRPA paper).
+
+Including input, parameter, buffer, etc."""
 from .base import *
 
 
 class BoundInput(Bound):
-    def __init__(self, input_name, name, ori_name, value, perturbation=None):
-        super().__init__(input_name, name, ori_name)
+    def __init__(self, ori_name, value, perturbation=None, input_index=None):
+        super().__init__()
+        self.ori_name = ori_name
         self.value = value
         self.perturbation = perturbation
         self.from_input = True
+        self.input_index = input_index
 
     def __setattr__(self, key, value):
         super().__setattr__(key, value)
@@ -103,7 +106,7 @@ class BoundInput(Bound):
             prefix (str): the prefix for parameters and buffers used in this
                 module
         """
-        for name, param in self._parameters.items():
+        for param in self._parameters.values():
             if param is not None:
                 if len(prefix.split('.')) == 2:
                     destination[self.ori_name] = param if keep_vars else param.detach()
@@ -111,7 +114,7 @@ class BoundInput(Bound):
                     # change parameters' name to self.ori_name when calling state_dict()
                     destination[
                         '.'.join(prefix.split('.')[:-2]) + '.' + self.ori_name] = param if keep_vars else param.detach()
-        for name, buf in self._buffers.items():
+        for buf in self._buffers.values():
             if buf is not None:
                 if len(prefix.split('.')) == 2:
                     destination[self.ori_name] = buf if keep_vars else buf.detach()
@@ -120,7 +123,6 @@ class BoundInput(Bound):
                     destination[
                         '.'.join(prefix.split('.')[:-2]) + '.' + self.ori_name] = buf if keep_vars else buf.detach()
 
-    @Bound.save_io_shape
     def forward(self):
         return self.value
 
@@ -144,17 +146,15 @@ class BoundInput(Bound):
 
 
 class BoundParams(BoundInput):
-    def __init__(self, input_name, name, ori_name, value, perturbation=None):
-        super().__init__(input_name, name, ori_name, None, perturbation)
+    def __init__(self, ori_name, value, perturbation=None):
+        super().__init__(ori_name, None, perturbation)
         self.register_parameter('param', value)
         self.from_input = False
         self.initializing = False
 
-    """Override register_parameter() hook to register only needed parameters."""
-
     def register_parameter(self, name, param):
+        """Override register_parameter() hook to register only needed parameters."""
         if name == 'param':
-            # self._parameters[name] = param  # cannot contain '.' in name, it will cause error when loading state_dict
             return super().register_parameter(name, param)
         else:
             # Just register it as a normal property of class.
@@ -163,22 +163,20 @@ class BoundParams(BoundInput):
     def init(self, initializing=False):
         self.initializing = initializing
 
-    @Bound.save_io_shape
     def forward(self):
         if self.initializing:
-            return self.param_init
+            return self.param_init.requires_grad_(self.training)
         else:
-            return self.param
+            return self.param.requires_grad_(self.training)
 
     def infer_batch_dim(self, batch_size, *x):
         return -1
 
 
 class BoundBuffers(BoundInput):
-    def __init__(self, input_name, name, ori_name, value, perturbation=None):
-        super().__init__(input_name, name, ori_name, None, perturbation)
+    def __init__(self, ori_name, value, perturbation=None):
+        super().__init__(ori_name, None, perturbation)
         self.register_buffer('buffer', value.clone().detach())
 
-    @Bound.save_io_shape
     def forward(self):
         return self.buffer

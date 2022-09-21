@@ -1,0 +1,36 @@
+# Configuration file for running the carvana_unet_2022 benchmark (unet_simp model).
+general:
+#  root_path: ../../vnncomp2022_benchmarks/benchmarks/carvana_unet_2022
+#  csv_name: instances.csv
+  root_path: ../../vnncomp2022-all/vnn-comp-2022-Carvana-unet
+  csv_name: Carvana-unet_instances.csv
+  enable_incomplete_verification: False
+model:
+  # Use the function customized_Carvana_loader() in custom_model_loader.py to load this model.
+  onnx_loader: Customized("custom_model_loader", "customized_Carvana_loader")
+data:
+  dataset: Carvana
+  num_outputs: 1
+#  start: 15
+#  end: 19  # the files in .csv are out of order. these are a small chunk of them
+  start: 0
+  end: 80
+solver:
+  batch_size: 100  # Number of parallel domains to compute on GPU.
+  alpha-crown:
+    full_conv_alpha: False
+    iteration: 50
+    lr_alpha: 0.1
+  beta-crown:
+    iteration: 20  # Iterations for computing intermediate layer bounds.
+    lr_alpha: 0.01
+    lr_beta: 0.01
+bab:
+  initial_max_domains: 1
+  decision_thresh: 1314
+  branching:
+    reduceop: max
+    candidates: 10
+#  optimized_intermediate_layers: /37  # onnx node name.
+attack:
+  pgd_order: skip

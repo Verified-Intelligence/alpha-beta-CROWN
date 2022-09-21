@@ -1,5 +1,4 @@
 general:
-  mode: verified-acc
   complete_verifier: bab-refine
 model:
   name: mnist_6_100
@@ -13,8 +12,8 @@ specification:
 attack:
   pgd_order: after
 solver:
+  batch_size: 1024
   beta-crown:
-    batch_size: 1024
     iteration: 20
   mip:
     parallel_solvers: 16

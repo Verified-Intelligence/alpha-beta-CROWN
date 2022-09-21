@@ -1,23 +1,25 @@
 """ Normalization operators"""
 from .base import *
+from .solver_utils import grb
 
 class BoundBatchNormalization(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device, training):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options, training):
+        super().__init__(attr, inputs, output_index, options)
         self.eps = attr['epsilon']
         self.momentum = round(1 - attr['momentum'], 5)  # take care!
-        self.mode = options.get("conv_mode", "matrix")
         self.options = options.get("bn", {})
         # modes:
         #   - forward: use mean and variance estimated from clean forward pass
         #   - ibp: use mean and variance estimated from ibp
-        self.bn_mode = self.options.get("mode", "forward") 
+        self.bn_mode = self.options.get("mode", "forward")
         self.use_mean = self.options.get("mean", True)
         self.use_var = self.options.get("var", True)
         self.use_affine = self.options.get("affine", True)
         self.training = training
+        self.patches_start = True
+        self.mode = options.get("conv_mode", "matrix")
         if not self.use_mean or not self.use_var:
-            logger.info(f'Batch normalization node {self.name}: use_mean {self.use_mean}, use_var {self.use_var}')        
+            logger.info(f'Batch normalization node {self.name}: use_mean {self.use_mean}, use_var {self.use_var}')
 
     def _check_unused_mean_or_var(self):
         # Check if either mean or var is opted out
@@ -26,8 +28,9 @@ class BoundBatchNormalization(Bound):
         if not self.use_var:
             self.current_var = torch.ones_like(self.current_var)
 
-    @Bound.save_io_shape
     def forward(self, x, w, b, m, v):
+        if len(x.shape) == 2:
+            self.patches_start = False
         if self.training:
             dim = [0] + list(range(2, x.ndim))
             self.current_mean = x.mean(dim)
@@ -35,10 +38,10 @@ class BoundBatchNormalization(Bound):
         else:
             self.current_mean = m.data
             self.current_var = v.data
-        self._check_unused_mean_or_var() 
+        self._check_unused_mean_or_var()
         if not self.use_affine:
             w = torch.ones_like(w)
-            b = torch.zeros_like(b)                     
+            b = torch.zeros_like(b)
         result = F.batch_norm(x, m, v, w, b, self.training, self.momentum, self.eps)
         if not self.use_mean or not self.use_var:
             # If mean or variance is disabled, recompute the output from self.current_mean
@@ -61,15 +64,15 @@ class BoundBatchNormalization(Bound):
         self._check_unused_mean_or_var()
         if not self.use_affine:
             weight = torch.ones_like(weight)
-            bias = torch.zeros_like(bias)                     
-        
+            bias = torch.zeros_like(bias)
+
         tmp_bias = bias - self.current_mean / torch.sqrt(self.current_var + self.eps) * weight
         tmp_weight = weight / torch.sqrt(self.current_var + self.eps)
 
         def _bound_oneside(last_A):
             if last_A is None:
                 return None, 0
-            if type(last_A) == torch.Tensor:
+            if type(last_A) == Tensor:
                 next_A = last_A * tmp_weight.view(*((1, 1, -1) + (1,) * (last_A.ndim - 3)))
                 if last_A.ndim > 3:
                     sum_bias = (last_A.sum(tuple(range(3, last_A.ndim))) * tmp_bias).sum(2)
@@ -85,11 +88,12 @@ class BoundBatchNormalization(Bound):
                     # tmp_weight has shape (c,), it will be applied on the (c,) dimension.
                     patches = patches * tmp_weight.view(*([1] * (patches.ndim - 3)), -1, 1, 1)  # Match with sparse or non-sparse patches.
                     next_A = Patches(patches, last_A.stride, last_A.padding, last_A.shape, identity=0, unstable_idx=last_A.unstable_idx, output_shape=last_A.output_shape)
-                    
+
                     # bias to size (c,), need expansion before unfold.
                     bias = tmp_bias.view(-1,1,1).expand(self.input_shape[1:]).unsqueeze(0)
                     # Unfolded bias has shape (1, out_h, out_w, in_c, H, W).
-                    bias_unfolded = inplace_unfold(bias, kernel_size=last_A.patches.shape[-2:], padding=last_A.padding, stride=last_A.stride)
+                    bias_unfolded = inplace_unfold(bias, kernel_size=last_A.patches.shape[-2:], padding=last_A.padding, stride=last_A.stride,
+                            inserted_zeros=last_A.inserted_zeros, output_padding=last_A.output_padding)
                     if last_A.unstable_idx is not None:
                         # Sparse bias has shape (unstable_size, batch, in_c, H, W).
                         bias_unfolded = bias_unfolded[:, last_A.unstable_idx[1], last_A.unstable_idx[2]]
@@ -130,6 +134,7 @@ class BoundBatchNormalization(Bound):
 
         return [(lA, uA), (None, None), (None, None), (None, None), (None, None)], lbias, ubias
 
+
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(1) and not self.is_input_perturbed(2), \
             'Weight perturbation is not supported for BoundBatchNormalization'
@@ -153,17 +158,75 @@ class BoundBatchNormalization(Bound):
         self._check_unused_mean_or_var()
         if not self.use_affine:
             weight = torch.ones_like(weight)
-            bias = torch.zeros_like(bias)                     
+            bias = torch.zeros_like(bias)
 
         tmp_weight = weight / torch.sqrt(self.current_var + self.eps)
         tmp_weight_abs = tmp_weight.abs()
         tmp_bias = bias - self.current_mean * tmp_weight
-
         shape = (1, -1) + (1,) * (mid.ndim - 2)
-        center = tmp_weight.view(*shape) * mid + tmp_bias.view(*shape)
-        deviation = tmp_weight_abs.view(*shape) * diff
-        lower = center - deviation
-        upper = center + deviation
+
+        # interval_propagate() of the Linear layer may encounter input with different norms.
+        norm, eps = Interval.get_perturbation(v[0])[:2]
+        if norm == np.inf:
+            center = tmp_weight.view(*shape) * mid + tmp_bias.view(*shape)
+            deviation = tmp_weight_abs.view(*shape) * diff
+        elif norm > 0:
+            mid = v[0][0]
+            center = tmp_weight.view(*shape) * mid + tmp_bias.view(*shape)
+            if norm == 2:
+                ptb = copy.deepcopy(v[0].ptb)
+                ptb.eps = eps * tmp_weight_abs.max()
+                return Interval(center, center, ptb=ptb)
+            else:
+                # General Lp norm.
+                center = tmp_weight.view(*shape) * mid
+                deviation = tmp_weight_abs.view(*shape) * eps  # use a Linf ball to replace Lp norm
+        else:
+            raise NotImplementedError
+
+        lower, upper = center - deviation, center + deviation
 
         return lower, upper
 
+    def build_solver(self, *v, model, C=None, model_type="mip", solver_pkg="gurobi"):
+        # e.g., last layer input gurobi vars (3,32,32)
+        gvars_array = np.array(v[0])
+        # pre_layer_shape (1,3,32,32)
+        pre_layer_shape = np.expand_dims(gvars_array, axis=0).shape
+        # this layer shape (1,8,16,16)
+        this_layer_shape = self.output_shape
+
+        weight, bias = v[1], v[2]
+
+        self.current_mean = v[3]
+        self.current_var = v[4]
+        self._check_unused_mean_or_var()
+        if not self.use_affine:
+            weight = torch.ones_like(weight)
+            bias = torch.zeros_like(bias)
+
+        tmp_bias = bias - self.current_mean / torch.sqrt(self.current_var + self.eps) * weight
+        tmp_weight = weight / torch.sqrt(self.current_var + self.eps)
+
+        new_layer_gurobi_vars = []
+        neuron_idx = 0
+        for out_chan_idx in range(this_layer_shape[1]):
+            out_chan_vars = []
+            for out_row_idx in range(this_layer_shape[2]):
+                out_row_vars = []
+                for out_col_idx in range(this_layer_shape[3]):
+                    # print(this_layer_bias.shape, out_chan_idx, out_lbs.size(1))
+                    lin_expr = tmp_bias[out_chan_idx].item() + tmp_weight[out_chan_idx].item() * gvars_array[out_chan_idx, out_row_idx, out_col_idx]
+                    var = model.addVar(lb=-float('inf'), ub=float('inf'),
+                                            obj=0, vtype=grb.GRB.CONTINUOUS,
+                                            name=f'lay{self.name}_{neuron_idx}')
+                    model.addConstr(lin_expr == var, name=f'lay{self.name}_{neuron_idx}_eq')
+                    neuron_idx += 1
+
+                    out_row_vars.append(var)
+                out_chan_vars.append(out_row_vars)
+            new_layer_gurobi_vars.append(out_chan_vars)
+
+        self.solver_vars = new_layer_gurobi_vars
+        # self.solver_constrs = new_layer_gurobi_constrs
+        model.update()

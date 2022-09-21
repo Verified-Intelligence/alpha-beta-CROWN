@@ -1,12 +1,11 @@
 #!/bin/bash
 
-# Installation script used for VNN-COMP. The tool is only compatible with the AWS Deep Learning AMI (Ubuntu 18.04) Version 46.0.
-# For installation on a generic system, please use "install_tool_generic.sh" instead.
+# Installation script used for VNN-COMP. The tool is only compatible with Ubuntu 22.04.
 
 TOOL_NAME=alpha-beta-CROWN
 VERSION_STRING=v1
 if [[ -z "${VNNCOMP_PYTHON_PATH}" ]]; then
-	VNNCOMP_PYTHON_PATH=/home/ubuntu/anaconda3/envs/alpha-beta-crown/bin
+	VNNCOMP_PYTHON_PATH=/home/ubuntu/miniconda/envs/alpha-beta-crown/bin
 fi
 
 # check arguments
@@ -18,64 +17,56 @@ fi
 echo "Installing $TOOL_NAME"
 TOOL_DIR=$(dirname $(dirname $(realpath $0)))
 
-echo "Checking system requirements..."
-# Check System version.
-if [ -f '/etc/update-motd.d/00-header' ]; then
-    if ! grep 'Deep Learning AMI (Ubuntu 18.04) Version 46.0' /etc/update-motd.d/00-header >/dev/null; then
-        echo "Unsupported OS! Deep Learning AMI (Ubuntu 18.04) Version 46.0 required."
-        exit 1
-    fi
-else
-    echo "Unsupported OS! We require Deep Learning AMI (Ubuntu 18.04) Version 46.0"
-    echo "Please make sure you choose the right image and version when creating the instance."
-    exit 1
-fi
-# Check PyTorch version.
+export DEBIAN_FRONTEND=noninteractive
+sudo -E DEBIAN_FRONTEND=noninteractive apt purge -y snapd unattended-upgrades
+sudo killall -9 unattended-upgrade-shutdown
+sudo -E DEBIAN_FRONTEND=noninteractive apt update
+sudo -E DEBIAN_FRONTEND=noninteractive apt upgrade -y
+sudo -E DEBIAN_FRONTEND=noninteractive apt install -y sudo vim-gtk curl wget git cmake tmux aria2 build-essential netcat expect dkms aria2
+
+grep AMD /proc/cpuinfo > /dev/null && echo "export MKL_DEBUG_CPU_TYPE=5" >> ${HOME}/.profile
+echo "export OMP_NUM_THREADS=1" >> ${HOME}/.profile
+
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+sh miniconda.sh -b -p ${HOME}/miniconda
+echo 'export PATH=${PATH}:'${HOME}'/miniconda/bin' >> ~/.profile
+echo "alias py37=\"source activate alpha-beta-crown\"" >> ${HOME}/.profile
+export PATH=${PATH}:$HOME/miniconda/bin
+
+# Install NVIDIA driver
+aria2c -x 10 -s 10 -k 1M "https://us.download.nvidia.com/tesla/515.48.07/NVIDIA-Linux-x86_64-515.48.07.run"
+sudo nvidia-smi -pm 0
+chmod +x ./NVIDIA-Linux-x86_64-515.48.07.run
+sudo ./NVIDIA-Linux-x86_64-515.48.07.run --silent --dkms
+# Remove old driver (if already installed) and reload the new one.
+sudo rmmod nvidia_uvm; sudo rmmod nvidia_drm; sudo rmmod nvidia_modeset; sudo rmmod nvidia
+sudo modprobe nvidia; sudo nvidia-smi -e 0; sudo nvidia-smi -r -i 0
+sudo nvidia-smi -pm 1
+# Make sure GPU shows up.
+nvidia-smi
+
+# Install conda environment
+${HOME}/miniconda/bin/conda env create --name alpha-beta-crown -f ${TOOL_DIR}/complete_verifier/environment.yml
+${VNNCOMP_PYTHON_PATH}/pip install -U --no-deps git+https://github.com/dlshriver/DNNV.git@4d4b124bd739b4ddc8c68fed1af3f85b90386155#egg=dnnv
+
+# Install CPLEX
+aria2c -x 10 -s 10 -k 1M "http://d.huan-zhang.com/storage/programs/cplex_studio2210.linux_x86_64.bin"
+chmod +x cplex_studio2210.linux_x86_64.bin
+cat > response.txt <<EOF
+INSTALLER_UI=silent
+LICENSE_ACCEPTED=true
+EOF
+sudo ./cplex_studio2210.linux_x86_64.bin -f response.txt
+
+# Build CPLEX interface
+make -C ${TOOL_DIR}/complete_verifier/CPLEX_cuts/
+
 echo "Checking python requirements (it might take a while...)"
-if [ "$(${VNNCOMP_PYTHON_PATH}/python -c 'import torch; print(torch.__version__)')" != '1.8.1+cu111' ]; then
-    echo "Unsupported PyTorch version - we expect to run on Amazon Deep Learning AMI 46.0"
+if [ "$(${VNNCOMP_PYTHON_PATH}/python -c 'import torch; print(torch.__version__)')" != '1.11.0' ]; then
+    echo "Unsupported PyTorch version"
     echo "Installation Failure!"
     exit 1
 fi
 
-# Turnoff useless programs.
-sudo snap remove amazon-ssm-agent
-sudo systemctl stop unattended-upgrades.service docker.service containerd.service snapd.service
-sudo systemctl disable unattended-upgrades.service docker.service containerd.service docker.socket snapd.service snapd.socket
-
-# Install requirements.
-cat << 'EOF' > ${HOME}/vnncomp_requirements.txt
-numpy>=1.16
-packaging>=20.0
-pytest>=5.0
-appdirs>=1.4
-oslo.concurrency>=4.2
-tqdm>=4.6
-sortedcontainers>=2.4
-onnx==1.9.0
-onnxruntime==1.8.0
-git+https://github.com/Sarimuko/onnx2pytorch@master#egg=onnx2pytorch
-EOF
-${VNNCOMP_PYTHON_PATH}/python -m pip install -r ${HOME}/vnncomp_requirements.txt
-# Install our auto_LiRPA library.
-cd ${TOOL_DIR}
-${VNNCOMP_PYTHON_PATH}/python setup.py develop
-
-echo "Checking if installation works by runnning a tiny network..."
-temp_file=$(mktemp)
-${VNNCOMP_PYTHON_PATH}/python3 ${TOOL_DIR}/src/bab_verification_general.py --data TEST --onnx_path ${TOOL_DIR}/src/tests/test_tiny.onnx --vnnlib_path ${TOOL_DIR}/src/tests/test_tiny.vnnlib --results_file ${temp_file} --timeout 300.0 --pgd_order skip
-rm $temp_file
-
-
-# Install Gurobi.
-echo "Installing Gurobi. It might take a while..."
-conda install -c gurobi -n pytorch_latest_p37 -y gurobi
-# Make sure basic pytorch runs.
-echo "Checking if pytorch works... (returns 1.0 == works, it might take a while...)"
-${VNNCOMP_PYTHON_PATH}/python -c 'import torch; a=torch.ones(1, device="cuda"); print(a.item())'
-
-# Activate Gurobi with academic license.
-echo "Please enter Gurobi licence:"
-read gurobi_key
-${VNNCOMP_PYTHON_PATH}/grbgetkey --path ${HOME} -q ${gurobi_key}
-
+# Run grbprobe for activating gurobi later.
+${VNNCOMP_PYTHON_PATH}/grbprobe

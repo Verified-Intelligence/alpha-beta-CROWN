@@ -1,218 +1,562 @@
 #########################################################################
-##         This file is part of the alpha-beta-CROWN verifier          ##
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021, Huan Zhang <huan@huan-zhang.com>                ##
-##                     Kaidi Xu <xu.kaid@northeastern.edu>             ##
-##                     Shiqi Wang <sw3215@columbia.edu>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Yihan Wang <yihanwang@ucla.edu>                 ##
+## Copyright (C) 2021-2022, Huan Zhang <huan@huan-zhang.com>           ##
+##                     Kaidi Xu, Zhouxing Shi, Shiqi Wang              ##
+##                     Linyi Li, Jinqi (Kathryn) Chen                  ##
+##                     Zhuolin Yang, Yihan Wang                        ##
+##                                                                     ##
+##      See CONTRIBUTORS for author contacts and affiliations.         ##
 ##                                                                     ##
 ##     This program is licenced under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
+"""Branch and bound for input space split."""
+
 import time
 import numpy as np
 import torch
-from collections import defaultdict
-from sortedcontainers import SortedList
+import math
 
-from branching_domains_input_split import pick_out_batch, add_domain_parallel, InputDomain, input_split_batch
-from attack_pgd import AdamClipping
+import arguments
+from auto_LiRPA.utils import stop_criterion_batch
+from branching_domains_input_split import (
+    UnsortedInputDomainList,
+    SortedInputDomainList,
+)
 
-Visited, Solve_slope = 0, False
+from branching_heuristics import input_split_parallel, input_split_branching, get_split_depth
+from attack_pgd import pgd_attack_with_general_specs, test_conditions, gen_adv_example
+
+Visited, Solve_slope, storage_depth = 0, False, 0
 
 
-def batch_verification(d, net, batch,  decision_thresh=0, lr_alpha=0.01, iteration=10, prop_mat=None, prop_rhs=None,
-                       shape=None, branching_candidates=3, branching_method=None):
-
-    relu_start = time.time()
+def batch_verification_input_split(
+    d,
+    net,
+    batch,
+    decision_thresh,
+    shape=None,
+    bounding_method="crown",
+    branching_method="sb",
+    stop_func=stop_criterion_batch,
+):
+    split_start_time = time.time()
     global Visited
 
-    # prev_bounds = [dom.lower_bound for dom in d]
-    slopes, dm_l_all, dm_u_all, selected_domains, selected_dims = pick_out_batch(d, decision_thresh, batch, device=net.x.device)
-    # print('pick out time:', time.time()-relu_start)
-    if dm_l_all is not None:
-        time0 = time.time()
+    # STEP 1: find the neuron to split and create new split domains.
+    pickout_start_time = time.time()
+    ret = d.pick_out_batch(batch, device=net.x.device)
+    dom_ub = dom_lb = None
+    pickout_time = time.time() - pickout_start_time
 
-        new_dm_l_all, new_dm_u_all = input_split_batch(net, dm_l_all, dm_u_all, slopes, shape=shape,
-                                                       selected_dims=selected_dims, branching_method=branching_method)
+    # STEP 2: find the neuron to split and create new split domains.
+    decision_start_time = time.time()
+    slopes, dm_l_all, dm_u_all, cs, thresholds, split_idx = ret
 
-        print('decision time:', time.time()-time0)
+    split_depth = get_split_depth(dm_l_all)
+    new_dm_l_all, new_dm_u_all, cs, thresholds, split_depth = input_split_parallel(
+        dm_l_all, dm_u_all, shape, cs, thresholds, split_depth=split_depth, i_idx=split_idx)
 
-        ret = net.get_lower_bound_naive(dm_l=new_dm_l_all, dm_u=new_dm_u_all, slopes=slopes, branching_candidates=branching_candidates,
-                                        shortcut=False, lr_alpha=lr_alpha, iteration=iteration)
+    slopes = slopes * (2 ** (split_depth - 1))
 
-        dom_ub, dom_lb, slopes, selected_dims = ret
-        # print('dom_lb parallel: ',  dom_lb)
+    decision_time = time.time() - decision_start_time
 
-        # For debugging bounds.
-        """
-        batch_size = min(len(prev_bounds), batch)
-        for i in range(batch_size):
-            prev_lb = prev_bounds[i]
-            if prev_lb > dom_lb[i].item():
-                print(f'prev={prev_lb} new_1={dom_lb[i]} l={new_dm_l_all[i].cpu().numpy()} u={new_dm_u_all[i].cpu().numpy()} old_l={dm_l_all[i].cpu().numpy()} old_u={dm_u_all[i].cpu().numpy()}')
-            if prev_lb > dom_lb[i+batch_size].item():
-                print(f'prev={prev_lb} new_2={dom_lb[i+batch_size]} l={new_dm_l_all[i+batch_size].cpu().numpy()} u={new_dm_u_all[i+batch_size].cpu().numpy()} old_l={dm_l_all[i].cpu().numpy()} old_u={dm_u_all[i].cpu().numpy()}')
-        """
+    # STEP 3: Compute bounds for all domains.
+    bounding_start_time = time.time()
+    ret = net.get_lower_bound_naive(
+        dm_l=new_dm_l_all, dm_u=new_dm_u_all, slopes=slopes,
+        bounding_method=bounding_method, C=cs,
+        stop_criterion_func=stop_func(thresholds),
+    )
+    # here slopes is a dict
+    dom_lb, dom_ub, slopes, lA = ret
+    bounding_time = time.time() - bounding_start_time
+    decision_time -= time.time()
 
-        time1 = time.time()
+    split_idx = input_split_branching(net, dom_lb, new_dm_l_all, new_dm_u_all, lA, thresholds, branching_method, None, shape, slopes, storage_depth)
+    decision_time += time.time()
+    # STEP 4: Add new domains back to domain list.
+    adddomain_start_time = time.time()
+    d.add(
+        dom_lb,
+        new_dm_l_all.detach(),
+        new_dm_u_all.detach(),
+        slopes,
+        cs,
+        thresholds,
+        split_idx,
+    )
+    adddomain_time = time.time() - adddomain_start_time
 
-        add_domain_parallel(d, dom_lb, dom_ub, new_dm_l_all.detach(), new_dm_u_all.detach(), selected_domains, slopes,
-                            selected_dims=selected_dims, decision_thresh=decision_thresh)
-        Visited += len(selected_domains) * 2  # one unstable neuron split to two nodes
+    total_time = time.time() - split_start_time
+    print(
+        f"Total time: {total_time:.4f}  pickout: {pickout_time:.4f}  decision: {decision_time:.4f}  bounding: {bounding_time:.4f}  add_domain: {adddomain_time:.4f}"
+    )
+    print("length of domains:", len(d))
 
-    relu_end = time.time()
-    print('insert to domain / total batch time: {:4f}/{:4f}'.format(relu_end - time1, relu_end - relu_start))
-    print('length of domains:', len(d))
-
-    if len(d) > 0:
-        global_lb = d[0].lower_bound
-    else:
+    if len(d) == 0:
         print("No domains left, verification finished!")
-        return torch.tensor(decision_thresh + 1e-7)
+        if dom_lb is not None:
+            print(f"The lower bound of last batch is {dom_lb.min().item()}")
+        return decision_thresh.max() + 1e-7
+    else:
+        worst_idx = d.get_topk_indices().item()
+        worst_val = d[worst_idx]
+        global_lb = worst_val[0] - worst_val[-1]
 
-    print(f"Current lb:{global_lb.item()}")
-
-    print('{} neurons visited\n'.format(Visited))
+    Visited += len(new_dm_l_all)
+    print(f"Current (lb-rhs): {global_lb.max().item()}")
+    print("{} branch and bound domains visited\n".format(Visited))
 
     return global_lb
 
 
-def relu_bab_parallel(net, domain, x, batch=64, decision_thresh=0, iteration=20, max_subproblems_list=100000,
-                      timeout=3600, record=False, lr_alpha=0.1, lr_init_alpha=0.5, model_ori=None, shape=None,
-                      share_slopes=False, adv_check=0, prop_mat=None, prop_rhs=None,
-                      branching_candidates=3, branching_method=None, all_prop=None):
+def input_bab_parallel(
+    net,
+    init_domain,
+    x,
+    model_ori=None,
+    all_prop=None,
+    rhs=None,
+    timeout=None,
+    branching_method="naive",
+):
+    global storage_depth
+
+    # the crown_lower/upper_bounds are dummy arguments here --- similar to refined_lower/upper_bounds, they are not used
+    """ run input split bab """
+    prop_mat_ori = net.c[0]
+
     start = time.time()
-    prop_mat = torch.tensor(prop_mat, dtype=torch.float, device=x.device)
-    prop_rhs = torch.tensor(prop_rhs, dtype=torch.float, device=x.device)
+    # All supported arguments.
+    global Visited, Flag_first_split, all_node_split, DFS_enabled
 
-    global Visited, Solve_slope
-    Visited, Solve_slope = 0, False
+    timeout = timeout or arguments.Config["bab"]["timeout"]
+    batch = arguments.Config["solver"]["batch_size"]
+    record = arguments.Config["general"]["record_bounds"]
+    bounding_method = arguments.Config["solver"]["bound_prop_method"]
+    adv_check = arguments.Config['bab']['branching']['input_split']['adv_check']
 
-    global_ub, global_lb, _,  lower_bounds, upper_bounds, pre_relu_indices, slope, dm_l, dm_u, selected_dims = net.build_the_model(
-    domain, x, decision_thresh, lr_init_alpha, share_slopes=share_slopes, shape=shape,
-    input_grad=branching_method=='input_grad')
+    stop_func = stop_criterion_batch
 
-    # if not opt_intermediate_beta:
-    #     # If we are not optimizing intermediate layer bounds, we do not need to save all the intermediate alpha.
-    #     # We only keep the alpha for the last layer.
-    #     new_slope = defaultdict(dict)
-    #     output_layer_name = net.net.final_name
-    #     for relu_layer, alphas in slope.items():
-    #         new_slope[relu_layer][output_layer_name] = alphas[output_layer_name]
-    #     slope = new_slope
+    Visited, Flag_first_split, global_ub = 0, True, np.inf
 
-    print(global_lb)
-    if len(global_lb.flatten()) > 1:
-        if global_lb.max() > decision_thresh:
-            return global_lb.max(), None, [[time.time() - start, global_lb.max().item()]], 0
-        else:
-            global_lb = global_lb.max()
+    (
+        global_ub,
+        global_lb,
+        _,
+        _,
+        primals,
+        updated_mask,
+        lA,
+        lower_bounds,
+        upper_bounds,
+        pre_relu_indices,
+        slope,
+        history,
+        attack_image,
+    ) = net.build_the_model(
+        init_domain,
+        x,
+        stop_criterion_func=stop_func(rhs),
+        bounding_method=bounding_method,
+    )
+    if hasattr(net.net[net.net.input_name[0]], 'lA'):
+        lA = net.net[net.net.input_name[0]].lA.transpose(0, 1)
     else:
-        if global_lb > decision_thresh:
-            return global_lb, None, [[time.time()-start, global_lb.item()]], 0
+        raise ValueError("sb heuristic cannot be used without lA.")
+    dm_l = x.ptb.x_L
+    dm_u = x.ptb.x_U
+    split_depth = get_split_depth(dm_l)
 
-    # This is the first (initial) domain.
-    candidate_domain = InputDomain(global_lb, global_ub, slope=slope, dm_l=dm_l, dm_u=dm_u, selected_dims=selected_dims)
-    domains = SortedList()
-    domains.add(candidate_domain)
+    # compute storage depth
+    use_slope = arguments.Config["solver"]["bound_prop_method"] == "alpha-crown"
+    min_batch_size = (
+        arguments.Config["solver"]["min_batch_size_ratio"]
+        * arguments.Config["solver"]["batch_size"]
+    )
+    max_depth = max(int(math.log(max(min_batch_size, 1)) // math.log(2)), 1)
+    storage_depth = min(max_depth, dm_l.shape[-1])
 
-    glb_record = [[time.time()-start, global_lb.item()]]
+    # compute initial split idx
+    split_idx = input_split_branching(net, global_lb, dm_l, dm_u, lA, rhs, branching_method, None, None, None, storage_depth)
+
+    initial_verified, remaining_index = initial_verify_criterion(global_lb, rhs)
+    if initial_verified:
+        return (
+            global_lb.max(),
+            None,
+            [[time.time() - start, global_lb.max().item()]],
+            0,
+            "safe",
+        )
+
+    if arguments.Config["bab"]["batched_domain_list"]:
+        domains = UnsortedInputDomainList(storage_depth, use_slope=use_slope)
+    else:
+        domains = SortedInputDomainList()
+
+    domains.add(
+        global_lb,
+        dm_l.detach(),
+        dm_u.detach(),
+        slope,
+        net.c,
+        rhs,
+        split_idx,
+        remaining_index,
+    )
+
+    glb_record = [[time.time() - start, (global_lb - rhs).max().item()]]
+
+    if arguments.Config["attack"]["pgd_order"] == "after":
+        ## pack the domain list
+        lbs, ubs, Cs, rhs = [], [], [], []
+        for idx in range(len(domains)):
+            val = domains[idx]
+            lbs.append(val[1][None, ...])
+            ubs.append(val[2][None, ...])
+            Cs.append(val[3][None, ...])
+            rhs.append(val[4][None, ...])
+
+        lbs = torch.cat(lbs, dim=0)
+        # [num_or_spec, input_shape]
+        ubs = torch.cat(ubs, dim=0)
+        # [num_or_spec, input_shape]
+        Cs = torch.cat(Cs, dim=0)
+        # [num_or_spec, num_and_spec, output_dim]
+        rhs = torch.cat(rhs, dim=0)
+        # [num_or_spec, num_and_spec]
+
+        cond_mat = [[Cs.shape[1] for i in range(Cs.shape[0])]]
+        Cs = Cs.view(1, -1, Cs.shape[-1])
+        # [num_example, num_spec, num_output]
+        rhs = rhs.view(1, -1)
+        # [num_example, num_spec]
+        lbs = lbs.unsqueeze(0)
+        ubs = ubs.unsqueeze(0)
+        # [num_example, num_or_spec, input_shape]
+
+        if arguments.Config["attack"]["input_split"]["pgd_alpha"] == "auto":
+            alpha = (ubs - lbs).max() / 4
+        else:
+            alpha = float(arguments.Config["attack"]["input_split"]["pgd_alpha"])
+        # pack the domains as a large spec matrix
+
+        num_restarts = arguments.Config["attack"]["input_split"]["pgd_restarts"]
+        num_steps = arguments.Config["attack"]["input_split"]["pgd_steps"]
+
+        device = x.device
+        lbs = lbs.to(device)
+        ubs = ubs.to(device)
+        rhs = rhs.to(device)
+        Cs = Cs.to(device)
+
+        attack_x = ((lbs + ubs)/2).squeeze(0)
+
+        best_deltas, _ = pgd_attack_with_general_specs(model_ori, attack_x, lbs, ubs, Cs, rhs, cond_mat, same_number_const=True, alpha=alpha, set_pgd_steps=num_steps, set_num_restarts=num_restarts)
+        attack_image, attack_output, _ = gen_adv_example(model_ori, attack_x, best_deltas, ubs, lbs, Cs, rhs, cond_mat)
+
+        if test_conditions(attack_image.unsqueeze(1), attack_output.unsqueeze(1), Cs, rhs, cond_mat, True, ubs, lbs).all():
+            print("pgd attack succeed in input_bab_parallel")
+            return global_lb.max(), np.inf, glb_record, Visited, "unsafe"
+
+    num_iter = 1
+    sort_domain_iter = arguments.Config["bab"]["branching"]["input_split"]["sort_domain_interval"]
+    enhanced_bound_initialized = False
     while len(domains) > 0:
-        last_glb = global_lb
+        # sort the domains every certain number of iterations
+        if (isinstance(domains, UnsortedInputDomainList) and
+                sort_domain_iter > 0 and num_iter % sort_domain_iter == 0):
+            sort_start_time = time.time()
+            domains.sort()
+            sort_time = time.time() - sort_start_time
+            print(f"Sorting domains used {sort_time:.4f}s\n")
+
+        last_glb = global_lb.max()
 
         if Visited > adv_check:
-            # adv_time = time.time()
+            adv_check_start_time = time.time()
             # check whether adv example found
-            # adv_example = torch.cat([domains[0].dm_l, domains[0].dm_u, domains[-1].dm_l, domains[-1].dm_u])
-            adv_example = torch.cat([torch.cat([domains[i].dm_l, domains[i].dm_u]) for i in range(min(10, len(domains)))])
-            adv_example = torch.cat([adv_example, domains[-1].dm_l, domains[-1].dm_u])
-            ret = model_ori(adv_example).detach()  # .cpu().numpy()
-            vec = prop_mat.matmul(ret.t())
-            sat = torch.all(vec <= prop_rhs.reshape(-1, 1), dim=0)
-            # print(vec.shape, sat.shape)
-            if (sat==True).any():
-                idx = torch.where(sat==True)[0][0]
-                adv_example = adv_example[idx]
-                print('adversarial example found!', ret[idx].cpu().numpy())
-                del domains
-                return global_lb, adv_example, glb_record, Visited
+            ub, ret_adv = check_adv(domains, model_ori)
+            if ret_adv:
+                return global_lb.max(), ub, glb_record, Visited, "unsafe"
+            adv_check_time = time.time() - adv_check_start_time
+            print(f"Adv attack time: {adv_check_time:.4f}s")
 
-        global_lb = batch_verification(domains, net, batch, iteration=iteration, decision_thresh=decision_thresh,
-                                       lr_alpha=lr_alpha, prop_mat=prop_mat, prop_rhs=prop_mat, shape=shape,
-                                       branching_candidates=branching_candidates, branching_method=branching_method)
+        global_lb = batch_verification_input_split(
+            domains,
+            net,
+            batch,
+            decision_thresh=rhs,
+            shape=x.shape,
+            bounding_method=bounding_method,
+            branching_method=branching_method,
+            stop_func=stop_func,
+        )
 
         # once the lower bound stop improving we change to solve slope mode
-        if not Solve_slope and time.time()-start > 20 and global_lb.cpu() <= last_glb.cpu():
-            net.solve_slope = True
-            _, global_lb, _, lower_bounds, upper_bounds, pre_relu_indices, slope, dm_l, dm_u, selected_dims = net.build_the_model(
-                domain, x, decision_thresh, lr_init_alpha, share_slopes=share_slopes)
+        if (
+            arguments.Config["solver"]["bound_prop_method"]
+            != arguments.Config["bab"]["branching"]["input_split"][
+                "enhanced_bound_prop_method"
+            ]
+            and time.time() - start
+            > arguments.Config["bab"]["branching"]["input_split"][
+                "enhanced_bound_patience"
+            ]
+            and global_lb.max().cpu() <= last_glb.cpu()
+            and bounding_method != "alpha-crown"
+            and not enhanced_bound_initialized
+        ):
+            branching_method = arguments.Config["bab"]["branching"]["input_split"]["enhanced_branching_method"]
+            bounding_method = arguments.Config["bab"]["branching"]["input_split"]["enhanced_bound_prop_method"]
+            print(f'Using enhanced bound propagation method {bounding_method} with {branching_method} branching.')
+            enhanced_bound_initialized = True
 
+            (
+                global_ub,
+                global_lb,
+                _,
+                _,
+                primals,
+                updated_mask,
+                lA,
+                lower_bounds,
+                upper_bounds,
+                pre_relu_indices,
+                slope,
+                history,
+                attack_image,
+            ) = net.build_the_model(
+                init_domain,
+                x,
+                stop_criterion_func=stop_func(rhs),
+                bounding_method=bounding_method,
+            )
+            if hasattr(net.net[net.net.input_name[0]], 'lA'):
+                lA = net.net[net.net.input_name[0]].lA.transpose(0, 1)
+            else:
+                raise ValueError("sb heuristic cannot be used without lA.")
+            dm_l = x.ptb.x_L
+            dm_u = x.ptb.x_U
+
+            # compute initial split idx for the enhanced method
+            split_idx = input_split_branching(net, global_lb, dm_l, dm_u, lA, rhs, branching_method, None, None, None, storage_depth)
+
+            if arguments.Config["bab"]["batched_domain_list"]:
+                use_slope = (
+                    arguments.Config["bab"]["branching"]["input_split"][
+                        "enhanced_bound_prop_method"
+                    ]
+                    == "alpha-crown"
+                )
+                domains = UnsortedInputDomainList(storage_depth, use_slope=use_slope)
+            else:
+                domains = SortedInputDomainList()
+            # This is the first batch of initial domain(s) after the branching method changed.
+            domains.add(
+                global_lb,
+                dm_l.detach(),
+                dm_u.detach(),
+                slope,
+                net.c,
+                rhs,
+                split_idx,
+            )
             global_lb = global_lb.max()
 
-            # This is the first (initial) domain.
-            candidate_domain = InputDomain(global_lb, global_ub, slope=slope, dm_l=dm_l, dm_u=dm_u, selected_dims=selected_dims)
-            domains = SortedList()
-            domains.add(candidate_domain)
-            Solve_slope = True
-
-        if time.time()-start > 80 and len(domains) > 3000:
-            # perform attack with massively random starts finally
-            sample_lower_limit = domain[0] - x
-            sample_upper_limit = domain[1] - x
-            delta = (torch.empty(size=(1000000, 5), device=x.device).uniform_() * (sample_upper_limit - sample_lower_limit) + sample_lower_limit).requires_grad_(True)
-            opt = AdamClipping(params=[delta], lr=(domain[1] - domain[0]).max()/50.)
-            scheduler = torch.optim.lr_scheduler.ExponentialLR(opt, 0.98)
-            prop_rhs_all = []
-            for p, m in all_prop:
-                prop_rhs_all.append(torch.tensor(p, dtype=torch.float, device=x.device))
-
-            for _ in range(100):
-                inputs = x + delta
-                output = model_ori(inputs)
-                vec = prop_mat.matmul(output.t())
-                loss = -vec
-                loss.mean().backward()
-                print('attacking loss', loss.mean())
-                # print(sum(delta.grad != 0))
-
-                if time.time() - start > timeout:
-                    print('time out!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
-                    del domains
-                    # np.save('glb_record.npy', np.array(glb_record))
-                    return global_lb, None, glb_record, Visited
-
-                for p in prop_rhs_all:
-                    sat = torch.all(p.matmul(output.t()) <= prop_rhs.reshape(-1, 1), dim=0) # .cpu()
-                    # print(vec.shape, sat.shape)
-                    if (sat == True).any(): # TODO COMPARE ON GPU
-                        idx = torch.where(sat == True)[0][0]
-                        adv_example = inputs[idx]
-                        assert (adv_example >= domain[0]).all()
-                        assert (adv_example <= domain[1]).all()
-
-                        print('adversarial example found!', output[idx].detach().cpu().numpy())
-                        del domains
-                        return global_lb, adv_example, glb_record, Visited
-
-                opt.step(clipping=True, lower_limit=sample_lower_limit, upper_limit=sample_upper_limit, sign=1)
-                opt.zero_grad(set_to_none=True)
-                scheduler.step()
-
-        if len(domains) > max_subproblems_list:
-            print("no enough memory for the domain list")
-            del domains
-            return global_lb, None, glb_record, Visited
+        if (
+            time.time() - start
+            > arguments.Config["bab"]["branching"]["input_split"]["attack_patience"]
+        ):
+            print("Perform PGD attack with massively random starts finally.")
+            ub, ret_adv = massive_pgd_attack(
+                init_domain, rhs, x, model_ori, prop_mat_ori
+            )
+            if ret_adv:
+                del domains
+                return global_lb.max(), ub.max(), glb_record, Visited, "unsafe"
 
         if time.time() - start > timeout:
-            print('time out!!!!!!!!!!!!!!!!!!!!!!!!!!!!')
+            print("time out!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
             del domains
             # np.save('glb_record.npy', np.array(glb_record))
-            return global_lb, None, glb_record, Visited
+            return global_lb.max(), None, glb_record, Visited, "unknown"
 
-        if record: glb_record.append([time.time() - start, global_lb.item()])
+        if record:
+            glb_record.append([time.time() - start, global_lb.cpu().numpy()])
+
+        num_iter += 1
 
     del domains
-    return global_lb, None, glb_record, Visited
+    return global_lb.max(), None, glb_record, Visited, "safe"
+
+
+def massive_pgd_attack(init_domain, rhs_mat, x, model_ori, C_mat):
+    """pgd attack with very large number of random starts
+    init_domain: [input_shape, 2]
+    rhs_mat: [num_or(1), num_and]
+    x: [batch(1), input_shape]
+    C_mat: [num_and, out_dim]
+    """
+    # only attack the first specification when we have multiple specification in this domain
+    if init_domain.ndim == 3:
+        rhs_mat = rhs_mat[0:1]
+        init_domain = init_domain[0]
+        x = x[0:1]
+
+    num_restarts = arguments.Config["attack"]["input_split_enhanced"]["pgd_restarts"]
+    num_steps = arguments.Config["attack"]["input_split_enhanced"]["pgd_steps"]
+    # pgd_steps is the same as the main pgd attack: before
+    data_max, data_min = init_domain[..., 1], init_domain[..., 0]
+    data_max = data_max.unsqueeze(0).unsqueeze(1)
+    data_min = data_min.unsqueeze(0).unsqueeze(1)
+
+    C_mat = C_mat.unsqueeze(0)
+
+    if arguments.Config["attack"]["pgd_alpha"] == "auto":
+        alpha = (data_max - data_min).max() / 4
+    else:
+        alpha = float(arguments.Config["attack"]["input_split_enhanced"]["pgd_alpha"])
+    # pack the domains as a large spec matrix
+
+    cond_mat = [[C_mat.shape[1] for i in range(C_mat.shape[0])]]
+
+    best_deltas, _ = pgd_attack_with_general_specs(
+        model_ori,
+        x,
+        data_min,
+        data_max,
+        C_mat,
+        rhs_mat,
+        cond_mat,
+        same_number_const=True,
+        alpha=alpha,
+        set_num_restarts=num_restarts,
+        set_pgd_steps=num_steps,
+    )
+    attack_image, attack_output, attack_margin = gen_adv_example(
+        model_ori, x, best_deltas, data_max, data_min, C_mat, rhs_mat, cond_mat
+    )
+
+    if test_conditions(
+        attack_image.unsqueeze(1),
+        attack_output,
+        C_mat,
+        rhs_mat,
+        cond_mat,
+        True,
+        data_max,
+        data_min,
+    ).all():
+        print("pgd attack succeed in massive attack")
+        return attack_margin, True
+    else:
+        return None, False
+
+
+def initial_verify_criterion(lbs, rhs):
+    """check whether verify successful"""
+    # lbs: b, n_bounds (already multiplied with c in compute_bounds())
+    verified_idx = torch.any(
+        (lbs - rhs) > 0, dim=-1
+    )  # return bolling results in x's batch-wise
+    if verified_idx.all():  # check whether all x verified
+        print("Verified by initial bound!")
+        return True, torch.where(verified_idx == 0)[0]
+    else:
+        return False, torch.where(verified_idx == 0)[0]
+
+
+def check_adv(domains, model_ori):
+    """check whether exiting domains have adv example or not. By naively forward inputs' lower and upper bound."""
+    device = list(model_ori.parameters())[0].device
+    worst_indices = domains.get_topk_indices(k=min(10, len(domains)))
+    best_idx = domains.get_topk_indices(largest=True).item()
+    indices = list(worst_indices.numpy()) + [best_idx]
+
+    dm_l, dm_u, c, threshold = [], [], [], []
+    for idx in indices:
+        val = domains[idx]
+        dm_l.append(val[1][None, ...].detach().cpu())
+        dm_u.append(val[2][None, ...].detach().cpu())
+        c.append(val[3][None, ...].detach().cpu())
+        threshold.append(val[4].detach().cpu())
+
+    adv_example = torch.cat(
+        [torch.cat([dm_l[i], dm_u[i]]) for i in range(len(worst_indices))]
+    )
+    adv_example = torch.cat([adv_example, dm_l[-1], dm_u[-1]])
+    adv_example = adv_example.unsqueeze(0).to(device, non_blocking=True)
+    # [num_or, input_shape]
+
+    prop_mat = torch.cat([torch.cat([c[i], c[i]]) for i in range(len(worst_indices))])
+    prop_mat = torch.cat([prop_mat, c[-1], c[-1]]).to(device, non_blocking=True)
+    # [num_or, num_and, output_dim]
+
+    prop_rhs = [threshold[i] for i in range(len(worst_indices))]
+    prop_rhs.append(threshold[-1])
+    prop_rhs = torch.stack(prop_rhs).repeat_interleave(2, dim=0)
+    # [num_or, num_and]
+
+    cond_mat = [[prop_mat.shape[1] for i in range(prop_mat.shape[0])]]
+    # [1, num_or, input_shape]
+    prop_mat = prop_mat.view(1, -1, prop_mat.shape[-1])
+    # [1, num_spec, output_dim]
+    prop_rhs = prop_rhs.view(1, -1).to(device, non_blocking=True)
+    # [1, num_spec]
+
+    data_max = torch.cat(
+        [torch.cat([dm_u[i], dm_u[i]]) for i in range(len(worst_indices))]
+    )
+    data_max = torch.cat([data_max, dm_u[-1], dm_u[-1]])
+    data_max = data_max.unsqueeze(0).to(device, non_blocking=True)
+
+    data_min = torch.cat(
+        [torch.cat([dm_l[i], dm_l[i]]) for i in range(len(worst_indices))]
+    )
+    data_min = torch.cat([data_min, dm_l[-1], dm_l[-1]])
+    data_min = data_min.unsqueeze(0).to(device, non_blocking=True)
+
+    alpha = (data_max - data_min).max() / 4
+
+    pgd_steps = arguments.Config["attack"]["input_split_check_adv"]["pgd_steps"]
+    num_restarts = arguments.Config["attack"]["input_split_check_adv"]["pgd_restarts"]
+
+    if arguments.Config["attack"]["input_split_check_adv"]["pgd_alpha"] == "auto":
+        alpha = (data_max - data_min).max() / 4
+    else:
+        alpha = float(arguments.Config["attack"]["input_split_check_adv"]["pgd_alpha"])
+
+    data_min = data_min.to(device)
+    data_max = data_max.to(device)
+    prop_rhs = prop_rhs.to(device)
+    prop_mat = prop_mat.to(device)
+
+    best_deltas, _ = pgd_attack_with_general_specs(model_ori, adv_example, data_min, data_max, prop_mat, prop_rhs, cond_mat, same_number_const=True, alpha=alpha, set_pgd_steps=pgd_steps, only_replicate_restarts=True)
+
+    attack_image = best_deltas + adv_example.squeeze(1)
+    attack_image = torch.min(torch.max(attack_image, data_min), data_max)
+
+    attack_output = model_ori(attack_image.view(-1, *attack_image.shape[2:])).view(
+        *attack_image.shape[:2], -1
+    )
+    # [1, num_or_spec, output_dim]
+
+    if test_conditions(
+        attack_image.unsqueeze(1),
+        attack_output.unsqueeze(1),
+        prop_mat.unsqueeze(1),
+        prop_rhs,
+        cond_mat,
+        True,
+        data_max,
+        data_min,
+    ).all():
+        print("pgd attack succeed in check_adv")
+        return None, True
+
+    return None, False

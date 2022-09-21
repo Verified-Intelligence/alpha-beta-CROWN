@@ -1,5 +1,3 @@
-general:
-  mode: verified-acc
 model:
   name: cnn_4layer_mix4
   path: models/sdp/cifar_cnn_a_mix4.model
@@ -10,8 +8,8 @@ specification:
 attack:
   pgd_restarts: 50
 solver:
+  batch_size: 4096
   beta-crown:
-    batch_size: 4096
     iteration: 20
 bab:
-  timeout: 30
+  timeout: 200

@@ -1,0 +1,25 @@
+# Configuration file for running the rl_benchmarks benchmark (dubins-rejoin model).
+general:
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/rl_benchmarks
+  csv_name: instances.csv
+  enable_incomplete_verification: False
+  loss_reduction_func: max
+  conv_mode: matrix
+data:
+  dataset: Dubinsrejoin
+  num_outputs: 8
+  start: 200
+  end: 300
+solver:
+  batch_size: 100  # Number of parallel domains to compute on GPU.
+  bound_prop_method: forward+backward
+  beta-crown:
+    iteration: 10  # Iterations for computing intermediate layer bounds.
+bab:
+  initial_max_domains: 100
+  branching:
+    method: sb
+    input_split:
+      enable: True
+attack:
+  pgd_order: skip

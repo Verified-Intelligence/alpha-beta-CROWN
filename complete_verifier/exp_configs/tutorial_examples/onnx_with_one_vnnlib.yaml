@@ -1,0 +1,9 @@
+# Example of verifying an ONNX model with VNNLIB general specifications
+model:
+  # Assuming you have cloned the vnncomp2021 repository: https://github.com/stanleybak/vnncomp2021
+  onnx_path: ../../vnncomp2021/benchmarks/cifar10_resnet/onnx/resnet_2b.onnx
+specification:
+  # VNNLIB file specification.
+  vnnlib_path: ../../vnncomp2021/benchmarks/cifar10_resnet/vnnlib_properties_pgd_filtered/resnet2b_pgd_filtered/prop_10_eps_0.008.vnnlib
+solver:
+  batch_size: 2048  # Number of subdomains to compute in parallel in bound solver. Decrease if you run out of memory.

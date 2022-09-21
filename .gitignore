@@ -4,8 +4,16 @@ __pycache__
 *.egg-info
 dist
 *.swp
+*.swo
 *.log
 .trace_graph
 Verified_ret*.npy
 Verified-acc*.npy
 vnn-comp_*.npz
+*.tar.gz
+verifier_log_*
+*.pth
+*.pt
+.idea
+*.so
+release

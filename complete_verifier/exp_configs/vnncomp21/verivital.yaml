@@ -1,0 +1,10 @@
+general:
+  root_path: ../../vnncomp2021/benchmarks/verivital
+  csv_name: verivital_instances.csv
+  complete_verifier: mip
+data:
+  dataset: MNIST
+  start: 0
+  end: 60
+attack:
+  pgd_order: after

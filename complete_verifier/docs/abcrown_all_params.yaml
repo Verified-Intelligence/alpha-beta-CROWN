@@ -1,0 +1,166 @@
+general:
+  device: cuda  # Select device to run verifier, cpu or cuda (GPU).
+  seed: 100  # Random seed.
+  conv_mode: patches  # Convolution mode during bound propagation: "patches" mode (default) is very efficient, but may not support all architecture; "matrix" mode is slow but supports all architectures.
+  deterministic: false  # Run code in CUDA deterministic mode, which has slower performance but better reproducibility.
+  double_fp: false  # Use double precision floating point. GPUs with good double precision support are preferable (NVIDIA P100, V100, A100, H100; AMD Radeon Instinc MI50, MI100).
+  loss_reduction_func: sum  # When batch size is not 1, this reduction function is applied to reduce the bounds into a scalar (options are "sum" and "min").
+  sparse_alpha: true  # Sparse alpha (with bugs).
+  save_adv_example: false  # Save returned adversarial example in file.
+  precompile_jit: false  # Precompile jit kernels to speed up after jit-wrapped functions, but will cost extra time at the beginning.
+  complete_verifier: bab  # Complete verification verifier. "bab": branch and bound with beta-CROWN or GCP-CROWN; "mip": mixed integer programming (MIP) formulation; "bab-refine": branch and bound with intermediate layer bounds computed by MIP.
+  enable_incomplete_verification: true  # Enable/Disable initial alpha-CROWN incomplete verification (disable this can save GPU memory).
+  csv_name: null  # Name of .csv file containing a list of properties to verify (VNN-COMP specific).
+  results_file: out.txt  # Path to results file.
+  root_path: ''  # Root path of VNN-COMP benchmarks folder (VNN-COMP specific).
+model:
+  name: null  # Model name. Will be evaluated as a python statement.
+  path: null  # Load pretrained model from this specified path.
+  onnx_path: null  # Path to .onnx model file.
+  onnx_path_prefix: ''  # Add a prefix to .onnx model path to correct malformed csv files.
+  cache_onnx_conversion: false  # Cache the model converted from ONNX.
+  onnx_quirks: null  # Load onnx model with quirks to workaround onnx model issue. This string will be passed to onnx2pytorch as the 'quirks' argument, and it is typically a literal of a python dict, e.g., "{'Reshape': {'fix_batch_size: True'}}".
+  input_shape: null  # Specified input shape of the model.Usually the shape can be automatically determined from dataset or onnx model, but some onnx models may have an incompatible shape (without batch dim). You can specify shape explicitly here.The shape should be (-1, input_shape) like (-1, 3, 32, 32) and -1 indicates the batch dim.
+  onnx_loader: default_onnx_and_vnnlib_loader  # ONNX model loader function name. Can be the Customized() primitive; for examples of customized model loaders, please see the config files for the marabou-cifar10 benchmark in VNN-COMP 2021 and the Carvana benchmark in VNN-COMP 2022.
+  onnx_optimization_flags: none  # Onnx graph optimization config.
+data:
+  start: 0  # Start from the i-th property in specified dataset.
+  end: 10000  # End with the (i-1)-th property in the dataset.
+  select_instance: null  # Select a list of instances to verify.
+  num_outputs: 10  # Number of classes for classification problem.
+  mean: 0.0  # Mean vector used in data preprocessing.
+  std: 1.0  # Std vector used in data preprocessing.
+  pkl_path: null  # Load properties to verify from a .pkl file (only used for oval20 dataset).
+  dataset: CIFAR  # Dataset name. Dataset must be defined in utils.py. For customized data, checkout custom_model_data.py.
+  data_idx_file: null  # A text file with a list of example IDs to run.
+specification:
+  type: lp  # Type of verification specification. "lp" = L_p norm, "bounds" = element-wise lower and upper bound provided by dataloader.
+  robustness_type: verified-acc  # For robustness verification: verify against all labels ("verified-acc" mode), or just the runnerup labels ("runnerup" mode), or using a specified label in dataset ("speicify-target" mode, only used for oval20). Not used when a VNNLIB spec is used.
+  norm: .inf  # Lp-norm for epsilon perturbation in robustness verification (1, 2, inf).
+  epsilon: null  # Set perturbation size (Lp norm). If not set, a default value may be used based on dataset loader.
+  vnnlib_path: null  # Path to .vnnlib specification file. Will override any Lp/robustness verification arguments.
+  vnnlib_path_prefix: ''  # Add a prefix to .vnnlib specs path to correct malformed csv files.
+solver:
+  batch_size: 64  # Batch size in bound solver (number of parallel splits).
+  min_batch_size_ratio: 0.1  # The minimum batch size ratio in each iteration (splitting multiple layers if the number of domains is smaller than min_batch_size_ratio * batch_size).
+  use_float64_in_last_iteration: false  # Use double fp (float64) at the last iteration in alpha/beta CROWN.
+  early_stop_patience: 10  # Number of iterations that we will start considering early stop if tracking no improvement.
+  start_save_best: 0.5  # Start to save best optimized bounds when i > int(iteration*start_save_best). Early iterations are skipped for better efficiency.
+  bound_prop_method: alpha-crown  # Bound propagation method used for incomplete verification and input split based branch and bound.
+  prune_after_crown: false  # After CROWN pass, prune verified labels before starting the alpha-CROWN pass.
+  crown:
+    batch_size: 1000000000  # Batch size in batched CROWN.
+    max_crown_size: 1000000000  # Max output size in CROWN (when there are too many output neurons, only part of them will be bounded by CROWN).
+  alpha-crown:
+    alpha: true  # Disable/Enable alpha crown.
+    lr_alpha: 0.1  # Learning rate for the optimizable parameter alpha in alpha-CROWN bound.
+    iteration: 100  # Number of iterations for alpha-CROWN incomplete verifier.
+    share_slopes: false  # Share some alpha variables to save memory at the cost of slightly looser bounds.
+    no_joint_opt: false  # Run alpha-CROWN bounds without joint optimization (only optimize alpha for the last layer bound).
+    lr_decay: 0.98  # Learning rate decay factor during alpha-CROWN optimization. Need to use a larger value like 0.99 or 0.995 when you increase the number of iterations.
+    full_conv_alpha: true  # Use independent alpha for conv layers.
+  beta-crown:
+    lr_alpha: 0.01  # Learning rate for optimizing alpha during branch and bound.
+    lr_beta: 0.05  # Learning rate for optimizing beta during branch and bound.
+    lr_decay: 0.98  # Learning rate decay factor during beta-CROWN optimization. Need to use a larger value like 0.99 or 0.995 when you increase the number of iterations.
+    optimizer: adam  # Optimizer used for alpha and beta optimization.
+    iteration: 50  # Number of iteration for optimizing alpha and beta during branch and bound.
+    enable_opt_interm_bounds: false  # Enable optimizing intermediate bounds for beta-CROWN, only used when mip refine for now.
+    all_node_split_LP: false  # When all nodes are split during Bab but not verified, using LP to check.
+  forward:
+    refine: false  # Refine forward bound with CROWN for unstable neurons.
+    dynamic: false  # Use dynamic forward bound propagation where new input variables may be dynamically introduced for nonlinearities.
+    max_dim: 10000  # Maximum input dimension for forward bounds in a batch.
+  multi_class:
+    multi_class_method: allclass_domain  # Method for handling multi-class verification, which could be "loop", "allclass_domain", "splitable_domain".
+    label_batch_size: 32  # Maximum target labels to handle in alpha-CROWN. Cannot be too large due to GPU memory limit.
+    skip_with_refined_bound: true  # By default we skip the second alpha-CROWN execution if all slopes are already initialized. Setting this to avoid this feature.
+  mip:
+    parallel_solvers: null  # Number of multi-processes for mip solver. Each process computes a mip bound for an intermediate neuron. Default (None) is to auto detect the number of CPU cores (note that each process may use multiple threads, see the next option).
+    solver_threads: 1  # Number of threads for echo mip solver process (default is to use 1 thread for each solver process).
+    refine_neuron_timeout: 15  # MIP timeout threshold for improving each intermediate layer bound (in seconds).
+    refine_neuron_time_percentage: 0.8  # Percentage (x100%) of time used for improving all intermediate layer bounds using mip. Default to be 0.8*timeout.
+    early_stop: true  # Not early stop when finding a positive lower bound or a adversarial example during MIP.
+    adv_warmup: true  # Disable using PGD adv as MIP refinement warmup starts.
+    mip_solver: gurobi  # MLP/LP solver package (SCIP support is experimental).
+bab:
+  initial_max_domains: 1  # Number of domains we can add to domain list at the same time before bab. For multi-class problems this can be as large as the number of labels.
+  max_domains: .inf  # Max number of subproblems in branch and bound.
+  decision_thresh: 0  # Decision threshold of lower bounds. When lower bounds are greater than this value, verification is successful. Set to 0 for robustness verification.
+  timeout: 360  # Timeout (in second) for verifying one image/property.
+  timeout_scale: 1  # Scale the timeout for development purpose.
+  override_timeout: null  # Override timeout.
+  pruning_in_iteration: true  # Disable verified domain pruning within iteration.
+  pruning_in_iteration_ratio: 0.2  # When ratio of positive domains >= this ratio, prunning in iteration optimization is open.
+  sort_targets: false  # Sort targets before BaB.
+  batched_domain_list: true  # Disable batched domain list. Batched domain list is faster but picks domain to split in an unsorted way.
+  optimized_intermediate_layers: ''  # A list of layer names that will be optimized during branch and bound, separated by comma.
+  cut:
+    enabled: false  # Enable cutting planes using GCP-CROWN.
+    bab_cut: false  # Enable cut constraints optimization during BaB.
+    method: null  # Cutting plane generation method (unused, for future extensions).
+    lr: 0.01  # Learning rate for optimizing cuts.
+    lr_decay: 1.0  # Learning rate decay for optimizing betas in GCP-CROWN.
+    iteration: 100  # Iterations for optimizing betas in GCP-CROWN.
+    bab_iteration: -1  # Iterations for optimizing betas in GCP-CROWN during branch and bound. Set to -1 to use the same number of iterations without cuts.
+    lr_beta: 0.02  # Learning rate for optimizing betas in GCP-CROWN.
+    number_cuts: 50  # Maximum number of cuts that we want to add.
+    topk_cuts_in_filter: 100  # Only keep top K constraints when filtering cuts.
+    batch_size_primal: 100  # Batch size when calculate primals, should be negative correlated to number of unstable neurons.
+    max_num: 1000000000  # Maximum number of cuts.
+    patches_cut: false  # Enable GCP-CROWN optimization for intermediate layer bounds in patches mode.
+    cplex_cuts: false  # Build and save mip mps models, let cplex find cuts, and use found cuts to improve lower bounds.
+    cplex_cuts_wait: 0  # Wait a bit after cplex warmup in seconds, so that we tend to get some cuts at early stage of branch and bound.
+    cplex_cuts_revpickup: true  # Disable the inverse order domain pickout when cplex is enabled.
+    cut_reference_bounds: true  # Disable using reference bounds when GCP-CROWN cuts are used.
+    fix_intermediate_bounds: false  # Fix intermediate bounds when GCP-CROWN cuts are used.
+  branching:
+    method: kfsb  # Branching heuristic. babsr is fast but less accurate; fsb is slow but most accurate; kfsb is usually a balance; kfsb-intercept-only is faster but may lead to worse branching; sb is fast smart branching which relies on the A matrix.
+    candidates: 3  # Number of candidates to consider when using fsb or kfsb. More candidates lead to slower but better branching.
+    reduceop: min  # Reduction operation to compute branching scores from two sides of a branch (min or max). max can work better on some models.
+    sb_coeff_thresh: 0.001  # Clamp values of coefficient matrix (A matrix) for sb branching heuristic.
+    input_split:
+      enable: false  # Branch on input domain rather than unstable neurons.
+      enhanced_bound_prop_method: alpha-crown  # Specify a tighter bound propagation method if a problem cannot be verified after --input_split_enhanced_bound_patience.
+      enhanced_branching_method: naive  # Specify a branching method if a problem cannot be verified after --input_split_enhanced_bound_patience.
+      enhanced_bound_patience: 100000000.0  # Time in seconds that will use an enhanced bound propagation method (e.g., alpha-CROWN) to bound input split sub domains.
+      attack_patience: 100000000.0  # Time in seconds that will start PGD attack to find adv examples during input split.
+      adv_check: 0  # After the number of visited nodes, we will run adv_check in input split.
+      sort_domain_interval: -1  # If unsorted domains are used, sort the domains every sort_domain_interval iterations.
+  attack:
+    enabled: false  # Enable beam search based BaB-attack.
+    beam_candidates: 8  # Number of candidates in beam search.
+    beam_depth: 7  # Max additional level of splits to expand during beam search in BaB-Attack.
+    max_dive_fix_ratio: 0.8  # Maximum ratio of fixed neurons during diving in BaB-Attack.
+    min_local_free_ratio: 0.2  # Minimum ratio of free neurons during local search in BaB-Attack.
+    mip_start_iteration: 5  # Iteration number to start sub-MIPs in BaB-Attack.
+    mip_timeout: 30.0  # Sub-MIP timeout threshold.
+    adv_pool_threshold: null  # Minimum value of difference when adding to adv_pool; default `None` means auto select.
+    refined_mip_attacker: false  # Use full alpha crown bounds to refined intermediate bounds for sub-MIPs.
+    refined_batch_size: null  # Batch size for full alpha-CROWN to refined intermediate bounds for mip solver attack (to avoid OOM), default None to be the same as mip_multi_proc.
+attack:
+  pgd_order: before  # Run PGD attack before/after incomplete verification, or skip it.
+  pgd_steps: 100  # Steps of PGD attack.
+  pgd_restarts: 30  # Number of random PGD restarts.
+  pgd_early_stop: true  # Early stop PGD when an adversarial example is found.
+  pgd_lr_decay: 0.99  # Learning rate decay factor used in PGD attack.
+  pgd_alpha: auto  # Step size of PGD attack. Default (auto) is epsilon/4.
+  pgd_loss_mode: null  # Loss mode for choosing the best delta.
+  enable_mip_attack: false  # Use MIP (Gurobi) based attack if PGD cannot find a successful adversarial example.
+  cex_path: ./test_cex.txt  # Save path for counter-examples.
+  attack_mode: PGD  # Attack algorithm, including vanilla PGD and PGD with diversified output (Tashiro et al.), and GAMA loss (Sriramanan et al.).
+  gama_lambda: 10.0  # Regularization parameter in GAMA attack.
+  gama_decay: 0.9  # Decay of regularization parameter in GAMA attack.
+  check_clean: false  # Check clean prediction before attack.
+  input_split:
+    pgd_steps: 100  # Steps of PGD attack in input split.
+    pgd_restarts: 30  # Number of random PGD restarts in input split.
+    pgd_alpha: auto  # Step size (alpha) in input split.
+  input_split_enhanced:
+    pgd_steps: 200  # Steps of PGD attack in massive pgd attack in input split.
+    pgd_restarts: 5000000  # Number of random PGD restarts in massive pgd attack in input split.
+    pgd_alpha: auto  # Step size (alpha) in massive pgd attack in input split.
+  input_split_check_adv:
+    pgd_steps: 5  # Steps of PGD attack in 'check_adv' in input split.
+    pgd_restarts: 5  # Number of random PGD restarts in 'check_adv' in input split.
+    pgd_alpha: auto  # Step size (alpha) in 'check_adv' in input split.

@@ -11,6 +11,8 @@
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
+from typing import Optional, Sequence, Tuple, Type
+
 import torch
 from torch.nn import functional as F
 import torch.nn as nn
@@ -392,8 +394,27 @@ def model_resnet(in_ch=3, in_dim=32, width=1, mult=16, N=1):
                 m.bias.data.zero_()
     return model
 
+# def test_base():
+#     # the second label is dumb, always 0
+#     model = nn.Sequential(
+#         nn.Linear(2, 2),
+#         nn.ReLU(),
+#         nn.Linear(2, 2)
+#     )
+#     # import pdb; pdb.set_trace()
+#     return model
+
+def mnist_tiny_mlp():
+    """A very small model for testing completeness."""
+    return nn.Sequential(
+        Flatten(),
+        nn.Linear(784, 20),
+        nn.ReLU(),
+        nn.Linear(20, 10)
+    )
 
 def mnist_fc():
+    # cifar base
     model = nn.Sequential(
         Flatten(),
         nn.Linear(784, 10),
@@ -498,7 +519,7 @@ def mnist_cnn_4layer():
         nn.ReLU(),
         nn.Conv2d(16, 32, (4,4), stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(1568, 100),
         nn.ReLU(),
         nn.Linear(100, 10),
@@ -513,6 +534,19 @@ def cifar_conv_small():
         Flatten(),
         nn.Linear(32*6*6,100),
         nn.ReLU(),
+        nn.Linear(100, 10)
+    )
+    return model
+
+def cifar_conv_small_sigmoid():
+    model = nn.Sequential(
+        nn.Conv2d(3, 16, 4, stride=2, padding=0),
+        nn.Sigmoid(),
+        nn.Conv2d(16, 32, 4, stride=2, padding=0),
+        nn.Sigmoid(),
+        Flatten(),
+        nn.Linear(32*6*6,100),
+        nn.Sigmoid(),
         nn.Linear(100, 10)
     )
     return model
@@ -543,7 +577,7 @@ def cifar_marabou_small():
         nn.ReLU(),
         nn.Conv2d(8, 16, 4, stride=2,),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(576, 128),
         nn.ReLU(),
         nn.Linear(128, 64),
@@ -614,6 +648,16 @@ def mnist_conv_big():
         nn.Linear(512,512),
         nn.ReLU(),
         nn.Linear(512, 10)
+    )
+    return model
+
+
+def mnist_fc_2_200():
+    model = nn.Sequential(
+        Flatten(),
+        nn.Linear(784, 200),
+        nn.ReLU(),
+        nn.Linear(200, 10),
     )
     return model
 
@@ -1048,7 +1092,7 @@ def MadryCNN_no_maxpool_tiny():
             nn.ReLU(),
             nn.Conv2d(4, 8, 5, stride=2, padding=2),
             nn.ReLU(),
-            Flatten(),
+            nn.Flatten(),
             nn.Linear(8*7*7,128),
             nn.ReLU(),
             nn.Linear(128, 10)
@@ -1328,3 +1372,344 @@ def crown_ibp_dm_large_bn_full(in_ch=3, in_dim=32, width=64, linear_size=512, nu
         nn.Linear(linear_size,num_class)
     )
     return model
+
+
+class BasicBlock_eth(nn.Module):
+    expansion = 1
+
+    def __init__(
+        self,
+        in_planes: int,
+        planes: int,
+        stride: int = 1,
+        bn: bool = True,
+        kernel: int = 3,
+        in_dim: int = -1,
+    ) -> None:
+        super(BasicBlock_eth, self).__init__()
+        self.in_planes = in_planes
+        self.planes = planes
+        self.stride = stride
+        self.bn = bn
+        self.kernel = kernel
+
+        kernel_size = kernel
+        assert kernel_size in [1, 2, 3], "kernel not supported!"
+        p_1 = 1 if kernel_size > 1 else 0
+        p_2 = 1 if kernel_size > 2 else 0
+
+        layers_b = []
+        layers_b.append(
+            nn.Conv2d(
+                in_planes,
+                planes,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=p_1,
+                bias=(not bn),
+            )
+        )
+        _, _, in_dim = self._getShapeConv(
+            (in_planes, in_dim, in_dim),
+            (self.in_planes, kernel_size, kernel_size),
+            stride=stride,
+            padding=p_1,
+        )
+
+        if bn:
+            layers_b.append(nn.BatchNorm2d(planes))
+        layers_b.append(nn.ReLU())
+        layers_b.append(
+            nn.Conv2d(
+                planes,
+                self.expansion * planes,
+                kernel_size=kernel_size,
+                stride=1,
+                padding=p_2,
+                bias=(not bn),
+            )
+        )
+        _, _, in_dim = self._getShapeConv(
+            (planes, in_dim, in_dim),
+            (self.in_planes, kernel_size, kernel_size),
+            stride=1,
+            padding=p_2,
+        )
+        if bn:
+            layers_b.append(nn.BatchNorm2d(self.expansion * planes))
+        self.path_b = nn.Sequential(*layers_b)
+
+        layers_a = [torch.nn.Identity()]
+        if stride != 1 or in_planes != self.expansion * planes:
+            layers_a.append(
+                nn.Conv2d(
+                    in_planes,
+                    self.expansion * planes,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=(not bn),
+                )
+            )
+            if bn:
+                layers_a.append(nn.BatchNorm2d(self.expansion * planes))
+        self.path_a = nn.Sequential(*layers_a)
+        self.out_dim = in_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.path_a(x) + self.path_b(x)
+        return out
+
+    def _getShapeConv(
+        self,
+        in_shape: Tuple[int, int, int],
+        conv_shape: Tuple[int, ...],
+        stride: int = 1,
+        padding: int = 0,
+    ) -> Tuple[int, int, int]:
+        inChan, inH, inW = in_shape
+        outChan, kH, kW = conv_shape[:3]
+
+        outH = 1 + int((2 * padding + inH - kH) / stride)
+        outW = 1 + int((2 * padding + inW - kW) / stride)
+        return (outChan, outH, outW)
+
+
+def getShapeConv(
+    in_shape: Tuple[int, int, int],
+    conv_shape: Tuple[int, ...],
+    stride: int = 1,
+    padding: int = 0,
+) -> Tuple[int, int, int]:
+    inChan, inH, inW = in_shape
+    outChan, kH, kW = conv_shape[:3]
+
+    outH = 1 + int((2 * padding + inH - kH) / stride)
+    outW = 1 + int((2 * padding + inW - kW) / stride)
+    return (outChan, outH, outW)
+
+
+class ResNet_eth(nn.Sequential):
+    def __init__(
+        self,
+        block: Type[BasicBlock_eth],
+        in_ch: int = 3,
+        num_stages: int = 1,
+        num_blocks: int = 2,
+        num_classes: int = 10,
+        in_planes: int = 64,
+        bn: bool = True,
+        last_layer: str = "avg",
+        in_dim: int = 32,
+        stride: Optional[Sequence[int]] = None,
+    ):
+        layers = []
+        self.in_planes = in_planes
+        if stride is None:
+            stride = (num_stages + 1) * [2]
+
+        layers.append(
+            nn.Conv2d(
+                in_ch,
+                self.in_planes,
+                kernel_size=3,
+                stride=stride[0],
+                padding=1,
+                bias=not bn,
+            )
+        )
+
+        _, _, in_dim = getShapeConv(
+            (in_ch, in_dim, in_dim), (self.in_planes, 3, 3), stride=stride[0], padding=1
+        )
+
+        if bn:
+            layers.append(nn.BatchNorm2d(self.in_planes))
+
+        layers.append(nn.ReLU())
+
+        for s in stride[1:]:
+            block_layers, in_dim = self._make_layer(
+                block,
+                self.in_planes * 2,
+                num_blocks,
+                stride=s,
+                bn=bn,
+                kernel=3,
+                in_dim=in_dim,
+            )
+            layers.append(block_layers)
+
+        if last_layer == "avg":
+            layers.append(nn.AvgPool2d(4))
+            layers.append(nn.Flatten())
+            layers.append(
+                nn.Linear(
+                    self.in_planes * (in_dim // 4) ** 2 * block.expansion, num_classes
+                )
+            )
+        elif last_layer == "dense":
+            layers.append(nn.Flatten())
+            layers.append(
+                nn.Linear(self.in_planes * block.expansion * in_dim ** 2, 100)
+            )
+            layers.append(nn.ReLU())
+            layers.append(nn.Linear(100, num_classes))
+        else:
+            exit("last_layer type not supported!")
+
+        super(ResNet_eth, self).__init__(*layers)
+
+    def _make_layer(
+        self,
+        block: Type[BasicBlock_eth],
+        planes: int,
+        num_layers: int,
+        stride: int,
+        bn: bool,
+        kernel: int,
+        in_dim: int,
+    ) -> Tuple[nn.Sequential, int]:
+        strides = [stride] + [1] * (num_layers - 1)
+        layers = []
+        for stride in strides:
+            layers.append(
+                block(self.in_planes, planes, stride, bn, kernel, in_dim=in_dim)
+            )
+            in_dim = layers[-1].out_dim
+            layers.append(nn.ReLU())
+            self.in_planes = planes * block.expansion
+        return nn.Sequential(*layers), in_dim
+
+
+def resnet2b_eth(bn: bool = False) -> nn.Sequential:
+    return ResNet_eth(
+        BasicBlock_eth, num_stages=1, num_blocks=2, in_planes=8, bn=bn, last_layer="dense"
+    )
+
+
+def resnet2b2_eth(bn: bool = True, in_ch: int = 3, in_dim: int = 32) -> nn.Sequential:
+    return ResNet_eth(
+        BasicBlock_eth,
+        in_ch=in_ch,
+        num_stages=2,
+        num_blocks=1,
+        in_planes=16,
+        bn=bn,
+        last_layer="dense",
+        stride=[2, 2, 2],
+    )
+
+
+def resnet4b1(bn: bool = True) -> nn.Sequential:
+    return ResNet_eth(
+        BasicBlock_eth,
+        in_ch=3,
+        num_stages=4,
+        num_blocks=1,
+        in_planes=16,
+        bn=bn,
+        last_layer="dense",
+        stride=[1, 1, 2, 2, 2],
+    )
+
+
+def resnet4b2(bn: bool = True) -> nn.Sequential:
+    return ResNet_eth(
+        BasicBlock_eth,
+        in_ch=3,
+        num_stages=4,
+        num_blocks=1,
+        in_planes=16,
+        bn=bn,
+        last_layer="dense",
+        stride=[2, 2, 2, 1, 1],
+    )
+
+
+def resnet3b2(bn: bool = True) -> nn.Sequential:
+    return ResNet_eth(
+        BasicBlock_eth,
+        in_ch=3,
+        num_stages=3,
+        num_blocks=1,
+        in_planes=16,
+        bn=bn,
+        last_layer="dense",
+        stride=[2, 2, 2, 2],
+    )
+
+
+def resnet3b2_no_bn(bn: bool = False) -> nn.Sequential:
+    return ResNet_eth(
+        BasicBlock_eth,
+        in_ch=3,
+        num_stages=3,
+        num_blocks=1,
+        in_planes=16,
+        bn=bn,
+        last_layer="dense",
+        stride=[2, 2, 2, 2],
+    )
+
+
+def resnet9b(bn: bool = True) -> nn.Sequential:
+    return ResNet_eth(
+        BasicBlock_eth,
+        in_ch=3,
+        num_stages=3,
+        num_blocks=3,
+        in_planes=16,
+        bn=bn,
+        last_layer="dense",
+    )
+
+
+def mnist_conv_super() -> nn.Sequential:
+    return nn.Sequential(
+        *[
+            nn.Conv2d(
+                in_channels=1, out_channels=32, kernel_size=3, stride=1, padding=0
+            ),
+            nn.ReLU(),
+            nn.Conv2d(
+                in_channels=32, out_channels=32, kernel_size=4, stride=1, padding=0
+            ),
+            nn.ReLU(),
+            nn.Conv2d(
+                in_channels=32, out_channels=64, kernel_size=3, stride=1, padding=0
+            ),
+            nn.ReLU(),
+            nn.Conv2d(
+                in_channels=64, out_channels=64, kernel_size=4, stride=1, padding=0
+            ),
+            nn.ReLU(),
+            nn.Flatten(start_dim=1, end_dim=-1),
+            nn.Linear(in_features=64 * 18 * 18, out_features=512),
+            nn.ReLU(),
+            nn.Linear(in_features=512, out_features=512),
+            nn.ReLU(),
+            nn.Linear(in_features=512, out_features=10),
+        ]
+    )
+
+
+class Step_carvana(nn.Module):
+    def __init__(self, ori_carvana, gt):
+        super(Step_carvana, self).__init__()
+        self.ori_carvana = ori_carvana
+        gt = torch.tensor(gt, dtype=torch.get_default_dtype()).reshape(1, 31, 47)  # 0 means 0-dim > 1-dim, 1 means 0-dim < 1-dim
+        gt[gt == 1] = -1  # flip results when ground truth selecting 1-dim
+        gt[gt == 0] = +1  # keep results when ground truth selecting 0-dim
+        gt = gt.repeat(2, 1, 1).unsqueeze(0)  # reshape to NCHW.
+        self.gt = torch.nn.Parameter(gt, requires_grad=False)
+        self.step_value_zero = torch.nn.Parameter(torch.tensor(0., dtype=torch.get_default_dtype()), requires_grad=False)
+
+    def forward(self, x):
+        x = self.ori_carvana(x)
+        x = x * self.gt  # flip x by ground truth label
+        x = x[:, :1] - x[:, 1:]
+        x = torch.heaviside(x, self.step_value_zero)
+        x = x.flatten(1)
+        x = x.sum(1, keepdim=True)
+
+        return x

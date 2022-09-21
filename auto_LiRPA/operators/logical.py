@@ -3,24 +3,14 @@ from .base import *
 
 
 class BoundWhere(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
 
-    @Bound.save_io_shape
     def forward(self, condition, x, y):
         return torch.where(condition.to(torch.bool), x, y)
 
     def interval_propagate(self, *v):
         assert not self.is_input_perturbed(0)
-
-        if Interval.use_relative_bounds(*v):
-            return Interval(
-                None, None,
-                self.forward(v[0].nominal, v[1].nominal, v[2].nominal),
-                self.forward(v[0].nominal, v[1].lower_offset, v[2].lower_offset),
-                self.forward(v[0].nominal, v[1].upper_offset, v[2].upper_offset)
-            )
-
         condition = v[0][0]
         return tuple([torch.where(condition, v[1][j], v[2][j]) for j in range(2)])
 
@@ -42,14 +32,9 @@ class BoundWhere(Bound):
 
         return [(None, None), (lA_x, uA_x), (lA_y, uA_y)], 0, 0
 
-    def infer_batch_dim(self, batch_size, *x):
-        return BoundMul.infer_batch_dim(batch_size, *x[1:])
-
-
 class BoundNot(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
 
-    @Bound.save_io_shape
     def forward(self, x):
         return x.logical_not()

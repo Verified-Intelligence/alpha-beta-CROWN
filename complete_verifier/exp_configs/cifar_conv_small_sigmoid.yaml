@@ -1,0 +1,19 @@
+general:
+  complete_verifier: skip
+model:
+  name: cifar_conv_small_sigmoid
+  path: models/non_relu/cifar_conv_small_sigmoid.pth  # Clean acc: 63.17%.
+data:
+  dataset: CIFAR  # Make sure the normalization is the same as training!
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2023, 0.1994, 0.2010]
+specification:
+  epsilon: 0.00784313725  # 2./255.
+attack:
+  pgd_restarts: 100
+solver:
+  batch_size: 2048
+  beta-crown:
+    iteration: 20
+bab:
+  timeout: 120

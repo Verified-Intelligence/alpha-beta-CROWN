@@ -1,0 +1,21 @@
+# Configuration file for running the reach_prob_density benchmark (gcas model).
+general:
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/reach_prob_density/
+  csv_name: instances.csv
+  enable_incomplete_verification: False
+  conv_mode: matrix
+data:
+  dataset: Reach_probability
+solver:
+  batch_size: 8192  # Number of parallel domains to compute on GPU.
+  beta-crown:
+    iteration: 100  # Iterations for computing intermediate layer bounds.
+    lr_alpha: 0.03
+    lr_beta: 0.08
+    all_node_split_LP: True
+bab:
+  branching:
+    method: kfsb  # Split on input space.
+    candidates: 3
+attack:
+  pgd_order: before

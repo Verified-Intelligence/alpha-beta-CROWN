@@ -1,0 +1,19 @@
+# This is an example configuration file that contains most useful parameter settings.
+model:
+  name: cifar_conv_big  # This model is defined in model_defs.py. Add your own model definitions there.
+  # The model is from "Training Certifiably Robust Neural Networks with Efficient Local Lipschitz Bounds (Huang et al., NeurIPS 2021)"
+  # wget https://github.com/yjhuangcd/local-lipschitz/raw/main/pretrained/relu/cifar_4C3F_relu_best.pth
+  path: cifar_l2_4c3f.pth
+data:
+  dataset: CIFAR  # Dataset name. This is just the standard CIFAR-10 test set defined in the "load_verification_dataset()" function in utils.py
+  start: 1  # First example to verify in dataset.
+  end: 5  # Last example to verify in dataset.
+specification:
+  norm: 2  # Linf norm (can also be 2 or 1).
+  epsilon: 0.1411764705882353  # epsilon=36./255.
+attack:  # Currently attack is only implemented for Linf norm. Skip for L2 norm.
+  pgd_order: skip
+solver:
+  batch_size: 1024  # Number of subdomains to compute in parallel in bound solver. Decrease if you run out of memory.
+bab:
+  timeout: 120  # Timeout threshold for branch and bound. Increase for verifying more points.

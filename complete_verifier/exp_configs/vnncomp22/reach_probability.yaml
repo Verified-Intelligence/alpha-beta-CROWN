@@ -1,0 +1,22 @@
+# Configuration file for running the reach_prob_density benchmark (all models except gcas).
+general:
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/reach_prob_density
+  csv_name: instances.csv
+  enable_incomplete_verification: False
+  loss_reduction_func: max
+  conv_mode: matrix
+data:
+  dataset: Reach_probability
+solver:
+  batch_size: 8192  # Number of parallel domains to compute on GPU.
+  bound_prop_method: forward+backward
+  beta-crown:
+    iteration: 10  # Iterations for computing intermediate layer bounds.
+bab:
+  branching:
+    method: sb
+    input_split:
+      enable: True
+      sort_domain_interval: 1
+attack:
+  pgd_order: skip

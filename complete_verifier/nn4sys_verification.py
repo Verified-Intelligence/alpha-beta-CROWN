@@ -271,9 +271,9 @@ def nn4sys_verification(model_ori, vnnlib, onnx_path):
     if unsafe:
         res = 'unsafe'
     elif all_verified and time.time() - start_time <= arguments.Config["bab"]["timeout"] - 5:
-        res = 'verified'
+        res = 'safe'
     else:
-        res = 'timeout'
+        res = 'unknown'
 
     print('Result', res)
     print('Time', time.time() - start_time)

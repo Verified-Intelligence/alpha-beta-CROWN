@@ -1,0 +1,17 @@
+# Example of verification of a ONNX model with Linf norm perturbation robustness specification.
+#
+# python abcrown.py --onnx_path ../../vnncomp2021/benchmarks/oval21/nets/cifar_deep_kw.onnx \
+#                  --dataset CIFAR \
+#                  --epsilon 0.00784313725490196 \
+#                  --std 0.225 0.225 0.225 \
+#                  --mean 0.485 0.456 0.406
+model:
+  # Assuming you have cloned the vnncomp2021 repository: https://github.com/stanleybak/vnncomp2021
+  onnx_path: ../../vnncomp2021/benchmarks/oval21/nets/cifar_deep_kw.onnx  # Path to ONNX model.
+data:
+  dataset: CIFAR  # Dataset name. This is just the standard CIFAR-10 test set defined in the "load_verification_dataset()" function in utils.py
+  std: [ 0.225, 0.225, 0.225 ]  # Mean for normalization.
+  mean: [ 0.485, 0.456, 0.406 ]  # Std for normalization.
+specification:
+  norm: .inf  # Linf norm (can also be 2 or 1).
+  epsilon: 0.00784313725490196  # epsilon=2./255.

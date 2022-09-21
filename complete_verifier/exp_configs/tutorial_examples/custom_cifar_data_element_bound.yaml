@@ -1,0 +1,25 @@
+# Example for using customized model and data loader.
+# Model and data loader defined in custom_model_data.py
+# python abcrown.py --config exp_configs/tutorial_examples/custom_cifar_data_example.yaml
+model:
+  # Model is defined as simple_conv_model() in custom_model_data.py. The function simple_conv_model() will be called with arguments in_channel=3, out_dim=10.
+  name: Customized("custom_model_data", "simple_conv_model", in_channel=3, out_dim=10)
+  # Path to model checkpoint.
+  path: models/eran/cifar_conv_small_pgd.pth
+data:
+  # Use the cifar10() loader in "custom_model_data.py".
+  dataset: Customized("custom_model_data", "cifar10", use_bounds=True)
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2023, 0.1994, 0.201]
+specification:
+  # Element-wise perturbation. The magnitude of each pixel is defined in the cifar10() dataloader in custom_model_data.py.
+  type: bound
+  epsilon: 0.00784313725  # 2./255. Used by cifar10() loader to generate element-wise bounds.
+attack:
+  pgd_restarts: 100
+solver:
+  batch_size: 2048
+  beta-crown:
+    iteration: 20
+bab:
+  timeout: 300

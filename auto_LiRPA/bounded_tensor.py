@@ -1,3 +1,4 @@
+import copy
 import torch
 import torch.nn as nn
 from torch import Tensor as Tensor
@@ -26,7 +27,7 @@ class BoundedTensor(Tensor):
             return '<BoundedTensor: {}, no ptb>'.format(super().__repr__())
 
     def clone(self, *args, **kwargs):
-        tensor = BoundedTensor(super().clone(*args, **kwargs), self.ptb)
+        tensor = BoundedTensor(super().clone(*args, **kwargs), copy.deepcopy(self.ptb))
         return tensor
 
     def _func(self, func, *args, **kwargs):
@@ -38,6 +39,13 @@ class BoundedTensor(Tensor):
 
     # Copy to other devices with perturbation
     def to(self, *args, **kwargs):
+        # FIXME add a general "to" function in perturbation class, not here.
+        if hasattr(self.ptb, 'x_L') and isinstance(self.ptb.x_L, Tensor):
+            self.ptb.x_L = self.ptb.x_L.to(*args, **kwargs)
+        if hasattr(self.ptb, 'x_U') and isinstance(self.ptb.x_U, Tensor):
+            self.ptb.x_U = self.ptb.x_U.to(*args, **kwargs)
+        if hasattr(self.ptb, 'eps') and isinstance(self.ptb.eps, Tensor):
+            self.ptb.eps = self.ptb.eps.to(*args, **kwargs)
         return self._func(super().to, *args, **kwargs)
 
     @classmethod

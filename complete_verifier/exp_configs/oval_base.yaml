@@ -1,5 +1,4 @@
 general:
-  mode: specify-target
   enable_incomplete_verification: False
 model:
   name: cifar_model_base
@@ -9,11 +8,13 @@ data:
   pkl_path: models/oval/base_100.pkl
   std: [0.225, 0.225, 0.225]
   mean: [0.485, 0.456, 0.406]
+specification:
+  robustness_type: specify-target
 attack:
   pgd_order: skip
 solver:
+  batch_size: 1024
   beta-crown:
-    batch_size: 1024
     iteration: 20
 bab:
   timeout: 3600

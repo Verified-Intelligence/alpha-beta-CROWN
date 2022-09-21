@@ -1,0 +1,11 @@
+general:
+  root_path: exp_configs/tutorial_examples  # Root path of the csv file.
+  csv_name: cifar10_resnet2b_instances.csv  # Name of the csv file (ONLY one column listed paths to vnnlibs).
+model:
+  name: resnet2b  # This model is defined in model_defs.py. Add your own model definitions there.
+  path: models/cifar10_resnet/resnet2b.pth  # Path to PyTorch checkpoint.
+  input_shape: [-1, 3, 32, 32]  # The vnnlib does not have input shape information, user should specify here.
+solver:
+  batch_size: 2048  # Number of subdomains to compute in parallel in bound solver. Decrease if you run out of memory.
+bab:
+  timeout: 120  # Timeout threshold for branch and bound. Increase for verifying more points.

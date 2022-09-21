@@ -3,12 +3,11 @@ from .base import *
 
 
 class BoundRNN(Bound):
-    def __init__(self, input_name, name, ori_name, attr, inputs, output_index, options, device):
-        super().__init__(input_name, name, ori_name, attr, inputs, output_index, options, device)
+    def __init__(self, attr, inputs, output_index, options):
+        super().__init__(attr, inputs, output_index, options)
         self.complex = True
         self.output_index = output_index
 
-    @Bound.save_io_shape
     def forward(self, x, weight_input, weight_recurrent, bias, sequence_length, initial_h):
         assert (torch.sum(torch.abs(initial_h)) == 0)
 
@@ -17,7 +16,7 @@ class BoundRNN(Bound):
 
         class BoundRNNImpl(nn.Module):
             def __init__(self, input_size, hidden_size,
-                         weight_input, weight_recurrent, bias, output_index, options, device):
+                         weight_input, weight_recurrent, bias, output_index, options):
                 super().__init__()
 
                 self.input_size = input_size
@@ -38,7 +37,7 @@ class BoundRNN(Bound):
             def forward(self, x):
                 length = x.shape[0]
                 outputs = []
-                hidden = torch.zeros(x.shape[1], self.hidden_size, device=self.device)
+                hidden = torch.zeros(x.shape[1], self.hidden_size).to(x)
                 for i in range(length):
                     hidden = self.cell(x[i, :], hidden)
                     outputs.append(hidden.unsqueeze(0))
@@ -52,7 +51,7 @@ class BoundRNN(Bound):
         self.model = BoundRNNImpl(
             self.input_size, self.hidden_size,
             weight_input, weight_recurrent, bias,
-            self.output_index, self.device)
+            self.output_index)
         self.input = (x,)
 
         return self.model(self.input)

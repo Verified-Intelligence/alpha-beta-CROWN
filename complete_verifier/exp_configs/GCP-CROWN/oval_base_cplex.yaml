@@ -1,0 +1,32 @@
+model:
+  name: cifar_model_base
+  path: models/oval/cifar_base.pth
+data:
+  dataset: CIFAR
+  pkl_path: models/oval/base_100.pkl
+  std: [0.225, 0.225, 0.225]
+  mean: [0.485, 0.456, 0.406]
+specification:
+  robustness_type: specify-target
+attack:
+  pgd_order: skip
+solver:
+  batch_size: 1024
+  beta-crown:
+    iteration: 20
+    lr_beta: 0.03
+    lr_decay: 0.96
+bab:
+  timeout: 3600
+  branching:
+    method: kfsb
+    reduceop: min
+    candidates: 10
+  cut:
+    enabled: True
+    cplex_cuts: True
+    bab_cut: True
+    iteration: 200
+    bab_iteration: 50 
+    lr_beta: 0.01
+    lr_decay: 0.8

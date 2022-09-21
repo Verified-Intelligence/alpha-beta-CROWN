@@ -1,0 +1,20 @@
+model:
+  name: vnncomp_resnet4b_v1
+  path: models/cifar100/v1_0.40_0.60.pt
+data:
+  dataset: CIFAR100
+  mean: [0.5071, 0.4865, 0.4409]
+  std: [0.2673, 0.2564, 0.2761]
+  num_outputs: 100
+specification:
+  epsilon: 0.00392156862  # 1./255.
+attack:
+  pgd_restarts: 50
+solver:
+  batch_size: 25
+  beta-crown:
+    iteration: 20
+bab:
+  timeout: 30
+  branching:
+    reduceop: max

@@ -1,0 +1,33 @@
+# Configuration file for running the cifar100_tinyimagenet_resnet benchmark (cifar100_med model).
+general:
+  # csv_name: cifar100_tinyimagenet_instances.csv
+  # Following the format on https://github.com/ChristopherBrix/vnncomp2022_benchmarks
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/cifar100_tinyimagenet_resnet
+  csv_name: instances.csv
+data:
+  dataset: CIFAR100
+  num_outputs: 100
+  start: 10  # Subject to change.
+  end: 34
+model:
+  onnx_optimization_flags: merge_bn
+attack:
+  pgd_order: skip
+  pgd_restarts: 10
+solver:
+  batch_size: 1024
+  beta-crown:
+    lr_alpha: 0.05
+    lr_beta: 0.1
+    iteration: 5
+  alpha-crown:
+    lr_alpha: 0.25
+    iteration: 20
+  prune_after_crown: True
+bab:
+  initial_max_domains: 100
+  branching:
+    method: kfsb
+    candidates: 7
+    reduceop: max
+  interm_transfer: False

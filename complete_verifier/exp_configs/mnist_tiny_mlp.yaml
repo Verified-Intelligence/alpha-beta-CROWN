@@ -1,0 +1,17 @@
+model:
+  name: mnist_tiny_mlp
+  path: models/toy/mnist_2_20.pth
+data:
+  dataset: MNIST
+specification:
+  epsilon: 0.1
+attack:
+  pgd_restarts: 100
+solver:
+  batch_size: 2048
+  beta-crown:
+    iteration: 20
+bab:
+  timeout: 180
+  branching:
+    reduceop: max
