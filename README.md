@@ -36,8 +36,8 @@ Our verifier consists of the following core algorithms:
 
 * **β-CROWN** ([Wang et al. 2021](https://arxiv.org/pdf/2103.06624.pdf)): complete verification with **CROWN** ([Zhang et al. 2018](https://arxiv.org/pdf/1811.00866.pdf)) and branch and bound
 * **α-CROWN** ([Xu et al., 2021](https://arxiv.org/pdf/2011.13824.pdf)): incomplete verification with optimized CROWN bound
-* **GCP-CROWN** ([Zhang et al. 2021](https://arxiv.org/pdf/2208.05740.pdf)): CROWN-like bound propagation with general cutting plane constraints.
-* **BaB-Attack** ([Zhang et al. 2021](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf)): Branch and bound based adversarial attack for tackling hard instances.
+* **GCP-CROWN** ([Zhang et al. 2022](https://arxiv.org/pdf/2208.05740.pdf)): CROWN-like bound propagation with general cutting plane constraints.
+* **BaB-Attack** ([Zhang et al. 2022](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf)): Branch and bound based adversarial attack for tackling hard instances.
 * **MIP** ([Tjeng et al., 2017](https://arxiv.org/pdf/1711.07356.pdf)): mixed integer programming (slow but can be useful on small models).
 
 We support these neural network architectures:
