@@ -6,9 +6,9 @@
 </p>
 
 α,β-CROWN (alpha-beta-CROWN) is a neural network verifier based on an efficient
-bound propagation algorithm ([CROWN](https://arxiv.org/pdf/1811.00866.pdf)) and
-branch and bound. It can be accelerated efficiently on **GPUs** and can scale
-to relatively large convolutional networks. It also supports a wide range of
+linear bound propagation framework and branch and bound. It can be accelerated
+efficiently on **GPUs** and can scale to relatively large convolutional
+networks (e.g., millions of parameters). It also supports a wide range of
 neural network architectures (e.g., **CNN**, **ResNet**, and various activation
 functions), thanks to the versatile
 [auto\_LiRPA](http://github.com/KaidiXu/auto_LiRPA) library developed by us.
@@ -24,6 +24,10 @@ Details of competition results can be found in [VNN-COMP 2021
 slides](https://docs.google.com/presentation/d/1oM3NqqU03EUqgQVc3bGK2ENgHa57u-W6Q63Vflkv000/edit#slide=id.ge4496ad360_14_21),
 [report](https://arxiv.org/abs/2109.00498) and [VNN-COMP 2022 slides (page
 73)](https://drive.google.com/file/d/1nnRWSq3plsPvOT3V-drAF5D8zWGu02VF/view?usp=sharing).
+
+α,β-CROWN combines our efforts in neural network verification in **a series of
+papers building up the bound propagation framework** during the past five
+years. See the [Publications](#publications) section below.
 
 Supported Features
 ----------------------
@@ -150,7 +154,7 @@ based adversarial attack (falsifier), please cite [Zhang et al.
 
 * **BaB-Attack** ([Zhang et al., ICML 2022](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf)) is a strong falsifier (adversarial attack) based on branch and bound, which can find adversarial examples for hard instances where gradient or input-space-search based methods cannot succeed.
 
-* **GCP-CROWN** ([Zhang et al., NeurIPS 2022](https://arxiv.org/pdf/2208.05740.pdf)) enables the use of general cutting planes methods for neural network verification in a GPU-accelerated and very efficient bound propagation framework.
+* **GCP-CROWN** ([Zhang et al., NeurIPS 2022](https://arxiv.org/pdf/2208.05740.pdf)) enables the use of general cutting planes methods for neural network verification in a GPU-accelerated and very efficient bound propagation framework. Cutting planes can significantly strengthen bound tightness.
 
 We provide bibtex entries below:
 
