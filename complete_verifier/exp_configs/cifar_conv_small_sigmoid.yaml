@@ -15,5 +15,7 @@ solver:
   batch_size: 2048
   beta-crown:
     iteration: 20
+  alpha-crown:
+    full_conv_alpha: false
 bab:
   timeout: 120

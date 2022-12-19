@@ -718,7 +718,7 @@ def get_alpha_crown_start_nodes(
         unstable_idx = None
         use_sparse_conv = None
         use_full_conv_alpha = self.bound_opts.get('use_full_conv_alpha', False)
-        if (sparse_intermediate_bounds and isinstance(node, BoundRelu)
+        if (sparse_intermediate_bounds and isinstance(node, (BoundRelu, BoundSigmoid))
                 and nj.name != final_node_name and not share_slopes):
             # Create sparse optimization variables for intermediate neurons.
             if ((isinstance(nj, BoundLinear) or isinstance(nj, BoundMatMul))
