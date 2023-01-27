@@ -1,4 +1,4 @@
-α,β-CROWN (alpha-beta-CROWN): A Fast and Scalable Neural Network Verifier with Efficient Bound Propagation
+α,β-CROWN (alpha-beta-CROWN): A Fast and Scalable Neural Network Verifier using the Bound Propagation Framework
 ======================
 
 <p align="center">
@@ -22,12 +22,13 @@ Neural Networks Competition) with the highest total score, outperforming many
 other neural network verifiers on a wide range of benchmarks over 2 years.
 Details of competition results can be found in [VNN-COMP 2021
 slides](https://docs.google.com/presentation/d/1oM3NqqU03EUqgQVc3bGK2ENgHa57u-W6Q63Vflkv000/edit#slide=id.ge4496ad360_14_21),
-[report](https://arxiv.org/abs/2109.00498) and [VNN-COMP 2022 slides (page
+[report](https://arxiv.org/abs/2109.00498) and [VNN-COMP 2022 report](https://arxiv.org/pdf/2212.10376.pdf) and [slides (page
 73)](https://drive.google.com/file/d/1nnRWSq3plsPvOT3V-drAF5D8zWGu02VF/view?usp=sharing).
 
 α,β-CROWN combines our efforts in neural network verification in **a series of
 papers building up the bound propagation framework** during the past five
-years. See the [Publications](#publications) section below.
+years. See the [Developers](#developers-and-copyright) and
+[Publications](#publications) sections below.
 
 Supported Features
 ----------------------
