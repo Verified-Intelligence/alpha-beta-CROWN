@@ -288,7 +288,7 @@ class ConfigHandler:
                           help='MIP timeout threshold for improving each intermediate layer bound (in seconds).',
                           hierarchy=h + ["refine_neuron_timeout"])
         self.add_argument('--mip_refine_timeout', type=float, default=0.8,
-                          help='Percentage (x100%) of time used for improving all intermediate layer bounds using mip. Default to be 0.8*timeout.',
+                          help='Percentage (x100%%) of time used for improving all intermediate layer bounds using mip. Default to be 0.8*timeout.',
                           hierarchy=h + ["refine_neuron_time_percentage"])
         self.add_argument('--no_mip_early_stop', action='store_false', dest='mip_early_stop',
                           help='Not early stop when finding a positive lower bound or a adversarial example during MIP.',
@@ -529,6 +529,9 @@ class ConfigHandler:
             elif (not help[0].isupper()) or help[-1] != '.':
                 raise ValueError(
                     f'Help message must start with an upper case letter and end with a dot (.); your message "{help}" is invalid.')
+            elif help.count('%') != help.count('%%') * 2:
+                raise ValueError(
+                    f'Please escape "%" in help message with "%%"; your message "{help}" is invalid.')
         self.defaults_parser.add_argument(*args, **kwargs)
         # Build another parser without any defaults.
         if 'default' in kwargs:
