@@ -58,9 +58,6 @@ def incomplete_verifier(model_ori, data, data_ub=None, data_lb=None, vnnlib=None
 
     model = LiRPAConvNet(model_ori, in_size=data.shape, c=c)
     print('Model prediction is:', model.net(data))
-    if list(model.net.parameters())[0].is_cuda:
-        data = data.cuda()
-        data_lb, data_ub = data_lb.cuda(), data_ub.cuda()
 
     eps = arguments.Globals["lp_perturbation_eps"]  # Perturbation value for non-Linf perturbations, None for all other cases.
     ptb = PerturbationLpNorm(norm=norm, eps=eps, x_L=data_lb, x_U=data_ub)
