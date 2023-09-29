@@ -14,7 +14,7 @@ First, clone and install our α,β-CROWN verifier:
 
 ```bash
 # Clone verifier code.
-git clone https://github.com/huanzhang12/alpha-beta-CROWN.git
+git clone https://github.com/Verified-Intelligence/alpha-beta-CROWN.git
 cd alpha-beta-CROWN
 # Remove the old environment, if necessary.
 conda deactivate; conda env remove --name alpha-beta-crown
@@ -23,7 +23,7 @@ conda env create -f complete_verifier/environment.yml --name alpha-beta-crown
 conda activate alpha-beta-crown
 
 # Install IBM CPLEX >= 22.1.0
-# Download from https://community.ibm.com/community/user/datascience/blogs/xavier-nodet1/2020/07/09/cplex-free-for-students
+# Download from https://community.ibm.com/community/user/ai-datascience/blogs/xavier-nodet1/2020/07/09/cplex-free-for-students
 chmod +x cplex_studio2210.linux_x86_64.bin  # Any version >= 22.1.0 should work. Change executable name here.
 # You can directly run the installer: ./cplex_studio2210.linux_x86_64.bin; the response.txt created below is for non-interactive installation.
 cat > response.txt <<EOF
