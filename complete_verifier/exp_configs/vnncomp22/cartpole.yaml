@@ -6,7 +6,6 @@ general:
   loss_reduction_func: max
   conv_mode: patches
 data:
-  dataset: Cartpole
   num_outputs: 2
   start: 0
   end: 100
@@ -21,4 +20,4 @@ bab:
     input_split:
       enable: True
 attack:
-  pgd_order: skip
+  pgd_order: input_bab

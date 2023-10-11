@@ -5,14 +5,13 @@ general:
   root_path: ../../vnncomp2022_benchmarks/benchmarks/cifar100_tinyimagenet_resnet
   csv_name: instances.csv
 data:
-  dataset: CIFAR100
   num_outputs: 100
   start: 34  # Subject to change.
   end: 58
 model:
   onnx_optimization_flags: merge_bn
 attack:
-  pgd_order: skip
+  pgd_order: middle
   pgd_restarts: 10
 solver:
   batch_size: 256

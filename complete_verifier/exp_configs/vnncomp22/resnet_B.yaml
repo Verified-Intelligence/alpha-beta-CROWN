@@ -4,8 +4,6 @@ general:
   csv_name: instances.csv
 model:
   onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
-data:
-  dataset: CIFAR
 solver:
   batch_size: 1024
   beta-crown:

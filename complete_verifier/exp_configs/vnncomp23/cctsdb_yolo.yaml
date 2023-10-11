@@ -1,0 +1,7 @@
+general:
+  root_path: ../../vnncomp2023_benchmarks/benchmarks/cctsdb_yolo  # Please update this path to point to the VNN-COMP 2023 repo
+  csv_name: instances.csv
+  complete_verifier: Customized("custom_yolo_CCTSDB_verification", "yolo_CCTSDB_verify")
+model:
+  # Use the function customized_yolo_CCTSDB_loader() in custom_model_loader.py to load this model.
+  onnx_loader: Customized("custom_yolo_CCTSDB_verification", "customized_yolo_CCTSDB_loader")

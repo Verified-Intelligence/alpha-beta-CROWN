@@ -2,8 +2,6 @@ general:
   root_path: ../../vnncomp2021/benchmarks/oval21  # Please update this path to point to the VNN-COMP 2021 repo
   csv_name: oval21_instances.csv
   conv_mode: matrix
-data:
-  dataset: CIFAR
 solver:
   batch_size: 2000
   beta-crown:

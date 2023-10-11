@@ -1,0 +1,30 @@
+# An example with a pytorch model and vnnlib specification.
+# python abcrown.py --config exp_configs/custom_specs.yaml
+model:
+  # Use the simple_conv() model in "custom_model_data.py".
+  name: Customized("custom_specs_model", "SimpleFeedForward", hidden_size=32)
+  path: models/custom_specs/custom_specs.pth
+specification:
+  # Use specification from a single vnnlib.
+  vnnlib_path: exp_configs/tutorial_examples/custom_specs.vnnlib
+# general:
+  # The csv file contains a list of vnnlib specifications.
+  # csv_name: exp_configs/tutorial_examples/custom_specs.csv
+# data:
+  # Start and end are only useful when csv_name is set. When a vnnlib file is
+  # specified as the property, only one property is to be verified.
+  # start: 0
+  # end: 2
+solver:
+  bound_prop_method: forward+backward
+  batch_size: 32768  # Number of parallel domains to compute on GPU.
+  beta-crown:
+    iteration: 10  # Iterations for computing intermediate layer bounds.
+bab:
+  initial_max_domains: 100000  # Run multiple properties in parallel.
+  branching:
+    input_split:
+      # Split on input space, not on relus.
+      enable: True
+attack:
+  pgd_order: skip

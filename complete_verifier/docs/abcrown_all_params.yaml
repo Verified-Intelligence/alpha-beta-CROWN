@@ -55,8 +55,7 @@ solver:
     alpha: true  # Disable/Enable alpha crown.
     lr_alpha: 0.1  # Learning rate for the optimizable parameter alpha in alpha-CROWN bound.
     iteration: 100  # Number of iterations for alpha-CROWN incomplete verifier.
-    share_slopes: false  # Share some alpha variables to save memory at the cost of slightly looser bounds.
-    no_joint_opt: false  # Run alpha-CROWN bounds without joint optimization (only optimize alpha for the last layer bound).
+    share_alphas: false  # Share some alpha variables to save memory at the cost of slightly looser bounds.
     lr_decay: 0.98  # Learning rate decay factor during alpha-CROWN optimization. Need to use a larger value like 0.99 or 0.995 when you increase the number of iterations.
     full_conv_alpha: true  # Use independent alpha for conv layers.
   beta-crown:
@@ -94,7 +93,7 @@ bab:
   pruning_in_iteration_ratio: 0.2  # When ratio of positive domains >= this ratio, prunning in iteration optimization is open.
   sort_targets: false  # Sort targets before BaB.
   batched_domain_list: true  # Disable batched domain list. Batched domain list is faster but picks domain to split in an unsorted way.
-  optimized_intermediate_layers: ''  # A list of layer names that will be optimized during branch and bound, separated by comma.
+  optimized_interm: ''  # A list of layer names that will be optimized during branch and bound, separated by comma.
   cut:
     enabled: false  # Enable cutting planes using GCP-CROWN.
     bab_cut: false  # Enable cut constraints optimization during BaB.

@@ -30,4 +30,18 @@ export PYTHONPATH=${TOOL_DIR}
 export OMP_NUM_THREADS=1
 
 # run the tool to produce the results file
-exec ${VNNCOMP_PYTHON_PATH}/python3 ${TOOL_DIR}/complete_verifier/vnncomp_main.py "$CATEGORY" "$ONNX_FILE" "$VNNLIB_FILE" "$RESULTS_FILE" "$TIMEOUT"
+${VNNCOMP_PYTHON_PATH}/python3 ${TOOL_DIR}/complete_verifier/vnncomp_main.py "$CATEGORY" "$ONNX_FILE" "$VNNLIB_FILE" "$RESULTS_FILE" "$TIMEOUT"
+EXIT_CODE=$?
+echo "exit code: ${EXIT_CODE}"
+
+# retry with crown to save memory if needed
+if [ 0 != ${EXIT_CODE} ]; then
+        RESULT=$(head -n 1 "$RESULTS_FILE")
+        # remove whitespace
+        RESULT_STR=${RESULT//[[:space:]]/}
+        if [[ ${RESULT_STR} == "" ]]; then
+                ${VNNCOMP_PYTHON_PATH}/python3 ${TOOL_DIR}/complete_verifier/vnncomp_main.py "$CATEGORY" "$ONNX_FILE" "$VNNLIB_FILE" "$RESULTS_FILE" "$TIMEOUT" --TRY_CROWN
+        fi
+        # we return normally
+        exit 0
+fi

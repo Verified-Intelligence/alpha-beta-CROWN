@@ -4,8 +4,6 @@ general:
   csv_name: instances.csv
   enable_incomplete_verification: False
   conv_mode: matrix
-data:
-  dataset: Reach_probability
 solver:
   batch_size: 8192  # Number of parallel domains to compute on GPU.
   beta-crown:

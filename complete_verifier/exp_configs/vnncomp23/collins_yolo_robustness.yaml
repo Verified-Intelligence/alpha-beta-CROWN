@@ -1,0 +1,20 @@
+general:
+  root_path: ../../vnncomp2023_benchmarks/benchmarks/collins_yolo_robustness
+  csv_name: instances.csv
+  enable_incomplete_verification: False
+model:
+  onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
+  flatten_final_output: True
+solver:
+  batch_size: 1  # OOM
+  bound_prop_method: forward+backward
+attack:
+  pgd_order: before
+  pgd_restarts: 10
+  pgd_steps: 200
+bab:
+  branching:
+    method: sb  # Split on input space.
+    sb_coeff_thresh: 0.1
+    input_split:
+      enable: True

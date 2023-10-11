@@ -6,8 +6,9 @@ general:
   enable_incomplete_verification: False
   loss_reduction_func: max
   conv_mode: matrix
+specification:
+  robustness_type: all-positive
 data:
-  dataset: Collins-rul-cnn
   num_outputs: 1
 solver:
   batch_size: 100  # Number of parallel domains to compute on GPU.
@@ -25,3 +26,4 @@ bab:
 attack:
   pgd_order: before
   pgd_restarts: 100
+  attack_tolerance: 0.0001

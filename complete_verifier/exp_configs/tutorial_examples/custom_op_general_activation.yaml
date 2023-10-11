@@ -1,0 +1,14 @@
+## Example command:
+# python abcrown.py --config exp_configs/tutorial_examples/custom_op_general_activation.yaml
+general:
+  complete_verifier: skip
+model:
+  # Use the linear_masked_sigmoid_model() in "custom_op_general_activation.py".
+  name: Customized("custom_op_general_activation", "linear_masked_sigmoid_model")
+  path: models/non_relu/cifar_conv_small_sigmoid_masked.pth  # clean acc is 6317.
+data:
+  dataset: CIFAR  # Make sure the normalization is the same as training!.
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2023, 0.1994, 0.2010]
+specification:
+  epsilon: 0.00784313725  # 2./255.

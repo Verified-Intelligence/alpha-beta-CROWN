@@ -1,0 +1,11 @@
+name: alpha-beta-CROWN
+ami: ami-0d70546e43a941d70 
+scripts_dir: vnncomp_scripts
+manual_installation_step: True
+run_installation_script_as_root: False
+run_post_installation_script_as_root: False
+run_toolkit_as_root: False
+description: >
+  A description of your tool. It will be used for the final report.
+  
+  It may even span multiple lines

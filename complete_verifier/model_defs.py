@@ -18,17 +18,10 @@ from torch.nn import functional as F
 import torch.nn as nn
 from collections import OrderedDict
 import math
-import importlib
-from functools import partial
 
 ########################################
 # Defined the model architectures
 ########################################
-
-class Flatten(nn.Module):
-    def forward(self, x):
-        return x.reshape(x.size(0), -1)
-
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -377,7 +370,7 @@ def model_resnet(in_ch=3, in_dim=32, width=1, mult=16, N=1):
             conv2 +
             conv3 +
             conv4 +
-            [Flatten(),
+            [nn.Flatten(),
              nn.Linear(mult * 4 * width * 8 * 8, 1000),
              nn.ReLU(),
              nn.Linear(1000, 10)]
@@ -407,7 +400,7 @@ def model_resnet(in_ch=3, in_dim=32, width=1, mult=16, N=1):
 def mnist_tiny_mlp():
     """A very small model for testing completeness."""
     return nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 20),
         nn.ReLU(),
         nn.Linear(20, 10)
@@ -416,7 +409,7 @@ def mnist_tiny_mlp():
 def mnist_fc():
     # cifar base
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 10),
         nn.ReLU(),
         nn.Linear(10, 10),
@@ -433,7 +426,7 @@ def cifar_model_base():
         nn.ReLU(),
         nn.Conv2d(8, 16, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(1024, 100),
         nn.ReLU(),
         nn.Linear(100, 10)
@@ -452,7 +445,7 @@ def cifar_model_deep():
         nn.ReLU(),
         nn.Conv2d(8, 8, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(8*8*8, 100),
         nn.ReLU(),
         nn.Linear(100, 10)
@@ -467,7 +460,7 @@ def cifar_model_wide():
         nn.ReLU(),
         nn.Conv2d(16, 32, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(32*8*8,100),
         nn.ReLU(),
         nn.Linear(100, 10)
@@ -501,7 +494,7 @@ def cnn_4layer_b():
         nn.ReLU(),
         nn.Conv2d(32, 128, (4,4), stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(8192, 250),
         nn.ReLU(),
         nn.Linear(250, 10),
@@ -531,7 +524,7 @@ def cifar_conv_small():
         nn.ReLU(),
         nn.Conv2d(16, 32, 4, stride=2, padding=0),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(32*6*6,100),
         nn.ReLU(),
         nn.Linear(100, 10)
@@ -544,7 +537,7 @@ def cifar_conv_small_sigmoid():
         nn.Sigmoid(),
         nn.Conv2d(16, 32, 4, stride=2, padding=0),
         nn.Sigmoid(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(32*6*6,100),
         nn.Sigmoid(),
         nn.Linear(100, 10)
@@ -561,7 +554,7 @@ def cifar_conv_big():
         nn.ReLU(),
         nn.Conv2d(64, 64, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(64*8*8,512),
         nn.ReLU(),
         nn.Linear(512,512),
@@ -593,7 +586,7 @@ def cifar_marabou_medium():
         nn.ReLU(),
         nn.Conv2d(16, 32, 4, stride=2,),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(1152, 128),
         nn.ReLU(),
         nn.Linear(128, 64),
@@ -609,7 +602,7 @@ def cifar_marabou_large():
         nn.ReLU(),
         nn.Conv2d(32, 64, 4, stride=2,),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(2304, 128),
         nn.ReLU(),
         nn.Linear(128, 64),
@@ -625,7 +618,7 @@ def mnist_conv_small():
         nn.ReLU(),
         nn.Conv2d(16, 32, 4, stride=2, padding=0),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(32*5*5,100),
         nn.ReLU(),
         nn.Linear(100, 10)
@@ -642,7 +635,7 @@ def mnist_conv_big():
         nn.ReLU(),
         nn.Conv2d(64, 64, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(64*7*7,512),
         nn.ReLU(),
         nn.Linear(512,512),
@@ -654,7 +647,7 @@ def mnist_conv_big():
 
 def mnist_fc_2_200():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 200),
         nn.ReLU(),
         nn.Linear(200, 10),
@@ -664,7 +657,7 @@ def mnist_fc_2_200():
 
 def mnist_6_100():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784,100),
         nn.ReLU(),
         nn.Linear(100,100),
@@ -684,7 +677,7 @@ def mnist_6_100():
 
 def mnist_9_100():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784,100),
         nn.ReLU(),
         nn.Linear(100,100),
@@ -709,7 +702,7 @@ def mnist_9_100():
 
 def mnist_6_200():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784,200),
         nn.ReLU(),
         nn.Linear(200,200),
@@ -728,7 +721,7 @@ def mnist_6_200():
 
 def mnist_9_200():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784,200),
         nn.ReLU(),
         nn.Linear(200,200),
@@ -754,7 +747,7 @@ def mnist_9_200():
 
 def mnist_fc1():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 200),
         nn.ReLU(),
         nn.Linear(200, 200),
@@ -772,7 +765,7 @@ def mnist_fc1():
 
 def mnist_fc2():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 1024),
         nn.ReLU(),
         nn.Linear(1024, 1024),
@@ -790,7 +783,7 @@ def mnist_fc2():
 
 def mnist_fc3():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 1024),
         nn.ReLU(),
         nn.Linear(1024, 1024),
@@ -812,7 +805,7 @@ def mnist_fc3():
 
 def mnist_fc_3_512():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 512),
         nn.ReLU(),
         nn.Linear(512, 512),
@@ -825,7 +818,7 @@ def mnist_fc_3_512():
 
 def mnist_fc_4_512():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 512),
         nn.ReLU(),
         nn.Linear(512, 512),
@@ -840,7 +833,7 @@ def mnist_fc_4_512():
 
 def mnist_fc_5_512():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 512),
         nn.ReLU(),
         nn.Linear(512, 512),
@@ -858,7 +851,7 @@ def mnist_fc_5_512():
 
 def mnist_fc_6_512():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 512),
         nn.ReLU(),
         nn.Linear(512, 512),
@@ -878,7 +871,7 @@ def mnist_fc_6_512():
 
 def mnist_fc_7_512():
     model = nn.Sequential(
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(784, 512),
         nn.ReLU(),
         nn.Linear(512, 512),
@@ -898,7 +891,7 @@ def mnist_fc_7_512():
     return model
 
 
-def mnist_madry_secret(): 
+def mnist_madry_secret():
     model = nn.Sequential(
         nn.Conv2d(1, 32, 5, stride=1, padding=2),
         nn.ReLU(),
@@ -906,7 +899,7 @@ def mnist_madry_secret():
         nn.Conv2d(32, 64, 5, stride=1, padding=2),
         nn.ReLU(),
         nn.MaxPool2d(2, stride=2),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(64*7*7,1024),
         nn.ReLU(),
         nn.Linear(1024, 10)
@@ -920,7 +913,7 @@ def cifar_conv1():
         nn.ReLU(),
         nn.Conv2d(8, 16, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(1024, 200),
         nn.ReLU(),
         nn.Linear(200, 100),
@@ -938,7 +931,7 @@ def cifar_conv2():
         nn.ReLU(),
         nn.Conv2d(16, 32, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(512, 200),
         nn.ReLU(),
         nn.Linear(200, 100),
@@ -955,7 +948,7 @@ def cifar_conv3():
         nn.ReLU(),
         nn.Conv2d(16, 32, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(2048, 200),
         nn.ReLU(),
         nn.Linear(200, 100),
@@ -971,7 +964,7 @@ def cifar_conv4():
         nn.ReLU(),
         nn.Conv2d(8, 16, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(1024, 1024),
         nn.ReLU(),
         nn.Linear(1024, 512),
@@ -987,7 +980,7 @@ def cifar_conv5():
         nn.ReLU(),
         nn.Conv2d(16, 32, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(2048, 1024),
         nn.ReLU(),
         nn.Linear(1024, 512),
@@ -1005,7 +998,7 @@ def cifar_conv6():
         nn.ReLU(),
         nn.Conv2d(16, 32, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(512, 512),
         nn.ReLU(),
         nn.Linear(512, 512),
@@ -1023,7 +1016,7 @@ def MadryCNN():
             nn.Conv2d(32, 64, 5, stride=1, padding=2),
             nn.ReLU(),
             nn.MaxPool2d(2, stride=2),
-            Flatten(),
+            nn.Flatten(),
             nn.Linear(64*7*7,1024),
             nn.ReLU(),
             nn.Linear(1024, 10)
@@ -1037,7 +1030,7 @@ def MadryCNN_one_maxpool():
             nn.Conv2d(32, 64, 5, stride=1, padding=2),
             nn.ReLU(),
             nn.MaxPool2d(2, stride=2),
-            Flatten(),
+            nn.Flatten(),
             nn.Linear(64*7*7,1024),
             nn.ReLU(),
             nn.Linear(1024, 10)
@@ -1050,7 +1043,7 @@ def MadryCNN_no_maxpool():
             nn.ReLU(),
             nn.Conv2d(32, 64, 5, stride=2, padding=2),
             nn.ReLU(),
-            Flatten(),
+            nn.Flatten(),
             nn.Linear(64*7*7,1024),
             nn.ReLU(),
             nn.Linear(1024, 10)
@@ -1065,7 +1058,7 @@ def MadryCNN_tiny():
             nn.Conv2d(4, 8, 5, stride=1, padding=2),
             nn.ReLU(),
             nn.MaxPool2d(2, stride=2),
-            Flatten(),
+            nn.Flatten(),
             nn.Linear(8*7*7,128),
             nn.ReLU(),
             nn.Linear(128, 10)
@@ -1079,7 +1072,7 @@ def MadryCNN_one_maxpool_tiny():
             nn.Conv2d(4, 8, 5, stride=1, padding=2),
             nn.ReLU(),
             nn.MaxPool2d(2, stride=2),
-            Flatten(),
+            nn.Flatten(),
             nn.Linear(8*7*7,128),
             nn.ReLU(),
             nn.Linear(128, 10)
@@ -1247,7 +1240,7 @@ def crown_ibp_model_a_b(in_ch=3, in_dim=32, width=2, linear_size=256):
         nn.ReLU(),
         nn.Conv2d(4*width, 8*width, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(8*width*(in_dim // 4)*(in_dim // 4),linear_size),
         nn.ReLU(),
         nn.Linear(linear_size, 10)
@@ -1271,7 +1264,7 @@ def crown_ibp_model_c_d_e_f(in_ch=3, in_dim=32, kernel_size=3, width=2, linear_s
         nn.ReLU(),
         nn.Conv2d(8*width, 8*width, kernel_size=4, stride=4, padding=0),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(8*width*h*h, linear_size),
         nn.ReLU(),
         nn.Linear(linear_size, 10)
@@ -1289,7 +1282,7 @@ def crown_ibp_model_g_h_i_j(in_ch=3, in_dim=32, width=1, linear_size=256):
         nn.ReLU(),
         nn.Conv2d(8*width, 8*width, 4, stride=2, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear(8*width*(in_dim // 4)*(in_dim // 4),linear_size),
         nn.ReLU(),
         nn.Linear(linear_size,linear_size),
@@ -1311,7 +1304,7 @@ def crown_ibp_dm_large(in_ch, in_dim, linear_size=512):
         nn.ReLU(),
         nn.Conv2d(128, 128, 3, stride=1, padding=1),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear((in_dim//2) * (in_dim//2) * 128, linear_size),
         nn.ReLU(),
         nn.Linear(linear_size,10)
@@ -1339,7 +1332,7 @@ def crown_ibp_dm_large_bn(in_ch=3, in_dim=32, width=64, linear_size=512):
         nn.Conv2d(2 * width, 2 * width, 3, stride=1, padding=1),
         nn.BatchNorm2d(2 * width),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear((in_dim//2) * (in_dim//2) * 2 * width, linear_size),
         nn.ReLU(),
         nn.Linear(linear_size,10)
@@ -1365,7 +1358,7 @@ def crown_ibp_dm_large_bn_full(in_ch=3, in_dim=32, width=64, linear_size=512, nu
         nn.Conv2d(2 * width, 2 * width, 3, stride=1, padding=1),
         nn.BatchNorm2d(2 * width),
         nn.ReLU(),
-        Flatten(),
+        nn.Flatten(),
         nn.Linear((in_dim//2) * (in_dim//2) * 2 * width, linear_size),
         nn.BatchNorm1d(linear_size),
         nn.ReLU(),

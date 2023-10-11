@@ -6,6 +6,7 @@ TOOL_NAME=alpha-beta-CROWN
 VERSION_STRING=v1
 if [[ -z "${VNNCOMP_PYTHON_PATH}" ]]; then
 	VNNCOMP_PYTHON_PATH=/home/ubuntu/miniconda/envs/alpha-beta-crown/bin
+	VNNCOMP_PYTHON_LEGACY_PATH=/home/ubuntu/miniconda/envs/alpha-beta-crown-2022/bin
 fi
 
 # check arguments
@@ -34,10 +35,11 @@ echo "alias py37=\"source activate alpha-beta-crown\"" >> ${HOME}/.profile
 export PATH=${PATH}:$HOME/miniconda/bin
 
 # Install NVIDIA driver
-aria2c -x 10 -s 10 -k 1M "https://us.download.nvidia.com/tesla/515.48.07/NVIDIA-Linux-x86_64-515.48.07.run"
+DRIVER_VERSION=535.54.03
+aria2c -x 10 -s 10 -k 1M https://us.download.nvidia.com/XFree86/Linux-x86_64/$DRIVER_VERSION/NVIDIA-Linux-x86_64-$DRIVER_VERSION.run
 sudo nvidia-smi -pm 0
-chmod +x ./NVIDIA-Linux-x86_64-515.48.07.run
-sudo ./NVIDIA-Linux-x86_64-515.48.07.run --silent --dkms
+chmod +x ./NVIDIA-Linux-x86_64-$DRIVER_VERSION.run
+sudo ./NVIDIA-Linux-x86_64-$DRIVER_VERSION.run --silent --dkms
 # Remove old driver (if already installed) and reload the new one.
 sudo rmmod nvidia_uvm; sudo rmmod nvidia_drm; sudo rmmod nvidia_modeset; sudo rmmod nvidia
 sudo modprobe nvidia; sudo nvidia-smi -e 0; sudo nvidia-smi -r -i 0
@@ -46,8 +48,9 @@ sudo nvidia-smi -pm 1
 nvidia-smi
 
 # Install conda environment
-${HOME}/miniconda/bin/conda env create --name alpha-beta-crown -f ${TOOL_DIR}/complete_verifier/environment.yml
-${VNNCOMP_PYTHON_PATH}/pip install -U --no-deps git+https://github.com/dlshriver/DNNV.git@4d4b124bd739b4ddc8c68fed1af3f85b90386155#egg=dnnv
+${HOME}/miniconda/bin/conda env create --name alpha-beta-crown -f ${TOOL_DIR}/complete_verifier/environment_pyt111.yaml
+${HOME}/miniconda/bin/conda env create --name alpha-beta-crown-2022 -f ${TOOL_DIR}/complete_verifier/environment_2022.yaml
+${VNNCOMP_PYTHON_LEGACY_PATH}/pip install -U --no-deps git+https://github.com/dlshriver/DNNV.git@4d4b124bd739b4ddc8c68fed1af3f85b90386155#egg=dnnv
 
 # Install CPLEX
 aria2c -x 10 -s 10 -k 1M "http://d.huan-zhang.com/storage/programs/cplex_studio2210.linux_x86_64.bin"
@@ -59,7 +62,7 @@ EOF
 sudo ./cplex_studio2210.linux_x86_64.bin -f response.txt
 
 # Build CPLEX interface
-make -C ${TOOL_DIR}/complete_verifier/CPLEX_cuts/
+make -C ${TOOL_DIR}/complete_verifier/cuts/CPLEX_cuts/
 
 echo "Checking python requirements (it might take a while...)"
 if [ "$(${VNNCOMP_PYTHON_PATH}/python -c 'import torch; print(torch.__version__)')" != '1.11.0' ]; then
@@ -68,5 +71,25 @@ if [ "$(${VNNCOMP_PYTHON_PATH}/python -c 'import torch; print(torch.__version__)
     exit 1
 fi
 
-# Run grbprobe for activating gurobi later.
-${VNNCOMP_PYTHON_PATH}/grbprobe
+if [ "$(${VNNCOMP_PYTHON_LEGACY_PATH}/python -c 'import torch; print(torch.__version__)')" != '1.11.0' ]; then
+    echo "Unsupported PyTorch version"
+    echo "Installation Failure!"
+    exit 1
+fi
+
+# Setup Gurobi
+grbprobe_output=$(${VNNCOMP_PYTHON_PATH}/grbprobe)
+echo $grbprobe_output
+
+HOSTNAME=$(echo $grbprobe_output | grep -Po "(?<=HOSTNAME=)(.*?)(?= )")
+HOSTID=$(echo $grbprobe_output | grep -Po "(?<=HOSTID=)(.*?)(?= )")
+USERNAME=$(echo $grbprobe_output | grep -Po "(?<=USERNAME=)(.*?)(?= )")
+CORES=$(echo $grbprobe_output | grep -Po "(?<=CORES=)(.*?)(?= )")
+
+# Should generate a key from the gurobi website each time a new AWS instance is created
+echo "Please obtain a gurobi KEY from https://portal.gurobi.com/iam/licenses/request/?type=academic"
+KEY=to-be-filled
+
+# The url can only be accessed with terminals which are connected to the university network
+probe_url="https://portal.gurobi.com/keyserver?id=${KEY}&hostname=${HOSTNAME}&hostid=${HOSTID}&username=${USERNAME}&os=linux&localdate=2023-06-21&version=10&cores=${CORES}"
+echo $probe_url

@@ -23,13 +23,12 @@ solver:
     lr_beta: 0.05  # Learning rate for optimizing the beta parameters, the default (0.05) is typically ok, but you can try to tune this parameter to get better lower bound.
     iteration: 50  # Number of iterations for beta-CROWN optimization. 20 is often sufficient, 50 or 100 can also be used.
   mip:
-    parallel_solvers: 8 
+    parallel_solvers: 8
     solver_threads: 1
 bab:
   timeout: 600 # Timeout threshold for branch and bound. Increase for verifying more points.
   max_domains: 5000000
   get_upper_bound: true  # Needed for Bab-Attack.
-  batched_domain_list: false  # Needed for BaB-Attack.
   attack:
     enabled: true
     beam_candidates: 32
@@ -38,7 +37,7 @@ bab:
     min_local_free_ratio: 0.4
     mip_timeout: 30
     mip_start_iteration: 2
-    refined_mip_attacker: false 
+    refined_mip_attacker: false
   branching:  # Parameters for branching heuristics.
     reduceop: min  # Reduction function for the branching heuristic scores, min or max. Using max can be better on some models.
     method: kfsb  # babsr is fast but less accurate; fsb is slow but most accurate; kfsb is usualy a balance.

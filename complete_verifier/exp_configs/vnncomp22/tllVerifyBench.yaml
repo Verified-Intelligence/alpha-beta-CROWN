@@ -4,8 +4,9 @@ general:
   csv_name: instances.csv
   enable_incomplete_verification: False
   conv_mode: matrix
+specification:
+  robustness_type: all-positive
 data:
-  dataset: TLLVerifyBench
   num_outputs: 1
 model:
   onnx_optimization_flags: merge_linear

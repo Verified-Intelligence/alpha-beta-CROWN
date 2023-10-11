@@ -8,7 +8,7 @@ data:
   std: [0.2023, 0.1994, 0.201]
 specification:
   # Element-wise perturbation. The magnitude of each pixel is defined in the cifar10() dataloader in custom_model_data.py.
-  type: bound
+  type: box
   epsilon: 0.00784313725  # 2./255. Used by cifar10() loader to generate element-wise bounds.
 attack:
   pgd_restarts: 100

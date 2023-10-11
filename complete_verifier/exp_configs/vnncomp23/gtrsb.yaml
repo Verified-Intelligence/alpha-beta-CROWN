@@ -1,0 +1,36 @@
+general:
+  loss_reduction_func: min
+  root_path: ../../vnncomp2023_benchmarks/benchmarks/traffic_signs_recognition
+  csv_name: instances.csv
+  graph_optimizer: Customized("custom_graph_optimizer", "merge_sign")
+  no_batchdim_buffers: True
+model:
+  onnx_loader: Customized("custom_model_loader", "customized_Gtrsb_loader")
+  onnx_optimization_flags: fix_gtrsb
+  onnx_vnnlib_joint_optimization_flags: ["peel_off_last_softmax_layer"]
+  check_optmized: True
+attack:
+  pgd_order: before
+  pgd_restarts: 50
+  pgd_batch_size: 50
+  attack_func: Customized("custom_attacker", "use_LiRPANet")
+  adv_saver: Customized("custom_adv_saver", "customized_gtrsb_saver")
+  early_stop_condition: Customized("custom_early_stop_condition", "customized_gtrsb_condition")
+  pgd_loss: Customized("custom_pgd_loss", "customized_gtrsb_loss")
+  adv_example_finalizer: Customized("custom_adv_example_finalizer", "customized_gtrsb_adv_example_finalizer")
+solver:
+  batch_size: 128
+  alpha-crown:
+    disable_optimization: ['MaxPool']
+  beta-crown:
+    iteration: 20
+    lr_beta: 0.03
+  mip:
+    parallel_solvers: 8
+    solver_threads: 4
+    refine_neuron_time_percentage: 0.8
+    skip_unsafe: True
+bab:
+  branching:
+    candidates: 5
+    reduceop: max

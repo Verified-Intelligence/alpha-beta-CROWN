@@ -1,0 +1,40 @@
+; ACAS Xu property 2
+
+(declare-const X_0 Real)
+(declare-const X_1 Real)
+(declare-const X_2 Real)
+(declare-const X_3 Real)
+(declare-const X_4 Real)
+
+(declare-const Y_0 Real)
+(declare-const Y_1 Real)
+(declare-const Y_2 Real)
+(declare-const Y_3 Real)
+(declare-const Y_4 Real)
+
+; Unscaled Input 0: (55947.691, 60760)
+(assert (<= X_0 0.679857769))
+(assert (>= X_0 0.6))
+
+; Unscaled Input 1: (-3.141592653589793, 3.141592653589793)
+(assert (<= X_1 0.5))
+(assert (>= X_1 -0.5))
+
+; Unscaled Input 2: (-3.141592653589793, 3.141592653589793)
+(assert (<= X_2 0.5))
+(assert (>= X_2 -0.5))
+
+; Unscaled Input 3: (1145, 1200)
+(assert (<= X_3 0.5))
+(assert (>= X_3 0.45))
+
+; Unscaled Input 4: (0, 60)
+(assert (<= X_4 -0.45))
+(assert (>= X_4 -0.5))
+
+; Unsafe if COC is maximal
+(assert (<= Y_1 Y_0))
+(assert (<= Y_2 Y_0))
+(assert (<= Y_3 Y_0))
+(assert (<= Y_4 Y_0))
+

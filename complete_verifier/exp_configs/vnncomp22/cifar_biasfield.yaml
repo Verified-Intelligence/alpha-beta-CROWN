@@ -6,7 +6,6 @@ general:
 model:
   onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
 data:
-  dataset: Cifar_biasfield
   num_outputs: 10
 solver:
   batch_size: 4  # Number of parallel domains to compute on GPU.

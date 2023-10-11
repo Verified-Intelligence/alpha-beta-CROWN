@@ -1,0 +1,24 @@
+# Configuration file for running the collins_rul_cnn benchmark (all properties).
+general:
+  root_path: ../../vnncomp2023_benchmarks/benchmarks/collins_rul_cnn # https://github.com/ChristopherBrix/vnncomp2023_benchmarks/tree/main/benchmarks/collins_rul_cnn
+  # root_path: ../../vnncomp22/benchmarks/collins  # https://github.com/loonwerks/vnncomp2022
+  csv_name: instances.csv
+  enable_incomplete_verification: False
+  loss_reduction_func: max
+  conv_mode: matrix
+solver:
+  batch_size: 100  # Number of parallel domains to compute on GPU.
+  bound_prop_method: crown
+  beta-crown:
+    iteration: 10  # Iterations for computing intermediate layer bounds.
+bab:
+  branching:
+    method: sb
+    input_split:
+      enable: True
+      enhanced_bound_patience: 30
+      enhanced_branching_method: sb
+      enhanced_bound_prop_method: crown
+attack:
+  pgd_order: before
+  pgd_restarts: 100

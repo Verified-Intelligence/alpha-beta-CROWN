@@ -13,64 +13,46 @@
 #########################################################################
 """Build, solve, and refine output bounds using gurobi LP/MIP solver based on the bounds obtained by auto_LiRPA."""
 
-import copy
 import time
 import random
-from collections import defaultdict, OrderedDict
-
-import torch
-import arguments
-from torch.nn import ZeroPad2d
-
-import torch.nn.functional as F
-import torch.nn as nn
-
-from auto_LiRPA import BoundedModule, BoundedTensor
-from auto_LiRPA.perturbations import *
-from auto_LiRPA.utils import (reduction_min, reduction_max, reduction_mean, reduction_sum,
-                            stop_criterion_sum, stop_criterion_min)
-from model_defs import Flatten
-from auto_LiRPA.bound_ops import BoundRelu, BoundLinear, BoundConv, BoundBatchNormalization, BoundAdd
-import beta_CROWN_solver
-
-try:
-    from scip_model import SCIPModel, EarlyStopEvent, GenerateCutsEvent
-except:
-    pass
-
 import multiprocessing
 import multiprocessing.pool
 import sys
 import os
 import subprocess
 
-CPLEX_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CPLEX_cuts")
-# CPLEX_FOLDER = "CPLEX_cuts"
+import torch
+import torch.nn as nn
 
+import arguments
+
+from auto_LiRPA.perturbations import *
+from auto_LiRPA.utils import stop_criterion_min, reduction_str2func
+from auto_LiRPA.bound_ops import BoundLinear, BoundConv, BoundBatchNormalization, BoundAdd
+from auto_LiRPA.beta_crown import SparseBeta
+
+import beta_CROWN_solver
+from utils import get_reduce_op, get_batch_size_from_masks
+try:
+    from scip_model import SCIPModel, EarlyStopEvent, GenerateCutsEvent
+except:  # pylint: disable=bare-except
+    pass
 try:
     import gurobipy as grb
 except ModuleNotFoundError:
     pass
 
-def reduction_str2func(reduction_func):
-    if type(reduction_func) == str:
-        if reduction_func == 'min':
-            return reduction_min
-        elif reduction_func == 'max':
-            return reduction_max
-        elif reduction_func == 'sum':
-            return reduction_sum
-        elif reduction_func == 'mean':
-            return reduction_mean
-        else:
-            raise NotImplementedError(f'Unknown reduction_func {reduction_func}')
-    else:
-        return reduction_func
+from typing import TYPE_CHECKING, Callable, List
+if TYPE_CHECKING:
+    from .beta_CROWN_solver import LiRPANet
+
+
+CPLEX_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cuts/CPLEX_cuts")
 
 
 def handle_gurobi_error(message):
     print(f'Gurobi error: {message}')
-    raise
+    raise grb.GurobiError(message)
 
 
 multiprocess_mip_model = None
@@ -81,8 +63,93 @@ mip_refine_timeout = 230
 mip_solve_time_start = None
 
 
-def mip_solver(candidate, init=None):
-    """ Multiprocess worker for solving MIP models in build_the_model_mip_refine """
+def mip(model, ret_incomplete, labels_to_verify=None, mip_skip_unsafe=False):
+    ret = {key: None for key in [
+        'global_lb', 'lower_bounds', 'upper_bounds', 'refined_betas']}
+
+    if arguments.Config["general"]["complete_verifier"] == "mip":
+        mip_global_lb, mip_global_ub, mip_status = model.build_the_model_mip(
+            labels_to_verify=labels_to_verify, save_adv=True, mip_skip_unsafe=mip_skip_unsafe)
+        if mip_global_lb.ndim == 1:
+            mip_global_lb = mip_global_lb.unsqueeze(-1)  # Missing batch dimension.
+        if mip_global_ub.ndim == 1:
+            mip_global_ub = mip_global_ub.unsqueeze(-1)  # Missing batch dimension.
+        print(f'MIP solved lower bound: {mip_global_lb}')
+        print(f'MIP solved upper bound: {mip_global_ub}')
+        ret['global_lb'] = mip_global_lb
+        verified_status = "safe-mip"
+        # Batch size is always 1.
+        labels_to_check = labels_to_verify if labels_to_verify is not None else range(len(mip_status))
+        for pidx in labels_to_check:
+            if mip_global_lb[pidx] >= 0:
+                # Lower bound > 0, verified.
+                continue
+            # Lower bound < 0, now check upper bound.
+            if mip_global_ub[pidx] <= 0:
+                # Must be 2 cases: solved with adv example, or early terminate with adv example.
+                assert mip_status[pidx] in [2, 15]
+                if mip_skip_unsafe:
+                    return "unknown-mip", ret
+                else:
+                    print("verified unsafe-mip with init mip!")
+                    return "unsafe-mip", ret
+            # Lower bound < 0 and upper bound > 0, must be a timeout.
+            assert mip_status[pidx] == 9 or mip_status[pidx] == -1, "should only be timeout for label pidx"
+            verified_status = "unknown-mip"
+        print(f"verified {verified_status} with init mip!")
+        return verified_status, ret
+    elif arguments.Config["general"]["complete_verifier"] == "bab-refine":
+        print("Start solving intermediate bounds with MIP...")
+        score = FSB_score(model, ret_incomplete)
+        refined_lower_bounds, refined_upper_bounds, refined_betas = model.build_the_model_mip_refine(
+            ret_incomplete['lower_bounds'], ret_incomplete['upper_bounds'],
+            score=score, stop_criterion_func=stop_criterion_min(1e-4))
+        # shape of the last layer should be (batch, 1) for verified-acc
+        shape = ret_incomplete['lower_bounds'][model.final_name].shape
+        refined_lower_bounds[model.final_name] = refined_lower_bounds[model.final_name].reshape(shape)
+        refined_upper_bounds[model.final_name] = refined_upper_bounds[model.final_name].reshape(shape)
+        lower_bounds, upper_bounds, = refined_lower_bounds, refined_upper_bounds
+        refined_global_lb = lower_bounds[model.final_name]
+        print("refined global lb:", refined_global_lb, "min:", refined_global_lb.min())
+
+        # save output
+        if arguments.Config['general']['save_output']:
+            arguments.Globals['out']['refined_lb'] = refined_global_lb.cpu()
+
+        ret.update({
+            'global_lb': refined_global_lb,
+            'lower_bounds': lower_bounds, 'upper_bounds': upper_bounds,
+            'refined_betas': refined_betas,
+        })
+        ret['refined_betas'] = tuple([
+            { r.inputs[0].name: refined_betas[t][i][j]
+             for j, r in enumerate(model.net.relus)}
+            for i in range(len(refined_betas[t]))
+        ] for t in range(2))
+        if refined_global_lb.min()>=0:
+            print("Verified safe using alpha-CROWN with MIP improved bounds!")
+            return "safe-incomplete-refine", ret
+        else:
+            return "unknown", ret
+    else:
+        ret.update({
+            'global_lb': -float("inf"),
+            'lower_bounds': lower_bounds, 'upper_bounds': upper_bounds,
+        })
+        return "unknown", ret
+
+
+def mip_solver(
+        candidate,
+        init=None,
+        lower_bound: float = None,
+        upper_bound: float = None
+    ):
+    """ Multiprocess worker for solving MIP models in build_the_model_mip_refine
+
+    lower_bound and upper_bound are only used for logging in case the LP variable has
+    no bounds associated (those might be inf for linear layers)
+    """
     def get_grb_solution(grb_model, reference, bound_type, eps=1e-5):
         refined = False
         if grb_model.status == 9:
@@ -174,6 +241,12 @@ def mip_solver(candidate, init=None):
     model = multiprocess_mip_model.copy()
     v = model.getVarByName(candidate)
     out_lb, out_ub = v.LB, v.UB
+    if lower_bound is not None:
+        assert out_lb == -np.inf or out_lb == lower_bound
+        out_lb = lower_bound
+    if upper_bound is not None:
+        assert out_ub == np.inf or out_ub == upper_bound
+        out_ub = upper_bound
     refine_time = time.time()
     neuron_refined = False
     if time.time() - mip_refine_time_start >= mip_refine_timeout:
@@ -365,7 +438,7 @@ def mip_solver_attack(new_splits):
     return objval, objbound, status, solution
 
 
-def mip_solver_lb_ub(candidate, init=None, save_adv=None):
+def mip_solver_lb_ub(candidate, init=None, save_adv=None, mip_skip_unsafe=False):
     """ Solving MIP for adversarial attack/complete verification.
     init: warm up with given init which is usually found by pgd attack
     save_adv: a list of input names that we need to retrieve if an adv found
@@ -421,7 +494,8 @@ def mip_solver_lb_ub(candidate, init=None, save_adv=None):
     if vub < 0:
         # An adversarial example is found
         # print("stop: adv found!")
-        stop_multiprocess = True
+        if not mip_skip_unsafe:
+            stop_multiprocess = True
         if save_adv:
             adv = [model.getVarByName(var_name).X for var_name in save_adv]
 
@@ -485,16 +559,32 @@ def lp_solver(candidate):
     return vlb, vub, print_str, refined
 
 
-def build_solver_model(m, timeout, mip_multi_proc=None,
-         mip_threads=1, model_type="mip", x=None, intermediate_bounds=None):
+def build_solver_model(
+    m: 'LiRPANet',
+    timeout,
+    mip_multi_proc=None,
+    mip_threads=1,
+    model_type="mip",
+    x=None,
+    intermediate_bounds=None,
+    include_C=True,
+    final_layer_name=None,
+    model_modifier_callback: Callable = None,
+):
     """
-    m is the instance of LiRPAConvNet
+    m is the instance of LiRPANet
     model_type ["mip", "lp", "lp_integer"]: three different types of guorbi solvers
     lp_integer using mip formulation but continuous integer variable from 0 to 1 instead of
     binary variable as mip; lp_integer should have the same results as lp but allowing us to
     estimate integer variables.
     NOTE: we build lp/mip solver from computer graph
     """
+    if include_C:
+        C = m.c
+    else:
+        C = None
+    if final_layer_name is None:
+        final_layer_name = m.net.final_name
     build_mip_start_time = time.time()
     if m.pool is not None:
         # Must close the pool because the old model shared to the pool workers is now stale.
@@ -521,6 +611,8 @@ def build_solver_model(m, timeout, mip_multi_proc=None,
         m.net.model = SCIPModel()
     else:
         raise NotImplementedError
+    # Layers must be reset, otherwise variables won't be recreated
+    m.net._reset_solver_vars(m.net[final_layer_name])
 
     ### Merge the current params to a new solver model config function
     m.net.model.setParam('OutputFlag', bool(os.environ.get('ALPHA_BETA_CROWN_MIP_DEBUG', False)))
@@ -529,7 +621,7 @@ def build_solver_model(m, timeout, mip_multi_proc=None,
     m.net.model.setParam('TimeLimit', timeout)
     cut_options = os.environ.get('ALPHA_BETA_CROWN_MIP_CUT_DEBUG', None)
     if cut_options is not None:
-        net.model.setParam('Cuts', 0)
+        m.net.model.setParam('Cuts', 0)
         for cut in cut_options.strip().split(','):
             cut, val = cut.strip().split('=')
             val = int(val)
@@ -538,13 +630,17 @@ def build_solver_model(m, timeout, mip_multi_proc=None,
             else:
                 suffix = 'Cuts'
             print(f'Setting {cut}{suffix} to {val}')
-            net.model.setParam(f'{cut}{suffix}', val)
+            m.net.model.setParam(f'{cut}{suffix}', val)
     print(f"mip_multi_proc: {mip_multi_proc}, mip_threads: {mip_threads}, total threads used: {mip_multi_proc*mip_threads}")
     build_mip_time = time.time()
 
     # build model in auto_LiRPA
     out_vars = m.net.build_solver_module(
-            x=x, C=m.c, intermediate_layer_bounds=intermediate_bounds, final_node_name=m.net.final_name, model_type=model_type, solver_pkg=m.net.solver_pkg)
+        x=x, C=C, interm_bounds=intermediate_bounds,
+        final_node_name=final_layer_name, model_type=model_type,
+        solver_pkg=m.net.solver_pkg)
+    if model_modifier_callback is not None:
+        model_modifier_callback(m.net.model)
     m.net.model.update()
     build_mip_time = time.time() - build_mip_start_time
     print(f"{model_type} solver model built in {build_mip_time:.4f} seconds.")
@@ -552,7 +648,16 @@ def build_solver_model(m, timeout, mip_multi_proc=None,
 
 
 # updated function using general computation graph to build lp model
-def build_the_model_lp(m, using_integer=True, get_primals=False):
+def build_the_model_lp(
+        m: 'LiRPANet',
+        using_integer=True,
+        get_primals=False,
+        optimized_layer_name=None,
+        final_layer_name=None,
+        compute_upper_bound=False,
+        include_output_constraint=False,
+        rhs=None,
+    ):
     """
     Before the first branching, we build the solver model
     using_integer:
@@ -561,17 +666,42 @@ def build_the_model_lp(m, using_integer=True, get_primals=False):
     Output: the lower bound by solver model
     NOTE: We only consider one output node for now
     """
+    if optimized_layer_name is None:
+        optimized_layer_name = m.net.final_name
+    if final_layer_name is None:
+        final_layer_name = m.net.final_name
+    if include_output_constraint:
+        assert rhs is not None
+
     timeout = arguments.Config["bab"]["timeout"]
     model_type = "lp"
     if using_integer: model_type = "lp_integer"
+    m.layers = list(m.model_ori.children())
+
+    def add_output_constraint(model):
+        final_layer_vars = m.net.final_node().solver_vars
+        assert len(final_layer_vars) == 1, len(final_layer_vars)
+        final_layer_var = final_layer_vars[0]
+        assert rhs.shape == (1,1), rhs
+        model.addConstr(final_layer_var <= rhs, name='output_constraint')
 
     # build the solver models
-    m.build_solver_model(timeout, model_type=model_type)
+    m.build_solver_model(
+        timeout,
+        model_type=model_type,
+        include_C=(optimized_layer_name == final_layer_name or include_output_constraint),
+        final_layer_name=(final_layer_name if include_output_constraint else optimized_layer_name),
+        model_modifier_callback=add_output_constraint if include_output_constraint else None,
+    )
 
-    out_vars = m.net[m.net.final_name].solver_vars
+    out_vars = m.net[optimized_layer_name].solver_vars
+    glbs = []
     for obj in out_vars:
         guro_start = time.time()
-        m.net.model.setObjective(obj, grb.GRB.MINIMIZE)
+        if compute_upper_bound:
+            m.net.model.setObjective(obj, grb.GRB.MAXIMIZE)
+        else:
+            m.net.model.setObjective(obj, grb.GRB.MINIMIZE)
         try:
             m.net.model.optimize()
         except grb.GurobiError as e:
@@ -579,8 +709,9 @@ def build_the_model_lp(m, using_integer=True, get_primals=False):
 
         status = m.net.model.status
         assert status == 2, f"LP wasn't optimally solved status:{status}"
-        print(f"[{obj}]- status: {status}, time: {time.time() - guro_start}")
+        # print(f"[{obj}]- status: {status}, time: {time.time() - guro_start}")
         glb = obj.X if status != 3 else None
+        glbs.append(glb)
 
     if get_primals:
         # get the primal values for each layer from gurobi lp model
@@ -623,7 +754,7 @@ def build_the_model_lp(m, using_integer=True, get_primals=False):
         print("### Extracting primal values from gurobi lp model done ###")
         # m.solve_diving_lp(primal_vars, integer_vars, lower_bounds, upper_bounds)
 
-    return glb
+    return glbs
 
 
 def update_model_bounds(solver_model, lower_bounds, upper_bounds,
@@ -680,7 +811,6 @@ def all_node_split_LP(m, lower_bounds, upper_bounds, rhs):
                 pre_relu_layer_names, relu_layer_names, m.net.model_type)
     print('Finished building Gurobi LP model for all node split. Start solving the LP!')
     lp_status = "unsafe"
-    adv = None
 
     assert lower_bounds[-1].size(0) == 1,  "only bounds with batch size 1"
     guro_start = time.time()
@@ -718,7 +848,7 @@ def all_node_split_LP(m, lower_bounds, upper_bounds, rhs):
             break
     del m.all_node_model
     print(f"#### all node split glb:", glbs)
-    return lp_status, glbs, adv
+    return lp_status, glbs
 
 
 
@@ -742,13 +872,13 @@ def construct_mip_with_model(unwrapped_model, x, input_shape, c, intermediate_bo
     # Bug still exists on Pytorch 1.11 with any tensor greater than  128 KBytes.
     torch.set_num_threads(1)
     # This will create the BoundedModule object at model.net.
-    model = beta_CROWN_solver.LiRPAConvNet(unwrapped_model, in_size=input_shape, c=c, device='cpu')
+    model = beta_CROWN_solver.LiRPANet(unwrapped_model, in_size=input_shape, c=c, device='cpu')
     build_the_model_mip(model, labels_to_verify=None, save_mps=save_mps, process_dict=process_dict, x=x, intermediate_bounds=intermediate_bounds)
 
 
 # updated function using general computation graph to build lp model
 # @torch.no_grad()
-def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=None, save_adv=False, x=None, intermediate_bounds=None):
+def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=None, save_adv=False, x=None, intermediate_bounds=None, mip_skip_unsafe=False):
     """
     Using the built gurobi model to solve mip formulation in parallel
     lower_bounds, upper_bounds: intermediate relu bounds from beta-crown
@@ -767,7 +897,7 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
     solver_pkg = arguments.Config["solver"]["mip"]["mip_solver"]
     adv_warmup = arguments.Config["solver"]["mip"]["adv_warmup"]
 
-    build_solver_model(m, timeout, mip_multi_proc=mip_multi_proc, 
+    build_solver_model(m, timeout, mip_multi_proc=mip_multi_proc,
                     mip_threads=mip_threads, model_type="mip", x=x, intermediate_bounds=intermediate_bounds)
 
     out_vars = m.net[m.net.final_name].solver_vars
@@ -835,7 +965,6 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
         print('parallel mps save finish')
 
         for pidx in model_filename_stamped_dict:
-            # import pdb; pdb.set_trace()
             # t1 = multiprocessing.Process(target=f"./{CPLEX_FOLDER}/get_cuts", args=[f"{model_filename}.mps", f"{CPLEX_FOLDER}/{model_filename}"])
             # t1 = multiprocessing.Process(target=run_get_cuts_subprocess, args=[CPLEX_FOLDER, model_filename])
             # t1.start()
@@ -885,9 +1014,9 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
         for neuron_idx in candidate_neuron_ids:
             adv_list.append((adv[neuron_idx + layer_size], adv[neuron_idx])) # (low adv, max adv)
             assert min_values[neuron_idx] >= lb[neuron_idx]
-        candidates = [(name, adv, input_names) for name, adv in zip(candidates, adv_list)]
+        candidates = [(name, adv, input_names, mip_skip_unsafe) for name, adv in zip(candidates, adv_list)]
     else:
-        candidates = [(name, None, input_names) for name in candidates]
+        candidates = [(name, None, input_names, mip_skip_unsafe) for name in candidates]
 
     with multiprocessing.Pool(mip_multi_proc) as pool:
         solver_result = pool.starmap(mip_solver_lb_ub, candidates, chunksize=1)
@@ -906,7 +1035,7 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
     lb, ub = torch.tensor(lb), torch.tensor(ub)
     if save_adv and adv_new is not None:
         mip_adv = np.array(adv_new).reshape(input_shape).tolist()
-    return lb, ub, status, mip_adv
+    return lb, ub, status
 
 def run_get_cuts_subprocess(model_filename):
     # remove legancy file to avoid collision
@@ -1000,47 +1129,30 @@ def compute_ratio(lower_bound, upper_bound):
     return slope_ratio, intercept
 
 
-def get_branching_op(branching_reduceop):
-    """
-    helper function to match reduce_op
-    """
-    if branching_reduceop == 'min':
-        reduce_op = torch.min
-    elif branching_reduceop == 'max':
-        reduce_op = torch.max
-    elif branching_reduceop == 'mean':
-        reduce_op = torch.mean
-    else:
-        reduce_op = None
-    return reduce_op
+def FSB_score(model, results, branching_reduceop='min'):
+    """Use FSB to sort the order for mip refinement."""
 
+    # FIXME duplicate code (with those in branching heuristics)
 
-def FSB_score(net, lower_bounds, upper_bounds, orig_mask, pre_relu_indices, lAs, branching_candidates=5,
-            branching_reduceop='min', slopes=None):
-    """
-    Use FSB to sort the order for mip refinement
-    """
-    batch = len(orig_mask[0])
-    # Mask is 1 for unstable neurons. Otherwise it's 0.
-    mask = orig_mask
-    reduce_op = get_branching_op(branching_reduceop)
-    topk = branching_candidates
+    batch = get_batch_size_from_masks(results['mask'])
+    reduce_op = get_reduce_op(branching_reduceop)
 
     score = []
     intercept_tb = []
     relu_idx = -1
-    number_bounds = lower_bounds[-1].shape[0]
+    number_bounds = results['lower_bounds'][model.final_name].shape[0]
 
-    for layer in reversed(net.relus):
-        ratio = lAs[relu_idx]
-        this_layer_mask = mask[relu_idx].unsqueeze(1)
-        ratio_temp_0, ratio_temp_1 = compute_ratio(lower_bounds[pre_relu_indices[relu_idx]],
-                                                    upper_bounds[pre_relu_indices[relu_idx]])
+    for layer in reversed(model.net.relus):
+        ratio = results['lA'][layer.name]
+        key = layer.inputs[0].name
+        assert len(results['mask'][layer.name]) == 1
+        this_layer_mask = results['mask'][layer.name][0].unsqueeze(1)
+        ratio_temp_0, ratio_temp_1 = compute_ratio(
+            results['lower_bounds'][key], results['upper_bounds'][key])
         # Intercept
         intercept_temp = torch.clamp(ratio, max=0)
         intercept_candidate = intercept_temp * ratio_temp_1
         intercept_tb.insert(0, (intercept_candidate.view(batch, number_bounds, -1) * this_layer_mask).mean(1))
-
         # Bias
         input_node = layer.inputs[0]
         assert isinstance(input_node, (BoundConv, BoundLinear, BoundBatchNormalization, BoundAdd))
@@ -1054,7 +1166,6 @@ def FSB_score(net, lower_bounds, upper_bounds, orig_mask, pre_relu_indices, lAs,
             b_temp = input_node.inputs[-1].param.detach()
         elif type(input_node) == BoundAdd:
             b_temp = 0
-            # print(input_node.inputs)
             for l in input_node.inputs:
                 if type(l) == BoundConv:
                     if len(l.inputs) > 2:
@@ -1284,11 +1395,12 @@ def _intermediate_PGD_attack(m, relu_idx, restarts=3, attack_iters=50, alpha=Non
         alpha = (ub - lb).max() / 10.
 
     # print(forward_value[0, 10])
-    max_values = -torch.ones(layer_size).cuda() * 1e8
-    min_values = torch.ones(layer_size).cuda() * 1e8
-    best_delta = torch.zeros_like(X).cuda()
+    device = m.net.device
+    max_values = -torch.ones(layer_size, device=device) * 1e8
+    min_values = torch.ones(layer_size, device=device) * 1e8
+    best_delta = torch.zeros_like(X, device=device)
     for zz in range(restarts):
-        delta = torch.zeros_like(X).cuda()
+        delta = torch.zeros_like(X, device=device)
         delta.uniform_(0,1)
         delta = delta * (ub - lb) + lb
         delta = (delta - X).detach()
@@ -1301,8 +1413,8 @@ def _intermediate_PGD_attack(m, relu_idx, restarts=3, attack_iters=50, alpha=Non
                 forward_value = m.net.relus[relu_idx].inputs[0].forward_value
             else:
                 forward_value = m.net.final_node().forward_value.mm(m.c[0].T)
-            maxv = forward_value[:layer_size].masked_select(torch.eye(layer_size).bool().cuda())
-            minv = forward_value[layer_size:].masked_select(torch.eye(layer_size).bool().cuda())
+            maxv = forward_value[:layer_size].masked_select(torch.eye(layer_size, device=device).bool())
+            minv = forward_value[layer_size:].masked_select(torch.eye(layer_size, device=device).bool())
             # print(maxv[218], minv[218])
             # print(zz, maxv[1], minv[1])
             loss = maxv.sum() - minv.sum()
@@ -1315,8 +1427,8 @@ def _intermediate_PGD_attack(m, relu_idx, restarts=3, attack_iters=50, alpha=Non
             forward_value = m.net.relus[relu_idx].inputs[0].forward_value
         else:
             forward_value = m.net.final_node().forward_value.mm(m.c[0].T)
-        maxv = forward_value[:layer_size].masked_select(torch.eye(layer_size).bool().cuda())
-        minv = forward_value[layer_size:].masked_select(torch.eye(layer_size).bool().cuda())
+        maxv = forward_value[:layer_size].masked_select(torch.eye(layer_size, device=device).bool())
+        minv = forward_value[layer_size:].masked_select(torch.eye(layer_size, device=device).bool())
         max_idx = (maxv >= max_values)
         min_idx = (minv <= min_values)
         best_delta[:layer_size][max_idx] = delta.detach()[:layer_size][max_idx]
@@ -1347,13 +1459,24 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
             m.model_lower_bounds and m.model_upper_bounds are kepts mainly for
             debugging purpose and could be removed
     """
+
+    m.layers = list(m.model_ori.children())
+
+    # Adapter
+    lower_bounds = (
+        [lower_bounds[r.inputs[0].name] for r in m.net.relus]
+        + [lower_bounds[m.final_name]])
+    upper_bounds = (
+        [upper_bounds[r.inputs[0].name] for r in m.net.relus]
+        + [upper_bounds[m.final_name]])
+
     new_relu_mask = []
     x = m.x
     input_domain = m.input_domain
 
     lr_init_alpha = arguments.Config["solver"]["alpha-crown"]["lr_alpha"]
     lr_decay = arguments.Config["solver"]["beta-crown"]["lr_decay"]
-    share_slopes = arguments.Config["solver"]["alpha-crown"]["share_slopes"]
+    share_alphas = arguments.Config["solver"]["alpha-crown"]["share_alphas"]
     optimizer = arguments.Config["solver"]["beta-crown"]["optimizer"]
     loss_reduction_func = reduction_str2func(arguments.Config["general"]["loss_reduction_func"])
     mip_multi_proc = arguments.Config["solver"]["mip"]["parallel_solvers"]
@@ -1365,16 +1488,16 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
     mip_refine_timeout = arguments.Config["solver"]["mip"]["refine_neuron_time_percentage"] * arguments.Config["bab"]["timeout"]
 
     # preset the args for incomplete full crown with refined bounds
-    m.net.init_slope((m.x,), share_slopes=share_slopes, c=m.c)
+    m.net.init_alpha((m.x,), share_alphas=share_alphas, c=m.c)
     m.net.set_bound_opts({'verbosity': 1})
-    m.net.set_bound_opts({'optimize_bound_args': {'iteration': 100, 'enable_beta_crown': False, 'enable_alpha_crown': True,
-                                                  'use_shared_alpha': share_slopes, 'optimizer': optimizer,
-                                                  'early_stop': False,
-                                                  'keep_best': True, 'fix_intermediate_layer_bounds': True,
-                                                  'lr_alpha': lr_init_alpha, 'init_alpha': False,
-                                                  'loss_reduction_func': loss_reduction_func,
-                                                  'stop_criterion_func': stop_criterion_func,
-                                                  'lr_decay': lr_decay}})
+    m.net.set_bound_opts({'optimize_bound_args': {
+        'iteration': 100, 'enable_beta_crown': False, 'enable_alpha_crown': True,
+        'use_shared_alpha': share_alphas, 'optimizer': optimizer,
+        'fix_interm_bounds': True,
+        'lr_alpha': lr_init_alpha, 'init_alpha': False,
+        'loss_reduction_func': loss_reduction_func,
+        'stop_criterion_func': stop_criterion_func,
+        'lr_decay': lr_decay}})
     lb_refined, ub_refined = None, None
 
     # Initialize the model
@@ -1430,9 +1553,8 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                     lb = input_domain[chan, row, col, 0]
                     ub = input_domain[chan, row, col, 1]
                     v = m.model.addVar(lb=lb, ub=ub, obj=0,
-                                            vtype=grb.GRB.CONTINUOUS,
-                                            name=f'inp_{dim}')
-                                            # name=f'inp_[{chan},{row},{col}]')
+                                       vtype=grb.GRB.CONTINUOUS,
+                                       name=f'inp_{dim}')
                     row_vars.append(v)
                     dim += 1
                 chan_vars.append(row_vars)
@@ -1452,13 +1574,11 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
     # need to handle the cases where unstabled neurons are refined to stable
     # (this relu_idx layer neuron idx, 1:>0, -1:<0)
     unstable_to_stable = [[] for _ in m.net.relus]
-    # print(len(m.layers), len(m.net.relus), len(lower_bounds))
     last_relu_layer_refined = False
     for layer in m.layers:
         this_layer_refined = False
         new_layer_gurobi_vars = []
         if type(layer) is nn.Linear:
-
             # Get the better estimates from KW and Interval Bounds
             # print("linear", layer_idx, relu_idx, lower_bounds[relu_idx].shape, layer.weight.shape)
             out_lbs = lower_bounds[relu_idx].squeeze(0)
@@ -1487,7 +1607,10 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                 out_lb = out_lbs[neuron_idx].item()
                 out_ub = out_ubs[neuron_idx].item()
 
-                v = m.model.addVar(lb=out_lb, ub=out_ub, obj=0,
+                # This is a linear layer, so its bounds only depend on the previous
+                # layer's bounds. Specifying them here will not help Gurobi, but adds
+                # constraints it has to keep track of. Therefore, we set them to +/- inf
+                v = m.model.addVar(lb=-np.inf, ub=np.inf, obj=0,
                                         vtype=grb.GRB.CONTINUOUS,
                                         name=f'lay{layer_idx}_{neuron_idx}')
                 m.model.addConstr(lin_expr == v)
@@ -1495,7 +1618,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
 
                 # if relu_idx == 1 and (out_lb * out_ub < 0):
                 if (relu_idx >= 1 and relu_idx < len(m.net.relus)) and (out_lb * out_ub < 0) and (time.time() - mip_refine_time_start<mip_refine_timeout):
-                    candidates.append(v.VarName)
+                    candidates.append((v.VarName, None, out_lb, out_ub))
                     candidate_neuron_ids.append(neuron_idx)
 
                 new_layer_gurobi_vars.append(v)
@@ -1511,10 +1634,6 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                     candidate_neuron_ids = candidate_neuron_ids[:int(len(candidate_neuron_ids)*topk_filter)]
                 print("sorted candidates", candidates, "filter:", topk_filter)
 
-            for vi in new_layer_gurobi_vars:
-                vi.LB = -np.inf
-                vi.UB = np.inf
-
             ######## update inf to all current layer bounds!!! #########
             m.model.update()
             ########
@@ -1526,13 +1645,14 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                 if relu_idx == 1:
                     if adv_warmup:
                         # create pgd adv list as mip refinement warmup
-                        adv, max_values, min_values = _intermediate_PGD_attack(m, relu_idx, restarts=3, attack_iters=50, alpha=None)
+                        adv, max_values, min_values = _intermediate_PGD_attack(
+                            m, relu_idx, restarts=3, attack_iters=50, alpha=None)
                         adv_list = []
                         layer_size = weight.size(0)
                         for neuron_idx in candidate_neuron_ids:
                             adv_list.append((adv[neuron_idx + layer_size].cpu().tolist(), adv[neuron_idx].cpu().tolist())) # (low adv, max adv)
                             # assert min_values[neuron_idx] >= lower_bounds[relu_idx][0, neuron_idx] and max_values[neuron_idx] <= upper_bounds[relu_idx][0, neuron_idx]
-                        candidates = [(name, adv) for name, adv in zip(candidates, adv_list)]
+                        candidates = [(name, adv, out_lb, out_ub) for (name, _, out_lb, out_ub), adv in zip(candidates, adv_list)]
 
                         # the second relu layer where mip refine starts
                         with multiprocessing.Pool(mip_multi_proc) as pool:
@@ -1587,38 +1707,31 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                     m.model.update()
 
                     # max_splits_per_layer = len(unstable_to_stable[relu_idx])
-                    batch = 1
                     device = m.net.device
                     if not arguments.Config['solver']['beta-crown']['enable_opt_interm_bounds']:
                         for relu_layer in m.net.relus:
-                            relu_layer.sparse_beta = torch.zeros(size=(1, 0), dtype=torch.get_default_dtype(), device=device, requires_grad=True)
-                            relu_layer.sparse_beta_loc = torch.zeros(size=(1, 0), dtype=torch.int64, device=device, requires_grad=False)
-                            relu_layer.sparse_beta_sign = torch.zeros(size=(1, 0), dtype=torch.get_default_dtype(), device=device, requires_grad=False)
+                            relu_layer.sparse_betas = [SparseBeta((1, 0), device=device)]
                     else:
                         max_splits_per_layer = [0 for _ in range(len(m.net.relus))]
                         # max_splits_per_layer[1] = len(unstable_to_stable[relu_idx])
-                        for ridx, relu_layer in enumerate(m.net.relus):
-                            relu_layer.sparse_beta, relu_layer.sparse_beta_loc, relu_layer.sparse_beta_sign = {}, {}, {}
+                        for relu_layer in m.net.relus:
+                            relu_layer.sparse_betas = {}
                             for key in relu_layer.alpha.keys():
-                                relu_layer.sparse_beta[key] = torch.zeros(size=(1, 0), dtype=torch.get_default_dtype(), device=device, requires_grad=True)
-                                relu_layer.sparse_beta_loc[key] = torch.zeros(size=(1, 0), dtype=torch.int64, device=device, requires_grad=False)
-                                relu_layer.sparse_beta_sign[key] = torch.zeros(size=(1, 0), dtype=torch.get_default_dtype(), device=device, requires_grad=False)
+                                relu_layer.sparse_betas[key] = SparseBeta((1, 0), device=device)
 
                     ##### debug the beta crown bound propagate with mip refined bounds #####
                     # max_splits_per_layer = len(unstable_to_stable[maximum_refined_relu_layers])
                     # refined_relu_layer = m.net.relus[maximum_refined_relu_layers]
-                    # for key in refined_relu_layer.sparse_beta.keys():
+                    # for key in refined_relu_layer.sparse_betas.keys():
                     #     # init all intermediate betas
-                    #     refined_relu_layer.sparse_beta[key] = torch.zeros(size=(1, max_splits_per_layer), dtype=torch.get_default_dtype(), device=device, requires_grad=True)
-                    #     refined_relu_layer.sparse_beta_loc[key] = torch.zeros(size=(1, max_splits_per_layer), dtype=torch.int64, device=device, requires_grad=False)
-                    #     refined_relu_layer.sparse_beta_sign[key] = torch.zeros(size=(1, max_splits_per_layer), dtype=torch.get_default_dtype(), device=device, requires_grad=False)
+                    #     refined_relu_layer.sparse_betas[key] = SparseBeta((1, max_splits_per_layer), device=device)
                     # for neuron_idx, (stable_neuron_idx, sign) in enumerate(unstable_to_stable[maximum_refined_relu_layers]):
-                    #     for key in refined_relu_layer.sparse_beta.keys():
+                    #     for key in refined_relu_layer.sparse_betas.keys():
                     #         # assign split constraint into all intermdiate betas
-                    #         refined_relu_layer.sparse_beta_loc[key][0, neuron_idx] = stable_neuron_idx
-                    #         refined_relu_layer.sparse_beta_sign[key][0, neuron_idx] = sign
+                    #         refined_relu_layer.sparse_betas[key].loc[0, neuron_idx] = stable_neuron_idx
+                    #         refined_relu_layer.sparse_betas[key].sign[0, neuron_idx] = sign
                     # print("relu layer:", maximum_refined_relu_layers, "has unstable to stable neurons:", unstable_to_stable[maximum_refined_relu_layers])
-                    # intermediate_layer_bounds, reference_bounds = {}, {}
+                    # interm_bounds, reference_bounds = {}, {}
                     # # for i, layer in enumerate(m.net.relus):
                     # # only refined with the second relu layer
                     # for i, layer in enumerate(m.net.relus):
@@ -1626,7 +1739,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                     #     # if i>=(maximum_refined_relu_layers+1): break #### remember we don't need to set it in regular run!
                     #     nd = m.net.relus[i].inputs[0].name
                     #     print('reference bound:', i, nd, lower_bounds[i].shape)
-                    #     intermediate_layer_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
+                    #     interm_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
                     #     reference_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
 
                     # # print(f"{max_splits_per_layer} neurons are refined to stable!!!")
@@ -1647,7 +1760,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                             for neuron_idx in candidate_neuron_ids:
                                 adv_list.append((adv[neuron_idx + layer_size].cpu().tolist(), adv[neuron_idx].cpu().tolist())) # (low adv, max adv)
                                 # assert min_values[neuron_idx] >= lower_bounds[relu_idx][0, neuron_idx] and max_values[neuron_idx] <= upper_bounds[relu_idx][0, neuron_idx]
-                            candidates = [(name, adv) for name, adv in zip(candidates, adv_list)]
+                            candidates = [(name, adv, out_lb, out_ub) for (name, _, out_lb, out_ub), adv in zip(candidates, adv_list)]
 
                             solver_result = pool.starmap_async(mip_solver, candidates, chunksize=1)
 
@@ -1660,7 +1773,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                         if last_relu_layer_refined and (time.time() - mip_refine_time_start < mip_refine_timeout):
                             print(f"Run alpha-CROWN after refining layer {layer_idx-2} and relu idx {relu_idx-1}")
                             # using refined bounds with init opt crown for the previous optimized bounds
-                            intermediate_layer_bounds, reference_bounds = {}, {}
+                            interm_bounds, reference_bounds = {}, {}
                             # for i, layer in enumerate(m.net.relus):
                             # only refined with the second relu layer
                             for i, layer in enumerate(m.net.relus):
@@ -1668,7 +1781,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                                 # if i>=(maximum_refined_relu_layers+1): break
                                 nd = m.net.relus[i].inputs[0].name
                                 print(i, nd, lower_bounds[i].shape)
-                                intermediate_layer_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
+                                interm_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
                                 reference_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
 
                             # config intermediate betas for last refined relu layer
@@ -1677,24 +1790,20 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                             refined_relu_layer = m.net.relus[maximum_refined_relu_layers]
                             if not arguments.Config['solver']['beta-crown']['enable_opt_interm_bounds']:
                                 # init all regular betas
-                                refined_relu_layer.sparse_beta = torch.zeros(size=(1, max_splits_per_layer), dtype=torch.get_default_dtype(), device=device, requires_grad=True)
-                                refined_relu_layer.sparse_beta_loc = torch.zeros(size=(1, max_splits_per_layer), dtype=torch.int64, device=device, requires_grad=False)
-                                refined_relu_layer.sparse_beta_sign = torch.zeros(size=(1, max_splits_per_layer), dtype=torch.get_default_dtype(), device=device, requires_grad=False)
+                                refined_relu_layer.sparse_betas = [SparseBeta((1, max_splits_per_layer), device=device)]
                                 # assign split constraint into regular betas
                                 for neuron_idx, (refined_neuron, sign) in enumerate(unstable_to_stable[maximum_refined_relu_layers]):
-                                    refined_relu_layer.sparse_beta_loc[0, neuron_idx] = refined_neuron
-                                    refined_relu_layer.sparse_beta_sign[0, neuron_idx] = sign
+                                    refined_relu_layer.sparse_betas[0].loc[0, neuron_idx] = refined_neuron
+                                    refined_relu_layer.sparse_betas[0].sign[0, neuron_idx] = sign
                             else:
-                                for key in refined_relu_layer.sparse_beta.keys():
+                                for key in refined_relu_layer.sparse_betas.keys():
                                     # init all intermediate betas
-                                    refined_relu_layer.sparse_beta[key] = torch.zeros(size=(1, max_splits_per_layer), dtype=torch.get_default_dtype(), device=device, requires_grad=True)
-                                    refined_relu_layer.sparse_beta_loc[key] = torch.zeros(size=(1, max_splits_per_layer), dtype=torch.int64, device=device, requires_grad=False)
-                                    refined_relu_layer.sparse_beta_sign[key] = torch.zeros(size=(1, max_splits_per_layer), dtype=torch.get_default_dtype(), device=device, requires_grad=False)
+                                    refined_relu_layer.sparse_betas[key] = SparseBeta((1, max_splits_per_layer), device=device)
                                 for neuron_idx, (stable_neuron_idx, sign) in enumerate(unstable_to_stable[maximum_refined_relu_layers]):
-                                    for key in refined_relu_layer.sparse_beta.keys():
+                                    for key in refined_relu_layer.sparse_betas.keys():
                                         # assign split constraint into all intermdiate betas
-                                        refined_relu_layer.sparse_beta_loc[key][0, neuron_idx] = stable_neuron_idx
-                                        refined_relu_layer.sparse_beta_sign[key][0, neuron_idx] = sign
+                                        refined_relu_layer.sparse_betas[key].loc[0, neuron_idx] = stable_neuron_idx
+                                        refined_relu_layer.sparse_betas[key].sign[0, neuron_idx] = sign
                             print("relu layer:", maximum_refined_relu_layers, "has unstable to stable neurons:", unstable_to_stable[maximum_refined_relu_layers])
 
                             m.net.set_bound_opts({'optimize_bound_args': {'enable_beta_crown': True, "verbose": True},
@@ -1819,7 +1928,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                         m.model.update()
 
                         if need_refine and (relu_idx >= 1) and (out_lb * out_ub < 0) and (time.time() - mip_refine_time_start < mip_refine_timeout):
-                            candidates.append(v.VarName)
+                            candidates.append(v.VarName, None, out_lb, out_ub)
                             candidate_neuron_ids.append((out_chan_idx, out_row_idx, out_col_idx))
 
                         out_row_vars.append(v)
@@ -1862,7 +1971,6 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                 new_layer_mask = []
                 # print("conv relu", layer_idx, relu_idx, lower_bounds[relu_idx].shape)
                 temp = pre_lbs.size()
-                out_chain = temp[0]
                 out_height = temp[1]
                 out_width = temp[2]
                 for chan_idx, channel in enumerate(m.gurobi_vars[-1]):
@@ -1957,7 +2065,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
             m.relu_constrs.append(new_relu_layer_constr)
             relu_idx += 1
 
-        elif type(layer) == Flatten or "Flatten" in str(type(layer)):
+        elif type(layer) == nn.Flatten or "Flatten" in str(type(layer)):
             for chan_idx in range(len(m.gurobi_vars[-1])):
                 for row_idx in range(len(m.gurobi_vars[-1][chan_idx])):
                     new_layer_gurobi_vars.extend(m.gurobi_vars[-1][chan_idx][row_idx])
@@ -1980,14 +2088,10 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
 
     print(f'MIP finished with {time.time() - refine_start_time}s')
 
-    slope_opt = None
-
-    primals, duals, mini_inp = None, None, None
-
     if last_relu_layer_refined:
         print(f"Run final alpha-CROWN after MIP solving on layer {layer_idx-1} and relu idx {relu_idx}")
         # using refined bounds with init opt crown
-        intermediate_layer_bounds, reference_bounds = {}, {}
+        interm_bounds, reference_bounds = {}, {}
         # for i, layer in enumerate(m.net.relus):
         # only refined with the second relu layer
         for i, layer in enumerate(m.net.relus):
@@ -1995,26 +2099,26 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
             # if i>=(maximum_refined_relu_layers+1): break
             nd = m.net.relus[i].inputs[0].name
             print(i, nd, lower_bounds[i].shape)
-            intermediate_layer_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
+            interm_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
             reference_bounds[nd] = [lower_bounds[i], upper_bounds[i]]
         lb_refined, ub_refined = m.net.compute_bounds(x=(x,), C=m.c,
             method='CROWN-optimized', reference_bounds=reference_bounds, bound_upper=False)
         print("alpha-CROWN with intermediate bounds improved by MIP:", lb_refined, ub_refined)
+
+    # creating history: batch, relu layers, [[loc neuron_idx],[coeff 1 if>=0 else -1]]
+    splits = [[[], [], []] for _ in m.net.relus]
+    # creating history betas: batch, relu layers, [beta tensor for this layer]
+    retb = []
 
     if lb_refined is None:
         if lower_bounds[-1].shape[1] != m.c.shape[1]:
             # remove true label 0 bounds according to C matrix
             lower_bounds[-1] = lower_bounds[-1].mm(-m.c[0].T)
             upper_bounds[-1] = upper_bounds[-1].mm(-m.c[0].T)
-        return lower_bounds, upper_bounds
+        return lower_bounds, upper_bounds, ([splits], [retb])
 
-    lb_refined, ub_refined, pre_relu_indices = m.get_candidate(m.net, lb_refined, lb_refined + float('inf'))  # primals are better upper bounds
-    # mask, lA = m.get_mask_lA_parallel(m.net)
+    lb_refined, ub_refined = m.get_interm_bounds(lb_refined)  # primals are better upper bounds
     ##### save refined betas to bab if not verified #####
-    # creating history: batch, relu layers, [[loc neuron_idx],[coeff 1 if>=0 else -1]]
-    splits = [[[], []] for _ in m.net.relus]
-    # creating history betas: batch, relu layers, [beta tensor for this layer]
-    retb = []
     for mi, relu_layer in enumerate(m.net.relus):
         max_splits_per_layer = len(unstable_to_stable[mi])
         for neuron_idx, coeff in unstable_to_stable[mi]:
@@ -2023,12 +2127,41 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
         # Save only used beta, discard padding beta.
         if arguments.Config['solver']['beta-crown']['enable_opt_interm_bounds']:
             val_i = []
-            for key in relu_layer.sparse_beta.keys():
+            for key in relu_layer.sparse_betas.keys():
                 # val_i.append([relu_layer.sparse_beta[key].cpu()[0, :max_splits_per_layer]])
                 # we only save betas for last layer optimization for now; the rest layer betas are not saved.
-                if key == m.net.final_name: val_i.append(relu_layer.sparse_beta[key].cpu()[0, :max_splits_per_layer])
+                if key == m.net.final_name: val_i.append(relu_layer.sparse_betas[key].val.cpu()[0, :max_splits_per_layer])
             retb.append(val_i)
         else:
-            retb.append(relu_layer.sparse_beta.cpu()[0, :max_splits_per_layer])
+            retb.append(relu_layer.sparse_betas[0].val.cpu()[0, :max_splits_per_layer])
     return lb_refined, ub_refined, ([splits], [retb])
+
+
+
+
+def batch_verification_all_node_split_LP(net, d, ret, split):
+    depths = d['depths']
+    rhs = d['thresholds']
+    dom_lb_all = ret['lower_bounds']
+    dom_ub_all = ret['upper_bounds']
+    net.check_lp_cut(d['lower_bounds'], d['upper_bounds'],
+                     dom_lb_all, split, d['history'])
+
+    dom_lb = dom_lb_all[net.final_name]
+    dom_lb_all = [dom_lb_all[layer.name] for layer in net.split_nodes] + [dom_lb_all[net.final_name]]
+    dom_ub_all = [dom_ub_all[layer.name] for layer in net.split_nodes] + [dom_ub_all[net.final_name]]
+    for domain_idx in range(len(depths)):
+        # get tot_ambi_nodes
+        dlb = [dlbs[domain_idx: domain_idx + 1] for dlbs in dom_lb_all]
+        dub = [dubs[domain_idx: domain_idx + 1] for dubs in dom_ub_all]
+        decision_threshold = rhs.to(dom_lb[0].device, non_blocking=True)[domain_idx if domain_idx < (len(dom_lb)//2) else domain_idx - (len(dom_lb)//2)]
+        if depths[domain_idx] + 1 == net.tot_ambi_nodes and torch.all(dlb[-1] <= decision_threshold):
+            lp_status, dlb = net.all_node_split_LP(dlb, dub, decision_threshold)
+            print(f"using lp to solve all split node domain {domain_idx}/{len(dom_lb)}, results {dom_lb[domain_idx]} -> {dlb}, {lp_status}")
+            if lp_status == "unsafe":
+                return dlb
+            dom_lb_all[-1][domain_idx] = dlb
+            dom_lb[domain_idx] = dlb
+    return None
+
 

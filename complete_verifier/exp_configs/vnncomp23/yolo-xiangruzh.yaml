@@ -1,0 +1,20 @@
+general:
+  root_path: ../../vnncomp2023_benchmarks/benchmarks/yolo
+  csv_name: instances.csv
+attack:
+  pgd_order: skip
+bab:
+  pruning_in_iteration: true
+solver:
+  batch_size: 128  # Number of subdomains to compute in parallel in BaB. As large as possible. Decrease if you run out of memory during BaB.
+  alpha-crown:
+    share_alphas: true  # Enabled to save memory during initial alpha-CROWN. Not used during BaB.
+    full_conv_alpha: false  # Disabled to save memory during initial alpha-CROWN. Not used during BaB.
+    lr_alpha: 0.1
+    lr_decay: 0.98  # exponential decay.
+    iteration: 20  # If large, need to make sure decay is not too small.
+  beta-crown:
+    lr_alpha: 0.01
+    lr_beta: 0.1
+    lr_decay: 0.98
+    iteration: 20

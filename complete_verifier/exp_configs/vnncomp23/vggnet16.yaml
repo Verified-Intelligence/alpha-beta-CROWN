@@ -1,0 +1,26 @@
+# Configuration file for running the vggnet16_2022 benchmark (all properties).
+general:
+  root_path: ../../vnncomp2023_benchmarks/benchmarks/vggnet16
+  csv_name: instances.csv
+  enable_incomplete_verification: False
+  loss_reduction_func: max
+data:
+  num_outputs: 1000
+solver:
+  batch_size: 1  # Number of parallel domains to compute on GPU.
+  bound_prop_method: forward+backward
+  forward:
+    dynamic: True
+    max_dim: 100
+  beta-crown:
+    iteration: 10  # Iterations for computing intermediate layer bounds.
+  crown:
+    batch_size: 16
+bab:
+  branching:
+    method: sb
+    input_split:
+      enable: True
+attack:
+  pgd_order: input_bab
+  check_clean: True

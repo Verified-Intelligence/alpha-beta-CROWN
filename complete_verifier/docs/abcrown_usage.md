@@ -134,7 +134,7 @@ The config file is the same as the previous example, except that the `model:
 name` section is different with a `Customized` primitive.  The setting of
 `name: Customized("custom_model_data", "simple_conv_model", in_channel=3,
 out_dim=10)` means that the model is defined as `simple_conv_model()` in
-`custom_model_data.py`. The function `simple_conv_model()` will be called with
+`custom/custom_model_data.py`. The function `simple_conv_model()` will be called with
 arguments `in_channel=3, out_dim=10` to obtain the model definition.
 
 ### Pytorch model, *L2 norm* robustness specification, built-in dataset
@@ -192,8 +192,8 @@ be found at [VNN-COMP 2021
 [2022](https://github.com/ChristopherBrix/vnncomp2022_benchmarks/tree/main/benchmarks)
 repositories.
 Four arguments are necessary in this case: `model: path` is the path to the pytorch model,
-`model: name` is the name of the pytorch model definition which should be found in 
-`complete_verifier/model_defs.py`, '--vnnlib_path' is the path to VNNLIB file and 
+`model: name` is the name of the pytorch model definition which should be found in
+`complete_verifier/model_defs.py`, '--vnnlib_path' is the path to VNNLIB file and
 `model: input_shape` should be provided by user since VNNLIB does not have this information.
 The example shows how to verify resnet2b given one VNNLIB:
 ```bash

@@ -4,7 +4,6 @@ general:
   complete_verifier: skip  # Only incomplete verification for this model.
   loss_reduction_func: min
 data:
-  dataset: MNIST
   start: 36
   end: 71
 solver:

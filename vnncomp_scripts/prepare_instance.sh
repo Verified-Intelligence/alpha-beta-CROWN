@@ -4,6 +4,7 @@ TOOL_NAME=alpha-beta-CROWN
 VERSION_STRING=v1
 if [[ -z "${VNNCOMP_PYTHON_PATH}" ]]; then
 	VNNCOMP_PYTHON_PATH=/home/ubuntu/miniconda/envs/alpha-beta-crown/bin
+	VNNCOMP_PYTHON_LEGACY_PATH=/home/ubuntu/miniconda/envs/alpha-beta-crown-2022/bin
 fi
 echo $VNNCOMP_PYTHON_PATH
 
@@ -46,7 +47,27 @@ if [ "$CATEGORY" == "vggnet16_2022" ]; then
 		echo 'vgg16-7.onnx previously converted'
 	else
 	  echo 'vgg16-7.onnx converting...'
-		${VNNCOMP_PYTHON_PATH}/python ${TOOL_DIR}/vnncomp_scripts/maxpool_to_relu.py $ONNX_FILE
+		${VNNCOMP_PYTHON_LEGACY_PATH}/python ${TOOL_DIR}/vnncomp_scripts/maxpool_to_relu.py $ONNX_FILE
+		cp $ONNX_FILE $ONNX_FILE.original
+		cp output.onnx $ONNX_FILE
+	fi
+fi
+if [ "$CATEGORY" == "vggnet16" ]; then
+	if [ -f "$ONNX_FILE.original" ]; then
+		echo 'vgg16-7.onnx previously converted'
+	else
+	  echo 'vgg16-7.onnx converting...'
+		${VNNCOMP_PYTHON_LEGACY_PATH}/python ${TOOL_DIR}/vnncomp_scripts/maxpool_to_relu.py $ONNX_FILE
+		cp $ONNX_FILE $ONNX_FILE.original
+		cp output.onnx $ONNX_FILE
+	fi
+fi
+if [ "$CATEGORY" == "cgan" ]; then
+	if [ -f "$ONNX_FILE.original" ]; then
+		echo 'cgan models previously simplified'
+	else
+	  echo 'cgan simplifying...'
+	  ${VNNCOMP_PYTHON_PATH}/onnxsim "$ONNX_FILE" output.onnx
 		cp $ONNX_FILE $ONNX_FILE.original
 		cp output.onnx $ONNX_FILE
 	fi
@@ -63,6 +84,8 @@ elif [ "$CATEGORY" == "vggnet16_2022" ]; then
 	prepare_timeout=90
 elif [ "$CATEGORY" == "tllverifybench" ]; then
 	prepare_timeout=90
+elif [ "$CATEGORY" == "collins_yolo_robustness" ]; then
+	prepare_timeout=180
 else
 	prepare_timeout=45
 fi

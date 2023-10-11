@@ -1,0 +1,14 @@
+# Example command:
+# python abcrown.py --config exp_configs/tutorial_examples/custom_op_example.yaml
+general:
+  complete_verifier: skip  # Branch and bound on customized activation function needs your own implementation.
+model:
+  # Use the linear_masked_relu_model() in "custom_op.py".
+  name: Customized("custom_op", "linear_masked_relu_model")
+  path: models/custom_op/cifar_wide_adv.pth  # clean acc is 7338.
+data:
+  dataset: CIFAR
+  std: [0.24705882352941178, 0.24352941176470588, 0.2615686274509804]
+  mean: [0.4913725490196078, 0.4823529411764706, 0.4466666666666667]
+specification:
+  epsilon: 0.00784313725  # 2./255.

@@ -1,4 +1,4 @@
-α,β-CROWN (alpha-beta-CROWN): A Fast and Scalable Neural Network Verifier using the Bound Propagation Framework
+α,β-CROWN (alpha-beta-CROWN): A Fast and Scalable Neural Network Verifier with Efficient Bound Propagation
 ======================
 
 <p align="center">
@@ -11,24 +11,24 @@ efficiently on **GPUs** and can scale to relatively large convolutional
 networks (e.g., millions of parameters). It also supports a wide range of
 neural network architectures (e.g., **CNN**, **ResNet**, and various activation
 functions), thanks to the versatile
-[auto\_LiRPA](http://github.com/KaidiXu/auto_LiRPA) library developed by us.
+**[auto\_LiRPA](http://github.com/Verified-Intelligence/auto_LiRPA) library** developed by us.
 α,β-CROWN can provide **provable robustness guarantees against adversarial
 attacks** and can also verify other general properties of neural networks.
 
 α,β-CROWN is the **winning verifier** in [VNN-COMP
-2021](https://sites.google.com/view/vnn2021) and [VNN-COMP
-2022](https://sites.google.com/view/vnn2022) (International Verification of
+2021](https://sites.google.com/view/vnn2021), [VNN-COMP
+2022](https://sites.google.com/view/vnn2022), and [VNN-COMP
+2023](https://sites.google.com/view/vnn2023) (International Verification of
 Neural Networks Competition) with the highest total score, outperforming many
 other neural network verifiers on a wide range of benchmarks over 2 years.
 Details of competition results can be found in [VNN-COMP 2021
 slides](https://docs.google.com/presentation/d/1oM3NqqU03EUqgQVc3bGK2ENgHa57u-W6Q63Vflkv000/edit#slide=id.ge4496ad360_14_21),
-[report](https://arxiv.org/abs/2109.00498) and [VNN-COMP 2022 report](https://arxiv.org/pdf/2212.10376.pdf) and [slides (page
-73)](https://drive.google.com/file/d/1nnRWSq3plsPvOT3V-drAF5D8zWGu02VF/view?usp=sharing).
+[report](https://arxiv.org/abs/2109.00498), [VNN-COMP 2022 report](https://arxiv.org/pdf/2212.10376.pdf),
+and [VNN-COMP 2023 slides](https://github.com/ChristopherBrix/vnncomp2023_results/blob/main/SCORING/slides.pdf).
 
 α,β-CROWN combines our efforts in neural network verification in **a series of
 papers building up the bound propagation framework** during the past five
-years. See the [Developers](#developers-and-copyright) and
-[Publications](#publications) sections below.
+years. See the [Publications](#publications) section below.
 
 Supported Features
 ----------------------
@@ -39,7 +39,8 @@ Supported Features
 
 Our verifier consists of the following core algorithms:
 
-* **β-CROWN** ([Wang et al. 2021](https://arxiv.org/pdf/2103.06624.pdf)): complete verification with **CROWN** ([Zhang et al. 2018](https://arxiv.org/pdf/1811.00866.pdf)) and branch and bound
+* **β-CROWN** ([Wang et al. 2021](https://arxiv.org/pdf/2103.06624.pdf)): complete verification with **CROWN** ([Zhang et al. 2018](https://arxiv.org/pdf/1811.00866.pdf)) and branch and bound for ReLU.
+**Branch and bound for general nonlinear functions** is added in ([Shi et al. 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)).
 * **α-CROWN** ([Xu et al., 2021](https://arxiv.org/pdf/2011.13824.pdf)): incomplete verification with optimized CROWN bound
 * **GCP-CROWN** ([Zhang et al. 2022](https://arxiv.org/pdf/2208.05740.pdf)): CROWN-like bound propagation with general cutting plane constraints.
 * **BaB-Attack** ([Zhang et al. 2022](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf)): Branch and bound based adversarial attack for tackling hard instances.
@@ -48,7 +49,7 @@ Our verifier consists of the following core algorithms:
 We support these neural network architectures:
 
 * Layers: fully connected (FC), convolutional (CNN), pooling (average pool and max pool), transposed convolution
-* Activation functions: ReLU (incomplete/complete verification); sigmoid, tanh, arctan, sin, cos, tan (incomplete verification)
+* Activation functions: ReLU (incomplete/complete verification); sigmoid, tanh, arctan, sin, cos, tan (branch and bound supported)
 * Residual connections and other irregular graphs
 
 We support the following verification specifications:
@@ -76,11 +77,17 @@ Installation and Setup
 easily into a conda environment. If you don't have conda, you can install
 [miniconda](https://docs.conda.io/en/latest/miniconda.html).
 
+Clone our verifier including the [auto_LiRPA](https://github.com/Verified-Intelligence/auto_LiRPA) submodule:
+```bash
+git clone --recursive https://github.com/Verified-Intelligence/alpha-beta-CROWN.git
+```
+
+Setup the conda environment:
 ```bash
 # Remove the old environment, if necessary.
 conda deactivate; conda env remove --name alpha-beta-crown
 # install all dependents into the alpha-beta-crown environment
-conda env create -f complete_verifier/environment.yml --name alpha-beta-crown
+conda env create -f complete_verifier/environment.yaml --name alpha-beta-crown
 # activate the environment
 conda activate alpha-beta-crown
 ```
@@ -100,7 +107,7 @@ If you prefer to install packages manually rather than using a prepared conda
 environment, you can refer to this [installation
 script](/vnncomp_scripts/install_tool_general.sh).
 
-If you want to run α,β-CROWN verifier on the VNN-COMP 2021 and 2022 benchmarks
+If you want to run α,β-CROWN verifier on the VNN-COMP benchmarks
 (e.g., to make a comparison to a new verifier), you can follow [this
 guide](/complete_verifier/docs/vnn_comp.md).
 
@@ -128,18 +135,25 @@ large range of examples in the
 Publications
 ----------------------
 
-If you use our verifier in your work, **please kindly cite our CROWN**([Zhang
+If you use our verifier in your work, **please kindly cite our papers**:
+- **CROWN** ([Zhang
 et al., 2018](https://arxiv.org/pdf/1811.00866.pdf)),  **α-CROWN** ([Xu et al.,
-2021](https://arxiv.org/pdf/2011.13824.pdf)), **β-CROWN**([Wang et al.,
-2021](https://arxiv.org/pdf/2103.06624.pdf)) and **GCP-CROWN**([Zhang et al.,
-2022](https://arxiv.org/pdf/2208.05740.pdf)) papers. If your work involves the
-convex relaxation of the NN verification please kindly cite [Salman et al.,
-2019](https://arxiv.org/pdf/1902.08722).  If your work deals with
-ResNet/DenseNet, LSTM (recurrent networks), Transformer or other complex
-architectures, or model weight perturbations please kindly cite [Xu et al.,
-2020](https://arxiv.org/pdf/2002.12920.pdf). If you use our branch and bound
-based adversarial attack (falsifier), please cite [Zhang et al.
-2022](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf).
+2021](https://arxiv.org/pdf/2011.13824.pdf)), **β-CROWN** ([Wang et al.,
+2021](https://arxiv.org/pdf/2103.06624.pdf)) and **GCP-CROWN** ([Zhang et al.,
+2022](https://arxiv.org/pdf/2208.05740.pdf)).
+- **auto_LiRPA** ([Xu et al., 2020](https://arxiv.org/pdf/2002.12920.pdf)),
+if you use `auto_LiRPA`, or if your work involves non-feedforward networks,
+such as ResNet/DenseNet, LSTM (recurrent networks), Transformer or other
+complex architectures,
+or model weight perturbations.
+- **[Shi et al., 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)**,
+if your work involves branch-and-bound on non-ReLU nonlinearities.
+- **[Salman et al., 2019](https://arxiv.org/pdf/1902.08722)**,
+if your work involves the convex relaxation of the NN verification.
+- **[Zhang et al.
+2022](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf)**,
+if you use our branch and bound
+based adversarial attack (falsifier).
 
 α,β-CROWN combines our existing efforts on neural network verification:
 
@@ -147,15 +161,17 @@ based adversarial attack (falsifier), please cite [Zhang et al.
 
 * The **"convex relaxation barrier"** ([Salman et al., NeurIPS 2019](https://arxiv.org/pdf/1902.08722)) paper concludes that optimizing the ReLU relaxation allows CROWN (referred to as a "greedy" primal space solver) to achieve the same solution as linear programming (LP) based verifiers.
 
-* **LiRPA** ([Xu et al., NeurIPS 2020](https://arxiv.org/pdf/2002.12920.pdf)) is a generalization of CROWN on general computational graphs and we also provide an efficient GPU implementation, the [auto\_LiRPA](https://github.com/KaidiXu/auto_LiRPA) library.
+* **LiRPA** ([Xu et al., NeurIPS 2020](https://arxiv.org/pdf/2002.12920.pdf)) is a generalization of CROWN on general computational graphs and we also provide an efficient GPU implementation, the [auto\_LiRPA](https://github.com/Verified-Intelligence/auto_LiRPA) library.
 
 * **α-CROWN** (sometimes referred to as optimized CROWN or optimized LiRPA) is used in the Fast-and-Complete verifier ([Xu et al., ICLR 2021](https://arxiv.org/pdf/2011.13824.pdf)), which jointly optimizes intermediate layer bounds and final layer bounds in CROWN via variable α. α-CROWN typically has greater power than LP since LP cannot cheaply tighten intermediate layer bounds.
 
-* **β-CROWN** ([Wang et al., NeurIPS 2021](https://arxiv.org/pdf/2103.06624.pdf)) incorporates split constraints in branch and bound (BaB) into the CROWN bound propagation procedure via an additional optimizable parameter β. The combination of efficient and GPU accelerated bound propagation with branch and bound produces a powerful and scalable neural network verifier.
+* **β-CROWN** ([Wang et al., NeurIPS 2021](https://arxiv.org/pdf/2103.06624.pdf)) incorporates ReLU split constraints in branch and bound (BaB) into the CROWN bound propagation procedure via an additional optimizable parameter β. The combination of efficient and GPU accelerated bound propagation with branch and bound produces a powerful and scalable neural network verifier.
 
 * **BaB-Attack** ([Zhang et al., ICML 2022](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf)) is a strong falsifier (adversarial attack) based on branch and bound, which can find adversarial examples for hard instances where gradient or input-space-search based methods cannot succeed.
 
 * **GCP-CROWN** ([Zhang et al., NeurIPS 2022](https://arxiv.org/pdf/2208.05740.pdf)) enables the use of general cutting planes methods for neural network verification in a GPU-accelerated and very efficient bound propagation framework. Cutting planes can significantly strengthen bound tightness.
+
+* [Formal Verification for Neural Networks with General Nonlinearities via Branch-and-Bound](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf) enables branch and bound based verification for non-ReLU and general activation functions, achieving significant improvements on verifying neural networks with non-ReLU activation functions such as Transformer and LSTM networks.
 
 We provide bibtex entries below:
 
@@ -218,6 +234,13 @@ We provide bibtex entries below:
   journal={Advances in Neural Information Processing Systems},
   year={2022}
 }
+
+@article{shi2023generalnonlinear,
+  title={Formal Verification for Neural Networks with General Nonlinearities via Branch-and-Bound},
+  author={Shi, Zhouxing and Jin, Qirui and Kolter, J Zico and Jana, Suman and Hsieh, Cho-Jui and Zhang, Huan},
+  journal={2nd Workshop on Formal Verification of Machine Learning (WFVML 2023)},
+  year={2023}
+}
 ```
 
 Developers and Copyright
@@ -225,21 +248,25 @@ Developers and Copyright
 
 The α,β-CROWN verifier is developed by a team from CMU, UCLA, Drexel University, Columbia University and UIUC:
 
-Team lead:  
-* Huan Zhang (huan@huan-zhang.com), CMU
+Team lead:
+* Huan Zhang (huan@huan-zhang.com), UIUC
 
-Main developers:  
-* Kaidi Xu (kx46@drexel.edu), Drexel University
+Current developers:
 * Zhouxing Shi (zshi@cs.ucla.edu), UCLA
-* Shiqi Wang (sw3215@columbia.edu), Columbia University
-
-Contributors:  
 * Linyi Li (linyi2@illinois.edu), UIUC
-* Jinqi (Kathryn) Chen (jinqic@cs.cmu.edu), CMU
+* Christopher Brix (brix@cs.rwth-aachen.de), RWTH Aachen University
+* Kaidi Xu (kx46@drexel.edu), Drexel University
+* Xiangru Zhong (xiangruzh0915@gmail.com), Sun Yat-sen University
+* Qirui Jin (qiruijin@umich.edu), University of Michigan
 * Zhuolin Yang (zhuolin5@illinois.edu), UIUC
-* Yihan Wang (yihanwang@ucla.edu), UCLA
+* Zhuowen Yuan (realzhuowen@gmail.com), UIUC
 
-Advisors:  
+Past developers:
+* Shiqi Wang (sw3215@columbia.edu), Columbia University
+* Yihan Wang (yihanwang@ucla.edu), UCLA
+* Jinqi (Kathryn) Chen (jinqic@cs.cmu.edu), CMU
+
+Advisors:
 * Zico Kolter (zkolter@cs.cmu.edu), CMU
 * Cho-Jui Hsieh (chohsieh@cs.ucla.edu), UCLA
 * Suman Jana (suman@cs.columbia.edu), Columbia University

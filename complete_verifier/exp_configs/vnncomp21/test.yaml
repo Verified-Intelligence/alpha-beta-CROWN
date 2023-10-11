@@ -10,4 +10,4 @@ bab:
     input_split:
       enable: True
 attack:
-  pgd_order: skip
+  pgd_order: input_bab

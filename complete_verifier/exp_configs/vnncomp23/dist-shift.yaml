@@ -1,0 +1,40 @@
+# Use input split
+general:
+  root_path: ../../vnncomp2023_benchmarks/benchmarks/dist_shift
+  csv_name: instances.csv
+  enable_incomplete_verification: False
+model:
+  onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
+data:
+  num_outputs: 10
+solver:
+  min_batch_size_ratio: 1.0
+  batch_size: 192
+  bound_prop_method: alpha-crown
+  beta-crown:
+    lr_alpha: 0.05
+    lr_beta: 0.1
+    iteration: 5
+  alpha-crown:
+    lr_alpha: 0.25
+    iteration: 5
+    full_conv_alpha: False
+  prune_after_crown: True
+bab:
+  initial_max_domains: 128
+  branching:
+    method: sb
+    sb_coeff_thresh: 1.0
+    input_split:
+      enable: True
+attack:
+  pgd_order: after
+  attack_mode: diversed_PGD
+  pgd_steps: 20
+  pgd_restarts: 300
+  input_split:
+    pgd_restarts: 30
+    pgd_steps: 20
+  input_split_check_adv:
+    pgd_restarts: 10
+    pgd_steps: 1

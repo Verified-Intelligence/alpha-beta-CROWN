@@ -18,7 +18,8 @@ class TensorStorage(object):
     """
     Fast managed dynamic sized tensor storage.
     """
-    def __init__(self, full_shape, initial_size=1024, switching_size=65536, dtype=torch.float32, device='cpu', concat_dim=0):
+    def __init__(self, full_shape, initial_size=1024, switching_size=65536,
+                 dtype=None, device='cpu', concat_dim=0):
         """
         full_shape is the tensor shape you want to store using this object, including the "batch" dimension.
         dtype is tensor type (default float32).
@@ -32,6 +33,8 @@ class TensorStorage(object):
             full_shape = data.shape
         else:
             data = None
+        if dtype is None:
+            dtype = torch.get_default_dtype()
         self.shape = list(full_shape)  # Full shape, with batch size that will become dynamic.
         self.dtype = dtype
         self.device = device
@@ -76,7 +79,7 @@ class TensorStorage(object):
         self._storage.narrow(self.concat_dim, self.num_used, appended_tensor.size(self.concat_dim)).copy_(appended_tensor)
         self.num_used += appended_tensor.size(self.concat_dim)
         return self
-    
+
     @torch.no_grad()
     def pop(self, size):
         """Remove tensors with 'size' at the end of the storage."""
@@ -85,12 +88,15 @@ class TensorStorage(object):
         self.num_used -= size
         return ret
 
+    def tensor(self):
+        return self._storage.narrow(self.concat_dim, 0, self.num_used)
+
     def __getattr__(self, attr):
         """Proxy all tensor attributes."""
-        return getattr(self._storage.narrow(self.concat_dim, 0, self.num_used), attr)
+        return getattr(self.tensor(), attr)
 
     def __getitem__(self, idx):
-        return self._storage.narrow(self.concat_dim, 0, self.num_used)[idx]
+        return self.tensor()[idx]
 
     def __len__(self):
         return self.num_used

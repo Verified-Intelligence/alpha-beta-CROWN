@@ -32,7 +32,6 @@ bab:
   timeout: 1800  # Timeout threshold for branch and bound. Increase for verifying more points.
   max_domains: 5000000
   get_upper_bound: true  # Needed for Bab-Attack.
-  batched_domain_list: false  # Needed for BaB-Attack.
   attack:
     enabled: true
     beam_candidates: 128

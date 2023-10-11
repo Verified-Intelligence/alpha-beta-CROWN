@@ -1,0 +1,20 @@
+model:
+  name: partial(ResNet18, in_planes=2)  # Change the in_planes if you have wider larger model.
+  # Use this command to download model: wget -O resnet18_natural_width2.pth http://download.huan-zhang.com/models/auto_lirpa/resnet18_natural.pth
+  path: models/cifar10_resnet/resnet18_natural_width2.pth
+data:
+  dataset: CIFAR
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2023, 0.1994, 0.2010]
+specification:
+  epsilon: 0.0005  # Naturally trained, so epsilon needs to be small.
+attack:
+  pgd_restarts: 30
+solver:
+  batch_size: 32
+  alpha-crown:
+    share_alphas: true
+  beta-crown:
+    iteration: 20
+bab:
+  timeout: 180

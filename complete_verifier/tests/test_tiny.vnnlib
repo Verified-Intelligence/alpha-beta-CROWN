@@ -1,5 +1,0 @@
-(declare-const X_0 Real)
-(declare-const Y_0 Real)
-(assert (or
-    (and (>= X_0 -1) (<= X_0 1) (>= Y_0 100))
-))

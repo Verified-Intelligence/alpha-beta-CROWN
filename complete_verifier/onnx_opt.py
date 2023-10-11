@@ -14,14 +14,38 @@
 #########################################################################
 """Optimizing computation graph in onnx file."""
 import torch
-import torch.nn as nn
 import onnx
+from onnx import numpy_helper as nh
 import onnxruntime as ort
 import numpy as np
-import onnx.numpy_helper
 
-import torch.nn.functional as F
-from onnx import numpy_helper as nh
+
+def convert_onnx_to_double(onnx_file):
+    """Convert onnx file from single precision to double precision."""
+    onnx_model = onnx.load(onnx_file)
+
+    def _convert_data(obj):
+        fp64_initializer = nh.to_array(obj).astype(np.float64)
+        obj.data_type = onnx.TensorProto.DOUBLE
+        obj.raw_data = nh.from_array(fp64_initializer).raw_data
+
+    # Change all initializer to fp64.
+    for node in onnx_model.graph.initializer:
+        _convert_data(node)
+    # Change all inputs to fp64.
+    for node in onnx_model.graph.input:
+        node.type.tensor_type.elem_type = onnx.TensorProto.DOUBLE
+    # Change all outputs to fp64.
+    for node in onnx_model.graph.output:
+        node.type.tensor_type.elem_type = onnx.TensorProto.DOUBLE
+    # Change node attributes to fp64.
+    for node in onnx_model.graph.node:
+        for attr in node.attribute:
+            if hasattr(attr, 't') and hasattr(attr.t, 'raw_data') and attr.t.raw_data:
+                _convert_data(attr.t)
+    # for node in onnx_model.graph.nodes:
+    print('Model converted to double precision.')
+    return onnx_model
 
 
 def fuse_conv_and_bn(conv, bn):
@@ -113,6 +137,45 @@ def strided_conversion(input_feature, kernel, padding, stride):
                                     converted_matrix.shape[1] * converted_matrix.shape[2] * converted_matrix.shape[3])
 
 
+def fuse_cgan_gemm_reshape_bn(onnx_model, initializers):
+    old_linear_weight = initializers[onnx_model.graph.node[0].input[1]]
+    old_linear_bias = initializers[onnx_model.graph.node[0].input[2]]
+    old_bn_weight = initializers[onnx_model.graph.node[3].input[1]]
+    old_bn_bias = initializers[onnx_model.graph.node[3].input[2]]
+    old_bn_mean = initializers[onnx_model.graph.node[3].input[3]]
+    old_bn_var = initializers[onnx_model.graph.node[3].input[4]]
+
+    dim_flattened = old_linear_bias.shape[0]
+    dim_channel = old_bn_weight.shape[0]
+    new_linear_weight = old_linear_weight.reshape(dim_channel, int(dim_flattened/dim_channel), -1).transpose(2, 1, 0) * old_bn_weight / np.sqrt(old_bn_var + onnx_model.graph.node[3].attribute[0].f)
+    new_linear_bias = old_linear_bias.reshape(dim_channel, int(dim_flattened/dim_channel)).transpose(1, 0) * old_bn_weight / np.sqrt(old_bn_var + onnx_model.graph.node[3].attribute[0].f) + old_bn_bias - old_bn_weight * old_bn_mean / np.sqrt(old_bn_var + onnx_model.graph.node[3].attribute[0].f)
+    new_linear_weight = new_linear_weight.transpose(0, 2, 1).reshape(-1, dim_flattened).transpose(1, 0)
+    new_linear_bias = new_linear_bias.transpose(1, 0).reshape(dim_flattened)
+
+    return new_linear_weight, new_linear_bias
+
+
+def fuse_cgan_bn_reshape_gemm(onnx_model, initializers):
+    old_linear_weight = initializers[onnx_model.graph.node[-1].input[1]]
+    old_linear_bias = initializers[onnx_model.graph.node[-1].input[2]]
+    old_bn_weight = initializers[onnx_model.graph.node[-4].input[1]]
+    old_bn_bias = initializers[onnx_model.graph.node[-4].input[2]]
+    old_bn_mean = initializers[onnx_model.graph.node[-4].input[3]]
+    old_bn_var = initializers[onnx_model.graph.node[-4].input[4]]
+
+    dim_flattened = old_linear_weight.shape[1]
+    dim_channel = old_bn_weight.shape[0]
+    old_bn_weight_flatten = old_bn_weight[:, None].repeat(4, axis=-1).reshape(dim_flattened)
+    old_bn_bias_flatten = old_bn_bias[:, None].repeat(4, axis=-1).reshape(dim_flattened)
+    old_bn_mean_flatten = old_bn_mean[:, None].repeat(4, axis=-1).reshape(dim_flattened)
+    old_bn_var_flatten = old_bn_var[:, None].repeat(4, axis=-1).reshape(dim_flattened)
+
+    new_linear_weight = old_linear_weight * old_bn_weight_flatten / np.sqrt(old_bn_var_flatten + onnx_model.graph.node[-4].attribute[0].f)
+    new_linear_bias = np.matmul(old_linear_weight, (old_bn_bias_flatten - old_bn_weight_flatten * old_bn_mean_flatten / np.sqrt(old_bn_var_flatten + onnx_model.graph.node[-4].attribute[0].f))) + old_linear_bias
+
+    return new_linear_weight, new_linear_bias
+
+
 def compress_onnx(onnx_model, old_path, save_path, onnx_optimization_flags, debug=False):
     assert onnx_optimization_flags != 'none'
     if debug:
@@ -129,10 +192,6 @@ def compress_onnx(onnx_model, old_path, save_path, onnx_optimization_flags, debu
     initializers = {}
     for onnx_module in onnx_model.graph.initializer:
         initializers[onnx_module.name] = nh.to_array(onnx_module)
-    #	print(onnx_module.name, nh.to_array(onnx_module).shape)
-
-    # for i, node in enumerate(onnx_model.graph.node):
-    #	print(node)
 
     new_initializers = []
     new_nodes = []
@@ -158,23 +217,23 @@ def compress_onnx(onnx_model, old_path, save_path, onnx_optimization_flags, debu
         b3 = np.matmul(nW, b1) + nb
 
         cur_linear_W = create_initializer_tensor(
-            name=f'linear_W',
+            name='linear_W',
             tensor_array=W3,
             data_type=onnx.TensorProto.FLOAT)
 
         new_initializers.append(cur_linear_W)
 
         cur_linear_b = create_initializer_tensor(
-            name=f'linear_b',
+            name='linear_b',
             tensor_array=b3,
             data_type=onnx.TensorProto.FLOAT)
 
         new_initializers.append(cur_linear_b)
 
         cur_node = onnx.helper.make_node(
-            name=f'linear_MatMul',
+            name='linear_MatMul',
             op_type='Gemm',
-            inputs=[onnx_model.graph.node[0].input[0], f'linear_W', f'linear_b'],
+            inputs=[onnx_model.graph.node[0].input[0], 'linear_W', 'linear_b'],
             outputs=[onnx_model.graph.node[3].output[0]],
             alpha=1.0,
             beta=1.0,
@@ -217,6 +276,58 @@ def compress_onnx(onnx_model, old_path, save_path, onnx_optimization_flags, debu
 
         started_node = 5
 
+    elif "merge_gemm_reshape_bn" in onnx_optimization_flags:
+        # TODO (assigned to Zhuowen): generalize the code to allow the merge of gemm + BN for any general onnx.
+        merge_case = (onnx_model.graph.node[0].op_type == "Gemm" and 3 < len(onnx_model.graph.node) and
+                onnx_model.graph.node[1].op_type == "Constant" and
+                onnx_model.graph.node[2].op_type == "Reshape" and onnx_model.graph.node[3].op_type == "BatchNormalization")
+        if merge_case:
+            new_linear_weight, new_linear_bias = fuse_cgan_gemm_reshape_bn(onnx_model, initializers)
+
+            linear_W_initializer = create_initializer_tensor(
+                name='linear_W',
+                tensor_array=new_linear_weight,
+                data_type=onnx.TensorProto.FLOAT)
+            new_initializers.append(linear_W_initializer)
+            linear_b_initializer = create_initializer_tensor(
+                name='linear_b',
+                tensor_array=new_linear_bias,
+                data_type=onnx.TensorProto.FLOAT)
+            new_initializers.append(linear_b_initializer)
+
+            cur_node = onnx.helper.make_node(
+                op_type='Gemm',
+                inputs=[onnx_model.graph.node[0].input[0], 'linear_W', 'linear_b'],
+                outputs=['after_linear'],
+                alpha=1.0,
+                beta=1.0,
+                transB=1
+            )
+            new_nodes.append(cur_node)
+
+            values = nh.to_array(onnx_model.graph.node[1].attribute[0].t)
+            cnode = onnx.helper.make_node(
+                'Constant',
+                inputs=[],
+                outputs=['values'],
+                value=onnx.helper.make_tensor(
+                    name='const_tensor',
+                    data_type=onnx.TensorProto.INT64,
+                    dims=values.shape,
+                    vals=values.flatten().astype(int),
+                ),
+            )
+            new_nodes.append(cnode)
+            rnode = onnx.helper.make_node(
+                'Reshape',
+                inputs=['after_linear', 'values'],
+                outputs=[onnx_model.graph.node[3].output[0]],
+            )
+            new_nodes.append(rnode)
+
+            started_node = 4
+        else:
+            started_node = 0
     else:
         started_node = 0
 
@@ -228,6 +339,31 @@ def compress_onnx(onnx_model, old_path, save_path, onnx_optimization_flags, debu
         if node_name in skipped:
             return trace(skipped[node_name])
         return node_name
+
+    if "remove_matmul_inplace" in onnx_optimization_flags:
+        to_transpose_const, temp_dict = {}, {}
+        for i, node in enumerate(onnx_model.graph.node[started_node:]):
+            if node.op_type == "Constant":
+                temp_dict[node.output[0]] = i
+            matmul_case1 = (node.op_type == "MatMul" and i - 1 >= 0 and i + 1 < len(onnx_model.graph.node) and
+                    onnx_model.graph.node[i - 1].op_type == "Transpose" and onnx_model.graph.node[i + 1].op_type == "Transpose" and
+                    onnx_model.graph.node[i - 1].output[0] == node.input[1])
+            matmul_case2 = (node.op_type == "MatMul" and i - 2 >= 0 and i + 1 < len(onnx_model.graph.node) and
+                    onnx_model.graph.node[i - 2].op_type == "Transpose" and onnx_model.graph.node[i + 1].op_type == "Transpose" and
+                    onnx_model.graph.node[i - 2].output[0] == node.input[1])
+            if matmul_case1 or matmul_case2:
+                to_transpose_const[i] = temp_dict[node.input[0]]
+    elif "merge_vit" in onnx_optimization_flags:
+        to_merge_linears, search_list, to_merge_others = [], [], []
+        for i, node in enumerate(onnx_model.graph.node[started_node:]):
+            if (node.op_type == "Transpose" and onnx_model.graph.node[i - 1].op_type == "BatchNormalization" and
+                onnx_model.graph.node[i - 2].op_type == "Transpose"):
+                search_list.append(node.output[0])
+            elif node.op_type == "MatMul" and i + 1 < len(onnx_model.graph.node) and onnx_model.graph.node[i + 1].op_type == "Add":
+                if node.input[0] in search_list:
+                    to_merge_linears.append(i)
+            elif node.op_type == "Shape" and node.input[0] in search_list:
+                to_merge_others.append(i)
 
     for i, node in enumerate(onnx_model.graph.node[started_node:]):
         if "remove_ineffective_layers" in onnx_optimization_flags:
@@ -431,54 +567,369 @@ def compress_onnx(onnx_model, old_path, save_path, onnx_optimization_flags, debu
                             tensor_array=initializers[old_init],
                             data_type=onnx.TensorProto.FLOAT)
                         new_initializers.append(cur_init)
+        elif "merge_vit" in onnx_optimization_flags:
+            if node.op_type == "BatchNormalization":
+                if onnx_model.graph.node[i - 1].op_type == "Transpose" and onnx_model.graph.node[i + 1].op_type == "Transpose":
+                    source_input = onnx_model.graph.node[i - 1].input[0]
+                else:
+                    source_input = node.input[0]
+                bn_node = node
+                bn_weight = initializers[bn_node.input[1]]
+                bn_bias = initializers[bn_node.input[2]]
+                bn_mean = initializers[bn_node.input[3]]
+                bn_var = initializers[bn_node.input[4]]
+                bn_eps = bn_node.attribute[0].f
+                w_bn = np.diag(bn_weight / (np.sqrt(bn_eps + bn_var)))
+                b_bn = bn_bias - bn_weight * bn_mean / np.sqrt(bn_var + bn_eps)
+                ori_w = w_bn
+                ori_b = b_bn
 
+                if i + 2 not in to_merge_linears and i + 2 not in to_merge_others:
+                    linear_W_initializer = create_initializer_tensor(
+                        name=f"linear{cnt}_W",
+                        tensor_array=ori_w,
+                        data_type=onnx.TensorProto.FLOAT)
+
+                    linear_b_initializer = create_initializer_tensor(
+                        name=f"linear{cnt}_b",
+                        tensor_array=ori_b,
+                        data_type=onnx.TensorProto.FLOAT
+                    )
+                    matmul_node = onnx.helper.make_node(
+                        name=f'linear{cnt}_MatMul',
+                        op_type='MatMul',
+                        inputs=[source_input, f'linear{cnt}_W'],
+                        outputs=[f'linear{cnt}_intermediate']
+                    )
+                    add_node = onnx.helper.make_node(
+                        name=f'linear{cnt}_Add',
+                        op_type='Add',
+                        inputs=[f'linear{cnt}_intermediate', f'linear{cnt}_b'],
+                        outputs=[node.output[0]]
+                    )
+                    cnt += 1
+                    new_nodes.append(matmul_node)
+                    new_nodes.append(add_node)
+                    new_initializers.append(linear_W_initializer)
+                    new_initializers.append(linear_b_initializer)
+            elif i in to_merge_others:
+                node.input[0] = source_input
+                new_nodes.append(node)
+            elif i in to_merge_linears:
+                w_cur = initializers[node.input[1]]
+                b_cur = initializers[onnx_model.graph.node[i + 1].input[0]]
+                W = np.matmul(ori_w, w_cur)
+                b = np.matmul(ori_b, w_cur) + b_cur
+
+                linear_W_initializer = create_initializer_tensor(
+                    name=f"linear{cnt}_W",
+                    tensor_array=W,
+                    data_type=onnx.TensorProto.FLOAT)
+
+                linear_b_initializer = create_initializer_tensor(
+                    name=f"linear{cnt}_b",
+                    tensor_array=b,
+                    data_type=onnx.TensorProto.FLOAT
+                )
+                matmul_node = onnx.helper.make_node(
+                    name=f'linear{cnt}_MatMul',
+                    op_type='MatMul',
+                    inputs=[source_input, f'linear{cnt}_W'],
+                    outputs=[f'linear{cnt}_intermediate']
+                )
+                add_node = onnx.helper.make_node(
+                    name=f'linear{cnt}_Add',
+                    op_type='Add',
+                    inputs=[f'linear{cnt}_intermediate', f'linear{cnt}_b'],
+                    outputs=[onnx_model.graph.node[i + 1].output[0]]
+                )
+                cnt += 1
+                new_nodes.append(matmul_node)
+                new_nodes.append(add_node)
+                new_initializers.append(linear_W_initializer)
+                new_initializers.append(linear_b_initializer)
+            elif (i - 1 not in to_merge_linears and not (node.op_type == "Transpose"
+                    and (onnx_model.graph.node[i - 1].op_type == "BatchNormalization"
+                    or onnx_model.graph.node[i + 1].op_type == "BatchNormalization"))):
+                new_nodes.append(node)
+                source = node.output[0]
+                for old_init in node.input:
+                    if old_init in initializers:
+                        cur_init = create_initializer_tensor(
+                            name=old_init,
+                            tensor_array=initializers[old_init],
+                            data_type=onnx.TensorProto.FLOAT)
+                        new_initializers.append(cur_init)
+        elif "remove_matmul_inplace" in onnx_optimization_flags:
+            transpose_case1 = (node.op_type == "Transpose" and i - 2 >= 0 and
+                    onnx_model.graph.node[i - 1].op_type == "MatMul" and onnx_model.graph.node[i - 2].op_type == "Transpose")
+            transpose_case2 = (node.op_type == "Transpose" and i - 3 >= 0 and
+                    onnx_model.graph.node[i - 1].op_type == "MatMul" and onnx_model.graph.node[i - 3].op_type == "Transpose")
+            transpose_case3 = (node.op_type == "Transpose" and i + 2 < len(onnx_model.graph.node) and
+                    onnx_model.graph.node[i + 1].op_type == "MatMul" and onnx_model.graph.node[i + 2].op_type == "Transpose")
+            transpose_case4 = (node.op_type == "Transpose" and i + 3 < len(onnx_model.graph.node) and
+                    onnx_model.graph.node[i + 2].op_type == "MatMul" and onnx_model.graph.node[i + 3].op_type == "Transpose")
+            matmul_case1 = (node.op_type == "MatMul" and i - 1 >= 0 and i + 1 < len(onnx_model.graph.node) and
+                    onnx_model.graph.node[i - 1].op_type == "Transpose" and onnx_model.graph.node[i + 1].op_type == "Transpose" and
+                    onnx_model.graph.node[i - 1].output[0] == node.input[1])
+            matmul_case2 = (node.op_type == "MatMul" and i - 2 >= 0 and i + 1 < len(onnx_model.graph.node) and
+                    onnx_model.graph.node[i - 2].op_type == "Transpose" and onnx_model.graph.node[i + 1].op_type == "Transpose" and
+                    onnx_model.graph.node[i - 2].output[0] == node.input[1])
+
+            if not (transpose_case1 or transpose_case2 or transpose_case3 or transpose_case4):
+                if node.op_type == "Constant" and i in list(to_transpose_const.values()):
+                    continue
+                elif matmul_case1 or matmul_case2:
+                    if matmul_case1:
+                        source_input = onnx_model.graph.node[i - 1].input[0]
+                    else:
+                        source_input = onnx_model.graph.node[i - 2].input[0]
+                    const_node = onnx_model.graph.node[to_transpose_const[i]]
+                    val = nh.to_array(const_node.attribute[0].t).transpose(1, 0)
+                    new_tensor = create_initializer_tensor(
+                        name=f"Constant{cnt}",
+                        tensor_array=val,
+                        data_type=onnx.TensorProto.FLOAT
+                    )
+                    matmul_node = onnx.helper.make_node(
+                        name=f'linear{cnt}_MatMul',
+                        op_type='MatMul',
+                        inputs=[source_input, f"Constant{cnt}"],
+                        outputs=[onnx_model.graph.node[i + 1].output[0]]
+                    )
+                    new_nodes.append(matmul_node)
+                    new_initializers.append(new_tensor)
+                    cnt += 1
+                else:
+                    new_nodes.append(node)
+                    source = node.output[0]
+                    for old_init in node.input:
+                        if old_init in initializers:
+                            cur_init = create_initializer_tensor(
+                                name=old_init,
+                                tensor_array=initializers[old_init],
+                                data_type=onnx.TensorProto.FLOAT)
+                            new_initializers.append(cur_init)
+        elif "fix_gtrsb" in onnx_optimization_flags:
+            if node.op_type == "Transpose":
+                onnx_model.graph.node[i+1].input[0] = node.input[0]
+            elif node.op_type == "MatMul" and cnt == 0:
+                w_cur = initializers[node.input[1]]
+                shape_now = w_cur.shape
+                if shape_now[0] == 23328:
+                    w_cur = w_cur.reshape(1, 27, 27, 32, -1)
+                elif shape_now[0] == 3136:
+                    w_cur = w_cur.reshape(1, 7, 7, 64, -1)
+                elif shape_now[0] == 1600:
+                    w_cur = w_cur.reshape(1, 5, 5, 64, -1)
+                else:
+                    raise ValueError
+                W = w_cur.transpose(0, 3, 1, 2, 4).reshape(-1, shape_now[-1])
+                linear_W_initializer = create_initializer_tensor(
+                    name=f"matmul{cnt}_W",
+                    tensor_array=W,
+                    data_type=onnx.TensorProto.FLOAT)
+
+                matmul_node = onnx.helper.make_node(
+                    name=f'matmul{cnt}_MatMul',
+                    op_type='MatMul',
+                    inputs=[node.input[0], f"matmul{cnt}_W"],
+                    outputs=[node.output[0]]
+                )
+                cnt += 1
+                new_nodes.append(matmul_node)
+                new_initializers.append(linear_W_initializer)
+            else:
+                for i in range(len(node.input)): node.input[i] = trace(node.input[i])
+                new_nodes.append(node)
+                source = node.output[0]
+                for old_init in node.input:
+                    if old_init in initializers and old_init not in [i.name for i in new_initializers]:
+                        if "const" in old_init:
+                            data_type = onnx.TensorProto.INT64
+                        else:
+                            data_type = onnx.TensorProto.FLOAT
+                        cur_init = create_initializer_tensor(
+                            name=old_init,
+                            tensor_array=initializers[old_init],
+                            data_type=data_type)
+                        new_initializers.append(cur_init)
         else:
-            for i in range(len(node.input)): node.input[i] = trace(node.input[i])
+            # TODO (assigned to Zhuowen): generalize the code to allow the merge of BN + gemm for any general onnx.
+            if "merge_bn_reshape_gemm" in onnx_optimization_flags and (i == len(onnx_model.graph.node[started_node:]) - 4) and (node.op_type == "BatchNormalization" and
+                    onnx_model.graph.node[-3].op_type == "Constant" and onnx_model.graph.node[-2].op_type == "Reshape" and onnx_model.graph.node[-1].op_type == "Gemm"):
+                new_linear_weight, new_linear_bias = fuse_cgan_bn_reshape_gemm(onnx_model, initializers)
+
+                values = nh.to_array(onnx_model.graph.node[-3].attribute[0].t)
+                cnode = onnx.helper.make_node(
+                    'Constant',
+                    inputs=[],
+                    outputs=['values1'],
+                    value=onnx.helper.make_tensor(
+                        name='const_tensor',
+                        data_type=onnx.TensorProto.INT64,
+                        dims=values.shape,
+                        vals=values.flatten().astype(int),
+                    ),
+                )
+                new_nodes.append(cnode)
+                rnode = onnx.helper.make_node(
+                    'Reshape',
+                    inputs=[onnx_model.graph.node[-5].output[0], 'values1'],
+                    outputs=['reshape_output'],
+                )
+                new_nodes.append(rnode)
+
+                linear_W_initializer = create_initializer_tensor(
+                    name=f'linear_W1',
+                    tensor_array=new_linear_weight,
+                    data_type=onnx.TensorProto.FLOAT)
+                new_initializers.append(linear_W_initializer)
+                linear_b_initializer = create_initializer_tensor(
+                    name=f'linear_b1',
+                    tensor_array=new_linear_bias,
+                    data_type=onnx.TensorProto.FLOAT)
+                new_initializers.append(linear_b_initializer)
+
+                cur_node = onnx.helper.make_node(
+                    op_type='Gemm',
+                    inputs=['reshape_output', 'linear_W1', 'linear_b1'],
+                    outputs=['Y'],
+                    alpha=1.0,
+                    beta=1.0,
+                    transB=1
+                )
+                new_nodes.append(cur_node)
+                break
+
+            for i in range(len(node.input)):
+                node.input[i] = trace(node.input[i])
             new_nodes.append(node)
             source = node.output[0]
             for old_init in node.input:
                 if old_init in initializers:
+                    value = initializers[old_init]
+                    if value.dtype == 'float32':
+                        data_type = onnx.TensorProto.FLOAT
+                    elif value.dtype == 'int64':
+                        data_type = onnx.TensorProto.INT64
+                    else:
+                        raise NotImplementedError(value.dtype)
                     cur_init = create_initializer_tensor(
-                        name=old_init,
-                        tensor_array=initializers[old_init],
-                        data_type=onnx.TensorProto.FLOAT)
+                        name=old_init, tensor_array=value, data_type=data_type)
                     new_initializers.append(cur_init)
 
     model_outputs = onnx_model.graph.output
+    input_node = onnx_model.graph.input[0]
+
+
+    if 'check_duplicate_upsample_initializers' in onnx_optimization_flags:
+        # For cGAN transformers, duplicate initializers appear after using
+        # https://github.com/daquexian/onnx-simplifier,
+        # which cannot pass onnx.checker.check.
+        for i in range(len(new_nodes)):
+            if ('Upsample' in new_nodes[i].name
+                    and len(new_nodes[i].input) == 2
+                    and new_nodes[i].input[1] in initializers):
+                for j in range(i + 1, len(new_nodes)):
+                    if ('Upsample' in new_nodes[j].name
+                            and len(new_nodes[j].input) == 2
+                            and new_nodes[i].input[1] == new_nodes[j].input[1]):
+                        new_name = f'{new_nodes[j].input[1]}.{j}'
+                        assert new_name not in initializers
+                        new_init = create_initializer_tensor(
+                            name=new_name,
+                            tensor_array=initializers[new_nodes[j].input[1]],
+                            data_type=onnx.TensorProto.FLOAT)
+                        new_nodes[j].input[1] = new_init.name
+                        new_initializers.append(new_init)
+        new_initializers_dup = new_initializers
+        new_initializers = []
+        new_initializers_names = []
+        for init in new_initializers_dup:
+            if init.name not in new_initializers_names:
+                new_initializers_names.append(init.name)
+                new_initializers.append(init)
+
+    if "remove_squeeze_in_last_layer" in onnx_optimization_flags:
+        if new_nodes[-1].op_type == "Squeeze" and len(new_nodes[-1].attribute) == 0:
+            new_nodes = new_nodes[:-1]
+            model_outputs = [onnx.helper.make_value_info(
+                new_nodes[-1].output[0],
+                onnx.helper.make_tensor_type_proto(1, [1, 1]))]
+            print("Remove the squeeze in the last layer.")
 
     if "remove_relu_in_last_layer" in onnx_optimization_flags:
         if new_nodes[-1].op_type == "Relu":
             new_nodes = new_nodes[:-1]
             model_outputs[0].name = new_nodes[-1].output[0]
             print("Remove the relu in the last layer.")
+    if "fix_gtrsb" in onnx_optimization_flags:
+        for i, node in enumerate(new_nodes):
+            if node.op_type == "Reshape":
+                tmp = node.input[0]
+                node.input[0] = new_nodes[i+3].output[0]
+                new_nodes[i+1].input[0] = tmp
+                new_nodes[i+4].input[0] = node.output[0]
+                new_nodes[i] = new_nodes[i+1]
+                new_nodes[i+1] = new_nodes[i+2]
+                new_nodes[i+2] = new_nodes[i+3]
+                new_nodes[i+3] = node
+                break
+        input_node = onnx.helper.make_tensor_value_info(
+            name=onnx_model.graph.input[0].name,
+            elem_type=1,
+            shape=("unk__195", place_holder[3], place_holder[1], place_holder[2])
+        )
+
+    """
+    # we should do flatten here, but the collins_yolo_robustness has incompatible onnx version
+    # that make the conversion fail. We temporally flatten outside.
+    if "flatten_final_output" in onnx_optimization_flags:
+        flatten_node = onnx.helper.make_node(
+            op_type='Flatten',
+            inputs=[new_nodes[-1].output[0]],
+            outputs=['Flattened_final_output'],
+        )
+        new_nodes.append(flatten_node)
+        model_outputs[0].name = new_nodes[-1].output[0]
+        print("Flattened the final output.")
+    """
 
     new_graph = onnx.helper.make_graph(
         nodes=new_nodes,
         name="CompressedNet",
-        inputs=onnx_model.graph.input,
+        inputs=[input_node],
         outputs=model_outputs,
         initializer=new_initializers
     )
     model_def = onnx.helper.make_model(new_graph, producer_name="onnx_example")
-    model_def.opset_import[0].version = 13
+    if ('merge_vit' in onnx_optimization_flags
+            or 'check_duplicate_upsample_initializers' in onnx_optimization_flags):
+        model_def.opset_import[0].version = 9
+    else:
+        model_def.opset_import[0].version = 13
     model_def = onnx.shape_inference.infer_shapes(model_def)
-
-    # for i, node in enumerate(model_def.graph.node):
-    #	print(node)
 
     onnx.checker.check_model(model_def)
     onnx.save(model_def, save_path)
 
     if debug:
         errors = np.zeros(100)
+        # Workaround for onnx bug, see issue #150
+        options = ort.SessionOptions()
+        options.inter_op_num_threads = 1
+        options.intra_op_num_threads = 1
         for _ in range(100):
             inputs = torch.randn(place_holder).numpy()
-            ort_sess = ort.InferenceSession(old_path)
+            ort_sess = ort.InferenceSession(old_path, sess_options=options)
             input_name = ort_sess.get_inputs()[0].name
             output_name = ort_sess.get_outputs()[0].name
             output1 = ort_sess.run([output_name], {input_name: inputs})
 
-            ort_sess = ort.InferenceSession(save_path)
+            if "fix_gtrsb" in onnx_optimization_flags:
+                inputs = inputs.transpose(0, 3, 1, 2)
+            ort_sess = ort.InferenceSession(save_path, sess_options=options)
             input_name = ort_sess.get_inputs()[0].name
             output_name = ort_sess.get_outputs()[0].name
             output2 = ort_sess.run([output_name], {input_name: inputs})
@@ -489,14 +940,15 @@ def compress_onnx(onnx_model, old_path, save_path, onnx_optimization_flags, debu
         errors[_] = np.sum(np.abs(np.array(output1) - np.array(output2)).reshape(-1))
 
         print(f"Compressed {len(onnx_model.graph.node) - len(model_def.graph.node)} Onnx nodes")
-        print('Sum/mean of errors during compression: {}/{}'.format(np.sum(errors), np.mean(errors)))
+        print('Sum/mean of errors during compression: '
+              f'{np.sum(errors)}/{np.mean(errors)}')
 
     return model_def
 
 
 if __name__ == '__main__':
-    old_path = "benchmark/onnx/cifar_bias_field_0.onnx"
+    old_path = "../vnncomp2023_benchmarks/benchmarks/cgan/onnx/cGAN_imgSz32_nCh_1.onnx"
     onnx_model = onnx.load(old_path)
-    npath = "./test"
-    onnx_optimization_flags = "merge_gemm"
+    npath = "test.onnx"
+    onnx_optimization_flags = ["merge_gemm_reshape_bn", "merge_bn_reshape_gemm"]
     compress_onnx(onnx_model, old_path, npath, onnx_optimization_flags, True)

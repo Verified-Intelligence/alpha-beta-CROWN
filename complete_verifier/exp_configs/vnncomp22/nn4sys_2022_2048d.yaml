@@ -2,18 +2,15 @@
 general:
   root_path: ../../vnncomp2022_benchmarks/benchmarks/nn4sys
   csv_name: instances.csv
-  enable_incomplete_verification: False
+  enable_incomplete_verification: false
   loss_reduction_func: max
   conv_mode: matrix
 data:
-  dataset: NN4SYS_2022
-  num_outputs: 1
   start: 85
+  end: 152
 solver:
   batch_size: 256  # Number of parallel domains to compute on GPU.
   bound_prop_method: forward+backward
-  beta-crown:
-    iteration: 10  # Iterations for computing intermediate layer bounds.
 bab:
   initial_max_domains: 1000
   branching:
@@ -23,4 +20,4 @@ bab:
       enable: True
       adv_check: .inf
 attack:
-  pgd_order: skip
+  pgd_order: input_bab

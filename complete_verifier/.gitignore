@@ -1,0 +1,5 @@
+*.pt
+*.npz
+*.npy
+data/
+checkpoints/

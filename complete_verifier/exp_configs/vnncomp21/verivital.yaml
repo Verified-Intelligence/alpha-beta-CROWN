@@ -3,7 +3,6 @@ general:
   csv_name: verivital_instances.csv
   complete_verifier: mip
 data:
-  dataset: MNIST
   start: 0
   end: 60
 attack:

@@ -5,7 +5,6 @@ general:
   enable_incomplete_verification: False
   loss_reduction_func: max
 data:
-  dataset: ACASXU
   num_outputs: 5
 solver:
   batch_size: 1000  # Number of parallel domains to compute on GPU.
@@ -14,7 +13,7 @@ solver:
     iteration: 10  # Iterations for computing intermediate layer bounds.
   alpha-crown:
     iteration: 10
-    share_slopes: True  # This produces slightly looser bounds, but faster.
+    share_alphas: True  # This produces slightly looser bounds, but faster.
 bab:
   branching:
     method: naive  # Split on input space.
@@ -28,3 +27,4 @@ bab:
       attack_patience: 80
 attack:
   pgd_order: after
+  pgd_restarts: 10000

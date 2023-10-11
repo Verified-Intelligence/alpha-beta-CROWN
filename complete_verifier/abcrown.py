@@ -17,8 +17,8 @@
 import copy
 import socket
 import random
-import pickle
 import os
+import sys
 import time
 import gc
 import torch
@@ -28,620 +28,585 @@ from collections import defaultdict
 import arguments
 from auto_LiRPA import BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
-from auto_LiRPA.utils import stop_criterion_min
+from auto_LiRPA.utils import stop_criterion_all, stop_criterion_batch_any
+from auto_LiRPA.operators.convolution import BoundConv
 from jit_precompile import precompile_jit_kernels
-from beta_CROWN_solver import LiRPAConvNet
-from lp_mip_solver import FSB_score
-from attack_pgd import attack
-from utils import Customized, default_onnx_and_vnnlib_loader, parse_run_mode
-from nn4sys_verification import nn4sys_verification
-from batch_branch_and_bound import relu_bab_parallel
-from batch_branch_and_bound_input_split import input_bab_parallel
-
-from read_vnnlib import batch_vnnlib, read_vnnlib
-from cut_utils import terminate_mip_processes, terminate_mip_processes_by_c_matching
-
-
-def incomplete_verifier(model_ori, data, data_ub=None, data_lb=None, vnnlib=None):
-    norm = arguments.Config["specification"]["norm"]
-    # Generally, c should be constructed from vnnlib
-    assert len(vnnlib) == 1
-    vnnlib = vnnlib[0]
-    c = torch.tensor(np.array([item[0] for item in vnnlib[1]])).to(data)
-    c_transposed = False
-    if c.shape[0] != 1 and data.shape[0] == 1:
-        # TODO need a more general solution.
-        # transpose c to share intermediate bounds
-        c = c.transpose(0, 1)
-        c_transposed = True
-    arguments.Config["bab"]["decision_thresh"] = torch.tensor(np.array([item[1] for item in vnnlib[1]])).to(data)
-
-    model = LiRPAConvNet(model_ori, in_size=data.shape, c=c)
-    print('Model prediction is:', model.net(data))
-
-    eps = arguments.Globals["lp_perturbation_eps"]  # Perturbation value for non-Linf perturbations, None for all other cases.
-    ptb = PerturbationLpNorm(norm=norm, eps=eps, x_L=data_lb, x_U=data_ub)
-    x = BoundedTensor(data, ptb).to(data_lb.device)
-    domain = torch.stack([data_lb.squeeze(0), data_ub.squeeze(0)], dim=-1)
-    bound_prop_method = arguments.Config["solver"]["bound_prop_method"]
-
-    _, global_lb, _, _, _, mask, lA, lower_bounds, upper_bounds, pre_relu_indices, slope, history, attack_images = model.build_the_model(
-            domain, x, data_lb, data_ub, vnnlib, stop_criterion_func=stop_criterion_min(arguments.Config["bab"]["decision_thresh"]))
-
-    if (global_lb > arguments.Config["bab"]["decision_thresh"]).all():
-        print("verified with init bound!")
-        return "safe-incomplete", None, None, None, None
-
-    if arguments.Config["attack"]["pgd_order"] == "middle":
-        if attack_images is not None:
-            return "unsafe-pgd", None, None, None, None
-
-    # Save the alpha variables during optimization. Here the batch size is 1.
-    saved_slopes = defaultdict(dict)
-    for m in model.net.relus:
-        for spec_name, alpha in m.alpha.items():
-            # each slope size is (2, spec, 1, *shape); batch size is 1.
-            saved_slopes[m.name][spec_name] = alpha.detach().clone()
-
-    if bound_prop_method == 'alpha-crown':
-        # obtain and save relu alphas
-        activation_opt_params = dict([(relu.name, relu.dump_optimized_params()) for relu in model.net.relus])
-    else:
-        activation_opt_params = None
-
-    if c_transposed:
-        lower_bounds[-1] = lower_bounds[-1].t()
-        upper_bounds[-1] = upper_bounds[-1].t()
-        global_lb = global_lb.t()
-
-    saved_bounds = (model, lower_bounds, upper_bounds, mask, pre_relu_indices, lA)
-
-    return "unknown", global_lb, saved_bounds, saved_slopes, activation_opt_params
+from beta_CROWN_solver import LiRPANet
+from lp_mip_solver import mip
+from attack import attack
+from utils import Logger, print_model
+from specifications import trim_batch, batch_vnnlib, sort_targets, prune_by_idx
+from loading import load_model_and_vnnlib, parse_run_mode, adhoc_tuning, Customized  # pylint: disable=unused-import
+from bab import general_bab
+from input_split.batch_branch_and_bound import input_bab_parallel
+from read_vnnlib import read_vnnlib
+from cuts.cut_utils import terminate_mip_processes, terminate_mip_processes_by_c_matching
+from lp_test import compare_optimized_bounds_against_lp_bounds
 
 
-def mip(saved_bounds, labels_to_verify=None):
+class ABCROWN:
+    def __init__(self, args):
+        arguments.Config.parse_config(args)
 
-    lirpa_model, lower_bounds, upper_bounds, mask, pre_relu_indices, lA = saved_bounds
-    refined_betas = None
+    def incomplete_verifier(self, model_ori, data, data_ub=None, data_lb=None, vnnlib=None):
+        # Generally, c should be constructed from vnnlib
+        assert len(vnnlib) == 1, 'incomplete_verifier only support single x spec'
+        input_x, specs = vnnlib[0]
+        c_transposed = False
+        if len(specs) > 1:
+            # single OR with many clauses (e.g., robustness verification)
+            assert all([len(_[0]) == 1 for _ in specs]), \
+                'for each property in OR, only one clause supported so far'
+            c = torch.concat([
+                item[0] if isinstance(item[0], torch.Tensor) else torch.tensor(item[0])
+                for item in specs], dim=0).unsqueeze(1).to(data)  # c shape: (batch, 1, num_outputs)
+            if c.shape[0] != 1 and data.shape[0] == 1:
+                # transpose c to shape (1,batch,num_outputs) to share intermediate bounds
+                c = c.transpose(0, 1)
+                c_transposed = True
+            rhs = torch.tensor(np.array([item[1] for item in specs])).to(data).t()  # (batch, 1)
+            stop_func = stop_criterion_all(rhs)
 
-    if arguments.Config["general"]["complete_verifier"] == "mip":
-        mip_global_lb, mip_global_ub, mip_status, mip_adv = lirpa_model.build_the_model_mip(labels_to_verify=labels_to_verify, save_adv=True)
-
-        if mip_global_lb.ndim == 1:
-            mip_global_lb = mip_global_lb.unsqueeze(-1)  # Missing batch dimension.
-        if mip_global_ub.ndim == 1:
-            mip_global_ub = mip_global_ub.unsqueeze(-1)  # Missing batch dimension.
-        print(f'MIP solved lower bound: {mip_global_lb}')
-        print(f'MIP solved upper bound: {mip_global_ub}')
-
-        verified_status = "safe-mip"
-        # Batch size is always 1.
-        labels_to_check = labels_to_verify if labels_to_verify is not None else range(len(mip_status))
-        for pidx in labels_to_check:
-            if mip_global_lb[pidx] >= 0:
-                # Lower bound > 0, verified.
-                continue
-            # Lower bound < 0, now check upper bound.
-            if mip_global_ub[pidx] <= 0:
-                # Must be 2 cases: solved with adv example, or early terminate with adv example.
-                assert mip_status[pidx] in [2, 15]
-                print("verified unsafe-mip with init mip!")
-                return "unsafe-mip", mip_global_lb, None, None, None
-            # Lower bound < 0 and upper bound > 0, must be a timeout.
-            assert mip_status[pidx] == 9 or mip_status[pidx] == -1, "should only be timeout for label pidx"
-            verified_status = "unknown-mip"
-
-        print(f"verified {verified_status} with init mip!")
-        return verified_status, mip_global_lb, None, None, None
-
-    elif arguments.Config["general"]["complete_verifier"] == "bab-refine":
-        print("Start solving intermediate bounds with MIP...")
-        score = FSB_score(lirpa_model.net, lower_bounds, upper_bounds, mask, pre_relu_indices, lA)
-
-        refined_lower_bounds, refined_upper_bounds, refined_betas = lirpa_model.build_the_model_mip_refine(lower_bounds, upper_bounds,
-                            score=score, stop_criterion_func=stop_criterion_min(1e-4))
-
-        # shape of the last layer should be (batch, 1) for verified-acc
-        refined_lower_bounds[-1] = refined_lower_bounds[-1].reshape(lower_bounds[-1].shape)
-        refined_upper_bounds[-1] = refined_upper_bounds[-1].reshape(upper_bounds[-1].shape)
-
-        lower_bounds, upper_bounds, = refined_lower_bounds, refined_upper_bounds
-        refined_global_lb = lower_bounds[-1]
-        print("refined global lb:", refined_global_lb, "min:", refined_global_lb.min())
-        if refined_global_lb.min()>=0:
-            print("Verified safe using alpha-CROWN with MIP improved bounds!")
-            return "safe-incomplete-refine", refined_global_lb, lower_bounds, upper_bounds, None
-
-        return "unknown", refined_global_lb, lower_bounds, upper_bounds, refined_betas
-    else:
-        return "unknown", -float("inf"), lower_bounds, upper_bounds, refined_betas
-
-
-def bab(unwrapped_model, data, targets, y, data_ub, data_lb,
-        lower_bounds=None, upper_bounds=None, reference_slopes=None,
-        attack_images=None, c=None, all_prop=None, cplex_processes=None,
-        activation_opt_params=None, reference_lA=None, rhs=None, 
-        model_incomplete=None, timeout=None, refined_betas=None):
-
-    norm = arguments.Config["specification"]["norm"]
-    eps = arguments.Globals["lp_perturbation_eps"]  # epsilon for non Linf perturbations, None for all other cases.
-    if norm != float("inf"):
-        # For non Linf norm, upper and lower bounds do not make sense, and they should be set to the same.
-        assert torch.allclose(data_ub, data_lb)
-
-    # This will use the refined bounds if the complete verifier is "bab-refine".
-    # FIXME do not repeatedly create LiRPAConvNet which creates a new BoundedModule each time.
-    model = LiRPAConvNet(unwrapped_model, in_size=data.shape if not targets.size > 1 else [len(targets)] + list(data.shape[1:]),
-                         c=c, cplex_processes=cplex_processes)
-
-    data = data.to(model.device)
-    data_lb, data_ub = data_lb.to(model.device), data_ub.to(model.device)
-    output = model.net(data).flatten()
-    print('Model prediction is:', output)
-
-    if arguments.Config['attack']['check_clean']:
-        clean_rhs = c.matmul(output)
-        print(f'Clean RHS: {clean_rhs}')
-        if (clean_rhs < rhs).any():
-            return -np.inf, np.inf, None, None, 'unsafe'
-
-    ptb = PerturbationLpNorm(norm=norm, eps=eps, x_L=data_lb, x_U=data_ub)
-    x = BoundedTensor(data, ptb).to(data_lb.device)
-    domain = torch.stack([data_lb.squeeze(0), data_ub.squeeze(0)], dim=-1)
-
-    cut_enabled = arguments.Config["bab"]["cut"]["enabled"]
-    if cut_enabled:
-        model.set_cuts(model_incomplete.A_saved, x, lower_bounds, upper_bounds)
-
-    if arguments.Config["bab"]["branching"]["input_split"]["enable"]:
-        min_lb, min_ub, glb_record, nb_states, verified_ret = input_bab_parallel(
-            model, domain, x, model_ori=unwrapped_model, all_prop=all_prop,
-            rhs=rhs, timeout=timeout, branching_method=arguments.Config["bab"]["branching"]["method"])
-    else:
-        min_lb, min_ub, glb_record, nb_states, verified_ret = relu_bab_parallel(
-            model, domain, x,
-            refined_lower_bounds=lower_bounds, refined_upper_bounds=upper_bounds,
-            activation_opt_params=activation_opt_params, reference_lA=reference_lA,
-            reference_slopes=reference_slopes, attack_images=attack_images,
-            timeout=timeout, refined_betas=refined_betas, rhs=rhs)
-
-    if isinstance(min_lb, torch.Tensor):
-        min_lb = min_lb.item()
-    if min_lb is None:
-        min_lb = -np.inf
-    if isinstance(min_ub, torch.Tensor):
-        min_ub = min_ub.item()
-    if min_ub is None:
-        min_ub = np.inf
-
-    return min_lb, min_ub, nb_states, glb_record, verified_ret
-
-
-def update_parameters(model, data_min, data_max):
-    if 'vggnet16_2022' in arguments.Config['general']['root_path']:
-        perturbed = (data_max - data_min > 0).sum()
-        if perturbed > 10000:
-            print('WARNING: prioritizing attack due to too many perturbed pixels on VGG')
-            print('Setting arguments.Config["attack"]["pgd_order"] to "before"')
-            arguments.Config['attack']['pgd_order'] = 'before'
-
-
-def sort_targets_cls(batched_vnnlib, init_global_lb, init_global_ub, scores, reference_slopes, lA, final_node_name, reverse=False):
-    # TODO need minus rhs
-    # To sort targets, this must be a classification task, and initial_max_domains
-    # is set to 1.
-    assert len(batched_vnnlib) == init_global_lb.shape[0] and init_global_lb.shape[1] == 1
-    sorted_idx = scores.argsort(descending=reverse)
-    batched_vnnlib = [batched_vnnlib[i] for i in sorted_idx]
-    init_global_lb = init_global_lb[sorted_idx]
-    init_global_ub = init_global_ub[sorted_idx]
-
-    if reference_slopes is not None:
-        for m, spec_dict in reference_slopes.items():
-            for spec in spec_dict:
-                if spec == final_node_name:
-                    if spec_dict[spec].size()[1] > 1:
-                        # correspond to multi-x case
-                        spec_dict[spec] = spec_dict[spec][:, sorted_idx]
-                    else:
-                        spec_dict[spec] = spec_dict[spec][:, :, sorted_idx]
-
-    if lA is not None:
-        lA = [lAitem[:, sorted_idx] for lAitem in lA]
-
-    return batched_vnnlib, init_global_lb, init_global_ub, lA, sorted_idx
-
-
-def complete_verifier(
-        model_ori, model_incomplete, batched_vnnlib, vnnlib, vnnlib_shape,
-        init_global_lb, lower_bounds, upper_bounds, index,
-        timeout_threshold, bab_ret=None, lA=None, cplex_processes=None,
-        reference_slopes=None, activation_opt_params=None, refined_betas=None, attack_images=None,
-        attack_margins=None):
-    start_time = time.time()
-    cplex_cuts = arguments.Config["bab"]["cut"]["enabled"] and arguments.Config["bab"]["cut"]["cplex_cuts"]
-    sort_targets = arguments.Config["bab"]["sort_targets"]
-    bab_attack_enabled = arguments.Config["bab"]["attack"]["enabled"]
-
-    if arguments.Config["general"]["enable_incomplete_verification"]:
-        init_global_ub = upper_bounds[-1]
-        print('lA shape:', [lAitem.shape for lAitem in lA])
-        if bab_attack_enabled:
-            # Sort specifications based on adversarial attack margins.
-            batched_vnnlib, init_global_lb, init_global_ub, lA, sorted_idx = sort_targets_cls(batched_vnnlib, init_global_lb, init_global_ub,
-                scores=attack_margins.flatten(), reference_slopes=reference_slopes, lA=lA, final_node_name=model_incomplete.net.final_node().name)
-            attack_images = attack_images[:, :, sorted_idx]
         else:
-            if sort_targets:
-                assert not cplex_cuts
-                # Sort specifications based on incomplete verifier bounds.
-                batched_vnnlib, init_global_lb, init_global_ub, lA, _ = sort_targets_cls(batched_vnnlib, init_global_lb, init_global_ub,
-                    scores=init_global_lb.flatten(), reference_slopes=reference_slopes, lA=lA, final_node_name=model_incomplete.net.final_node().name)
-            if cplex_cuts:
-                assert not sort_targets
-                # need to sort pidx such that easier first according to initial alpha crown
-                batched_vnnlib, init_global_lb, init_global_ub, lA, _ = sort_targets_cls(batched_vnnlib, init_global_lb, init_global_ub,
-                    scores=init_global_lb.flatten(), reference_slopes=reference_slopes, lA=lA, final_node_name=model_incomplete.net.final_node().name, reverse=True)
-        if reference_slopes is not None:
-            reference_slopes_cp = copy.deepcopy(reference_slopes)
+            # single AND with many clauses (e.g., Yolo).
+            # shape: (batch=1, num_clauses in AND, num_outputs)
+            c = torch.tensor(specs[0][0]).unsqueeze(0).to(data)
+            # shape: (num_clauses in AND, 1)
+            rhs = torch.tensor(specs[0][1], dtype=data.dtype, device=data.device).unsqueeze(0)
+            stop_func = stop_criterion_batch_any(rhs)
 
-    solved_c_rows = []
+        model = LiRPANet(model_ori, in_size=data.shape, c=c)
 
-    for property_idx, properties in enumerate(batched_vnnlib):  # loop of x
-        # batched_vnnlib: [x, [(c, rhs, y, pidx)]]
-        print(f'\nProperties batch {property_idx}, size {len(properties[0])}')
-        timeout = timeout_threshold - (time.time() - start_time)
-        print(f'Remaining timeout: {timeout}')
-        start_time_bab = time.time()
+        apply_output_constraints_to = (
+            arguments.Config['solver']['alpha-crown']['apply_output_constraints_to']
+        )
+        bound_prop_method = arguments.Config['solver']['bound_prop_method']
+        if len(apply_output_constraints_to) > 0:
+            assert bound_prop_method == 'alpha-crown'
+            model.net.constraints = torch.tensor([x[0] for x in specs])
+            assert model.net.constraints.ndim == 3
+            assert model.net.constraints.size(0) == 1
+            model.net.constraints = model.net.constraints.squeeze(0)
+            model.net.thresholds = rhs
 
-        x_range = torch.tensor(properties[0], dtype=torch.get_default_dtype())
-        data_min = x_range.select(-1, 0).reshape(vnnlib_shape)
-        data_max = x_range.select(-1, 1).reshape(vnnlib_shape)
-        x = x_range.mean(-1).reshape(vnnlib_shape)  # only the shape of x is important.
+            # Currently, only a chain of AND is supported
+            assert len(specs) == 1
 
-        target_label_arrays = list(properties[1])  # properties[1]: (c, rhs, y, pidx)
+            # We need to use matrix mode for the layer that should utilize output constraints
+            for node in model.net.nodes():
+                if node.are_output_constraints_activated_for_layer(apply_output_constraints_to):
+                    if isinstance(node, BoundConv) and node.mode == 'patches':
+                        node.mode = 'matrix'
 
-        assert len(target_label_arrays) == 1
-        c, rhs, y, pidx = target_label_arrays[0]
-
-        if bab_attack_enabled:
-            if arguments.Config["bab"]["initial_max_domains"] != 1:
-                raise ValueError('To run Bab-attack, please set initial_max_domains to 1. '
-                                 f'Currently it is {arguments.Config["bab"]["initial_max_domains"]}.')
-            # Attack images has shape (batch, restarts, specs, c, h, w). The specs dimension should already be sorted.
-            # Reshape it to (restarts, c, h, w) for this specification.
-            this_spec_attack_images = attack_images[:, :, property_idx].view(attack_images.size(1), *attack_images.shape[3:])
+        if isinstance(input_x, dict):
+            # Traditional Lp norm case. Still passed in as an vnnlib variable, but it is passed
+            # in as a dictionary.
+            ptb = PerturbationLpNorm(
+                norm=input_x['norm'],
+                eps=input_x['eps'], eps_min=input_x.get('eps_min', 0),
+                x_L=data_lb, x_U=data_ub)
         else:
-            this_spec_attack_images = None
- 
-        if arguments.Config["general"]["enable_incomplete_verification"]:
-            # extract lower bound by (sorted) init_global_lb and batch size of initial_max_domains
-            this_batch_start_idx = property_idx * arguments.Config["bab"]["initial_max_domains"]
-            lower_bounds[-1] = init_global_lb[this_batch_start_idx: this_batch_start_idx + c.shape[0]]
-            upper_bounds[-1] = init_global_ub[this_batch_start_idx: this_batch_start_idx + c.shape[0]]
+            norm = arguments.Config['specification']['norm']
+            # Perturbation value for non-Linf perturbations, None for all other cases.
+            ptb = PerturbationLpNorm(norm=norm, x_L=data_lb, x_U=data_ub)
+        x = BoundedTensor(data, ptb).to(data.device)
+        output = model.net(x)
+        print_model(model.net)
+        print('Original output:', output)
 
-            # trim reference slope by batch size of initial_max_domains accordingly
-            if reference_slopes is not None:
-                for m, spec_dict in reference_slopes.items():
-                    for spec in spec_dict:
-                        if spec == model_incomplete.net.final_node().name:
-                            if reference_slopes_cp[m][spec].size()[1] > 1:
-                                # correspond to multi-x case
-                                spec_dict[spec] = reference_slopes_cp[m][spec][:, this_batch_start_idx: this_batch_start_idx + c.shape[0]]
-                            else:
-                                spec_dict[spec] = reference_slopes_cp[m][spec][:, :, this_batch_start_idx: this_batch_start_idx + c.shape[0]]
+        # save output
+        if arguments.Config['general']['save_output']:
+            arguments.Globals['out']['pred'] = output.cpu()
 
-            # trim lA by batch size of initial_max_domains accordingly
-            if lA is not None:
-                lA_trim = [Aitem[:, this_batch_start_idx: this_batch_start_idx + c.shape[0]] for Aitem in lA]
+        domain = torch.stack([data_lb.squeeze(0), data_ub.squeeze(0)], dim=-1)
+        # one of them is sufficient.
+        global_lb, ret = model.build(
+            domain, x, stop_criterion_func=stop_func, decision_thresh=rhs, vnnlib_ori=vnnlib)
 
-        print('##### Instance {} first 10 spec matrices: {}\nthresholds: {} ######'.format(index, c[:10],  rhs.flatten()[:10]))
+        if c_transposed:
+            # transpose back to get ready for general verified condition check and final outputs
+            global_lb = global_lb.t()
+            rhs = rhs.t()
 
-        if np.array(pidx == y).any():
-            raise NotImplementedError
+        if torch.any((global_lb - rhs) > 0, dim=-1).all():
+            # Any spec in AND verified means verified. Also check all() at batch dim.
+            print('verified with init bound!')
+            return 'safe-incomplete', {}
 
-        torch.cuda.empty_cache()
-        gc.collect()
+        if arguments.Config['attack']['pgd_order'] == 'middle':
+            if ret['attack_images'] is not None:
+                return 'unsafe-pgd', {}
 
-        c = torch.tensor(c, dtype=torch.get_default_dtype(), device=arguments.Config["general"]["device"])
-        rhs = torch.tensor(rhs, dtype=torch.get_default_dtype(), device=arguments.Config["general"]["device"])
+        # Save the alpha variables during optimization. Here the batch size is 1.
+        saved_alphas = defaultdict(dict)
+        for m in model.net.optimizable_activations:
+            for spec_name, alpha in m.alpha.items():
+                # each alpha size is (2, spec, 1, *shape); batch size is 1.
+                saved_alphas[m.name][spec_name] = alpha.detach().clone()
 
-        # extract cplex cut filename
-        if cplex_cuts:
-            assert arguments.Config["bab"]["initial_max_domains"] == 1
+        # FIXME there may be some duplicate with saved_alphas
+        if bound_prop_method == 'alpha-crown':
+            ret['activation_opt_params'] = {
+                node.name: node.dump_optimized_params()
+                for node in model.net.optimizable_activations
+            }
 
-        # Complete verification (BaB, BaB with refine, or MIP).
-        if arguments.Config["general"]["enable_incomplete_verification"]:
-            assert not arguments.Config["bab"]["branching"]["input_split"]["enable"]
-            # Reuse results from incomplete results, or from refined MIPs.
-            # skip the prop that already verified
-            rlb = list(lower_bounds)[-1]
-            if arguments.Config["data"]["num_outputs"] != 1:
-                init_verified_cond = rlb.flatten() > rhs.flatten()
-                init_verified_idx = np.array(torch.where(init_verified_cond)[0].cpu())
-                if init_verified_idx.size > 0:
-                    print(f"Initial alpha-CROWN verified for spec index {init_verified_idx} with bound {rlb[init_verified_idx].squeeze()}.")
-                    l, ret = init_global_lb[init_verified_idx].cpu().numpy().tolist(), 'safe'
-                    bab_ret.append([index, l, 0, time.time() - start_time_bab, pidx])
-                init_failure_idx = np.array(torch.where(~init_verified_cond)[0].cpu())
-                if init_failure_idx.size == 0:
-                    # This batch of x verified by init opt crown
-                    continue
-                print(f"Remaining spec index {init_failure_idx} with "
-                      f"bounds {rlb[init_failure_idx]} need to verify.")
-                assert len(np.unique(y)) == 1 and len(rhs.unique()) == 1
-            else:
-                init_verified_cond, init_failure_idx, y = torch.tensor([1]), np.array(0), np.array(0)
+        if c_transposed:
+            ret['lower_bounds'][model.final_name] = ret['lower_bounds'][model.final_name].t()
+            ret['upper_bounds'][model.final_name] = ret['upper_bounds'][model.final_name].t()
+            if ret['lA'] is not None:
+                ret['lA'] = {k: v.transpose(0, 1) for k, v in ret['lA'].items()}
 
-            if reference_slopes is not None:
-                LiRPAConvNet.prune_reference_slopes(reference_slopes, ~init_verified_cond, model_incomplete.net.final_node().name)
-            if lA is not None:
-                lA_trim = LiRPAConvNet.prune_lA(lA_trim, ~init_verified_cond)
+        ret.update({'model': model, 'global_lb': global_lb, 'alpha': saved_alphas})
 
-            lower_bounds[-1] = lower_bounds[-1][init_failure_idx]
-            upper_bounds[-1] = upper_bounds[-1][init_failure_idx]
-            # TODO change index [0:1] to [torch.where(~init_verified_cond)[0]] can handle more general vnnlib for multiple x
-            l, u, nodes, glb_record, ret = bab(
-                model_ori, x[0:1], init_failure_idx, y=np.unique(y),
-                data_ub=data_max[0:1], data_lb=data_min[0:1],
-                lower_bounds=lower_bounds, upper_bounds=upper_bounds,
-                c=c[torch.where(~init_verified_cond)[0]],
-                reference_slopes=reference_slopes, cplex_processes=cplex_processes, rhs=rhs[0:1],
-                activation_opt_params=activation_opt_params, reference_lA=lA_trim,
-                model_incomplete=model_incomplete, timeout=timeout, refined_betas=refined_betas,
-                attack_images=this_spec_attack_images)
-            bab_ret.append([index, float(l), nodes, time.time() - start_time_bab, init_failure_idx.tolist()])
+        return 'unknown', ret
+
+    def bab(self, data_lb, data_ub, c, rhs,
+            data=None, targets=None, vnnlib=None, timeout=None,
+            time_stamp=0, data_dict=None, lower_bounds=None, upper_bounds=None,
+            reference_alphas=None, attack_images=None, cplex_processes=None,
+            activation_opt_params=None, reference_lA=None,
+            model_incomplete=None, refined_betas=None,
+            create_model=True, model=None, return_domains=False):
+        # This will use the refined bounds if the complete verifier is "bab-refine".
+        # FIXME do not repeatedly create LiRPANet which creates a new BoundedModule each time.
+
+        # Save these arguments in case that they need to retrieved the next time
+        # this function is called.
+        self.data_lb, self.data_ub, self.c, self.rhs = data_lb, data_ub, c, rhs
+        self.data, self.targets, self.vnnlib = data, targets, vnnlib
+
+        rhs_offset = arguments.Config['specification']['rhs_offset']
+        if rhs_offset is not None:
+            print('Add an offset to RHS for debugging:', rhs_offset)
+            rhs = rhs + rhs_offset
+
+        # if using input split, transpose C if there are multiple specs with shared input,
+        # to improve efficiency when calling the incomplete verifier later
+        if arguments.Config['bab']['branching']['input_split']['enable']:
+            c_transposed = False
+            if (data_lb.shape[0] == 1 and data_ub.shape[0] == 1 and c is not None
+                    and c.shape[0] > 1 and c.shape[1] == 1):
+                # multiple c instances (multiple vnnlibs) since c.shape[0] > 1,
+                # but they share the same input (since data.shape[0] == 1）and
+                # only single spec in each instance (c.shape[1] == 1)
+                c = c.transpose(0, 1)
+                rhs = rhs.transpose(0, 1)
+                c_transposed = True
+
+        if create_model:
+            self.model = LiRPANet(
+                model, c=c, cplex_processes=cplex_processes,
+                in_size=(data_lb.shape if not len(targets) > 1
+                        else [len(targets)] + list(data_lb.shape[1:])))
+            if not model_incomplete:
+                print_model(self.model.net)
+
+        data_lb, data_ub = data_lb.to(self.model.device), data_ub.to(self.model.device)
+        norm = arguments.Config['specification']['norm']
+        if data_dict is not None:
+            assert isinstance(data_dict['eps'], float)
+            ptb = PerturbationLpNorm(
+                norm=norm, eps=data_dict['eps'],
+                eps_min=data_dict.get('eps_min', 0), x_L=data_lb, x_U=data_ub)
         else:
-            assert arguments.Config["general"]["complete_verifier"] == "bab"  # for MIP and BaB-Refine.
-            assert not arguments.Config["bab"]["attack"]["enabled"], "BaB-attack must be used with incomplete verifier."
-            # input split also goes here directly
-            l, u, nodes, _, ret = bab(
-                model_ori, x, pidx, y, data_ub=data_max, data_lb=data_min, c=c,
-                all_prop=target_label_arrays, cplex_processes=cplex_processes,
-                rhs=rhs, timeout=timeout, attack_images=this_spec_attack_images)
-            bab_ret.append([index, l, nodes, time.time() - start_time_bab, pidx])
+            ptb = PerturbationLpNorm(norm=norm, x_L=data_lb, x_U=data_ub)
 
-        # terminate the corresponding cut inquiry process if exists
-        if cplex_cuts:
-            solved_c_rows.append(c)
-            terminate_mip_processes_by_c_matching(cplex_processes, solved_c_rows)
+        if data is not None:
+            data = data.to(self.model.device)
+            x = BoundedTensor(data, ptb).to(data_lb.device)
+            output = self.model.net(x).flatten()
+            print('Model prediction is:', output)
 
-        timeout = timeout_threshold - (time.time() - start_time)
-        if ret == 'unsafe':
-            return 'unsafe-bab'
-        if ret == 'unknown' or timeout < 0:
-            return 'unknown'
-        if ret != 'safe':
-            raise ValueError(f'Unknown return value of bab: {ret}')
-    else:
-        return 'safe'
+            # save output:
+            if arguments.Config['general']['save_output']:
+                arguments.Globals['out']['pred'] = output.cpu()
 
+            if arguments.Config['attack']['check_clean']:
+                clean_rhs = c.matmul(output)
+                print(f'Clean RHS: {clean_rhs}')
+                if (clean_rhs < rhs).any():
+                    return -torch.inf, None, 'unsafe'
+        else:
+            x = BoundedTensor(data_lb, ptb).to(data_lb.device)
 
-def main():
-    print(f'Experiments at {time.ctime()} on {socket.gethostname()}')
-    torch.manual_seed(arguments.Config["general"]["seed"])
-    random.seed(arguments.Config["general"]["seed"])
-    np.random.seed(arguments.Config["general"]["seed"])
-    torch.set_printoptions(precision=8)
-    device = arguments.Config["general"]["device"]
-    if device != 'cpu':
-        torch.cuda.manual_seed_all(arguments.Config["general"]["seed"])
-        # Always disable TF32 (precision is too low for verification).
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
+        self.domain = torch.stack([data_lb.squeeze(0), data_ub.squeeze(0)], dim=-1)
+        if arguments.Config['bab']['branching']['input_split']['enable']:
+            result = input_bab_parallel(
+                self.model, self.domain, x, rhs=rhs, timeout=timeout,
+                vnnlib=vnnlib, c_transposed=c_transposed,
+                return_domains=return_domains)
+        else:
+            assert not return_domains
+            result = general_bab(
+                self.model, self.domain, x,
+                refined_lower_bounds=lower_bounds, refined_upper_bounds=upper_bounds,
+                activation_opt_params=activation_opt_params, reference_lA=reference_lA,
+                reference_alphas=reference_alphas, attack_images=attack_images,
+                timeout=timeout, refined_betas=refined_betas, rhs=rhs,
+                model_incomplete=model_incomplete, time_stamp=time_stamp)
 
-    if arguments.Config["general"]["deterministic"]:
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-        torch.use_deterministic_algorithms(True)
+        min_lb = result[0]
+        if min_lb is None:
+            min_lb = -torch.inf
+        elif isinstance(min_lb, torch.Tensor):
+            min_lb = min_lb.item()
+        result = (min_lb, *result[1:])
 
-    if arguments.Config["general"]["double_fp"]:
-        torch.set_default_dtype(torch.float64)
+        return result
 
-    if arguments.Config["general"]["precompile_jit"]:
-        precompile_jit_kernels()
-
-    if arguments.Config["specification"]["norm"] != np.inf and arguments.Config["attack"]["pgd_order"] != "skip":
-        print('Only Linf-norm attack is supported, the pgd_order will be changed to skip')
-        arguments.Config["attack"]["pgd_order"] = "skip"
-
-    run_mode, save_path, file_root, example_idx_list, model_ori, vnnlib_all, shape = parse_run_mode()
-    verification_summary = defaultdict(list)
-    time_all_instances = []
-    status_per_sample_list = []
-    bab_ret = []
-    cnt = 0  # Number of examples in this run.
-    select_instance = arguments.Config["data"]["select_instance"]
-
-    for new_idx, csv_item in enumerate(example_idx_list):
-        arguments.Globals["example_idx"] = new_idx
-        vnnlib_id = new_idx + arguments.Config["data"]["start"]
-
-        # Select some instances to verify
-        if select_instance and not vnnlib_id in select_instance:
-            continue
+    def complete_verifier(
+            self, model_ori, model_incomplete, vnnlib, batched_vnnlib, vnnlib_shape,
+            index, timeout_threshold, bab_ret=None, cplex_processes=None,
+            attack_images=None, attack_margins=None, results=None):
 
         start_time = time.time()
-        print(f'\n %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% idx: {new_idx}, vnnlib ID: {vnnlib_id} %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%')
 
-        if run_mode != 'customized_data':
-            if len(csv_item) == 3:
-                # model, vnnlib, timeout
-                onnx_path, vnnlib_path, arguments.Config["bab"]["timeout"] = csv_item
-                onnx_path = os.path.join(arguments.Config["model"]["onnx_path_prefix"], onnx_path.strip())
-                vnnlib_path = os.path.join(arguments.Config["specification"]["vnnlib_path_prefix"], vnnlib_path.strip())
-                print(f'Using onnx {onnx_path}')
-                print(f'Using vnnlib {vnnlib_path}')
-                model_ori, shape, vnnlib = eval(arguments.Config["model"]["onnx_loader"])(file_root, onnx_path, vnnlib_path)
+        enable_incomplete = arguments.Config['general']['enable_incomplete_verification']
+        init_global_lb = results.get('global_lb', None)
+        lower_bounds = results.get('lower_bounds', None)
+        upper_bounds = results.get('upper_bounds', None)
+        reference_alphas = results.get('alpha', None)
+        lA = results.get('lA', None)
+        cplex_cuts = (arguments.Config['bab']['cut']['enabled']
+                    and arguments.Config['bab']['cut']['cplex_cuts'])
+        bab_attack_enabled = arguments.Config['bab']['attack']['enabled']
+
+        if enable_incomplete:
+            final_name = model_incomplete.final_name
+            init_global_ub = upper_bounds[final_name]
+            print('lA shape:', [lAitem.shape for lAitem in lA.values()])
+            (batched_vnnlib, init_global_lb, init_global_ub,
+            lA, attack_images) = sort_targets(
+                batched_vnnlib, init_global_lb, init_global_ub,
+                attack_images, attack_margins, results, model_incomplete)
+            if reference_alphas is not None:
+                reference_alphas_cp = copy.deepcopy(reference_alphas)
+
+        solved_c_rows = []
+
+        time_stamp = 0
+        for property_idx, properties in enumerate(batched_vnnlib):  # loop of x
+            # batched_vnnlib: [x, [(c, rhs, y, pidx)]]
+            print(f'\nProperties batch {property_idx}, size {len(properties[0])}')
+            timeout = timeout_threshold - (time.time() - start_time)
+            print(f'Remaining timeout: {timeout}')
+            start_time_bab = time.time()
+
+            if isinstance(properties[0][0], dict):
+                def _get_item(properties, key):
+                    return torch.concat([
+                        item[key].unsqueeze(0) for item in properties[0]], dim=0)
+                x = _get_item(properties, 'X')
+                data_min = _get_item(properties, 'data_min')
+                data_max = _get_item(properties, 'data_max')
+                # A dict to store extra variables related to the data and specifications
+                for item in properties[0]:
+                    assert item['eps'] == properties[0][0]['eps']
+                data_dict = {
+                    'eps': properties[0][0]['eps'],
+                    'eps_min': properties[0][0].get('eps_min', 0),
+                }
             else:
-                # Each line contains only 1 item, which is the vnnlib spec.
-                vnnlib = read_vnnlib(csv_item[0])
-                assert arguments.Config["model"]["input_shape"] is not None, 'vnnlib does not have shape information, please specify by --input_shape'
-                shape = arguments.Config["model"]["input_shape"]
+                x_range = torch.tensor(properties[0], dtype=torch.get_default_dtype())
+                data_min = x_range.select(-1, 0).reshape(vnnlib_shape)
+                data_max = x_range.select(-1, 1).reshape(vnnlib_shape)
+                x = x_range.mean(-1).reshape(vnnlib_shape)  # only the shape of x is important.
+                data_dict = None
+
+            target_label_arrays = list(properties[1])  # properties[1]: (c, rhs, y, pidx)
+            assert len(target_label_arrays) == 1
+            c, rhs, pidx = target_label_arrays[0]
+
+            if bab_attack_enabled:
+                if arguments.Config['bab']['initial_max_domains'] != 1:
+                    raise ValueError(
+                        'To run Bab-attack, please set initial_max_domains to 1. '
+                        f'Currently it is {arguments.Config["bab"]["initial_max_domains"]}.')
+                # Attack images has shape (batch, restarts, specs, c, h, w).
+                # The specs dimension should already be sorted.
+                # Reshape it to (restarts, c, h, w) for this specification.
+                this_spec_attack_images = attack_images[:, :, property_idx].view(
+                    attack_images.size(1), *attack_images.shape[3:])
+            else:
+                this_spec_attack_images = None
+
+            # FIXME Clean up.
+            # Shape and type of rhs is very confusing
+            rhs = torch.tensor(rhs, device=arguments.Config['general']['device'],
+                            dtype=torch.get_default_dtype())
+            if (arguments.Config['general']['enable_incomplete_verification']
+                    and len(init_global_lb) > 1):
+                # no need to trim_batch if batch = 1
+                ret_trim = trim_batch(
+                    model_incomplete, init_global_lb, init_global_ub,
+                    reference_alphas_cp, lower_bounds, upper_bounds,
+                    reference_alphas, lA, property_idx, c, rhs)
+                lA_trim, rhs = ret_trim['lA'], ret_trim['rhs']
+            else:
+                lA_trim = lA.copy() if lA is not None else lA
+
+            print(f'##### Instance {index} first 10 spec matrices: ')
+            print(f'{c[:10]}\nthresholds: {rhs.flatten()[:10]} ######')
+
+            torch.cuda.empty_cache()
+            gc.collect()
+            c = c.to(rhs)  # both device and dtype
+
+            # compress the first dim of data_min, data_max based on duplication check
+            if data_min.shape[0] > 1:
+                l1_err_data_min = torch.norm((data_min[1:] - data_min[0:1]).view(-1), p=1)
+                l1_err_data_max = torch.norm((data_max[1:] - data_max[0:1]).view(-1), p=1)
+                if l1_err_data_min + l1_err_data_max < 1e-8:
+                    # almost same x so we can use the first x
+                    x, data_min, data_max = x[0:1], data_min[0:1], data_max[0:1]
+
+            # Complete verification (BaB, BaB with refine, or MIP).
+            time_stamp += 1
+            input_split = arguments.Config['bab']['branching']['input_split']['enable']
+            init_failure_idx = np.array([])
+            if enable_incomplete and not input_split:
+                if len(init_global_lb) > 1:  # if batch == 1, there is no need to filter here.
+                    # Reuse results from incomplete results, or from refined MIPs.
+                    # skip the prop that already verified
+                    rlb = lower_bounds[final_name]
+                    # The following flatten is dangerous, each clause in OR only
+                    # has one output bound.
+                    assert len(rlb.shape) == len(rhs.shape) == 2
+                    assert rlb.shape[1] == rhs.shape[1] == 1
+                    init_verified_cond = rlb.flatten() > rhs.flatten()
+                    init_verified_idx = torch.where(init_verified_cond)[0]
+                    if len(init_verified_idx) > 0:
+                        print('Initial alpha-CROWN verified for spec index '
+                                f'{init_verified_idx} with bound '
+                                f'{rlb[init_verified_idx].squeeze()}.')
+                        l = init_global_lb[init_verified_idx].tolist()
+                        bab_ret.append([index, l, 0, time.time() - start_time_bab, pidx])
+                    init_failure_idx = torch.where(~init_verified_cond)[0]
+                    if len(init_failure_idx) == 0:
+                        # This batch of x verified by init opt crown
+                        continue
+                    print(f'Remaining spec index {init_failure_idx} with '
+                            f'bounds {rlb[init_failure_idx]} need to verify.')
+
+                    (reference_alphas, lA_trim, x, data_min, data_max,
+                    lower_bounds, upper_bounds, c) = prune_by_idx(
+                        reference_alphas, init_verified_cond, final_name, lA_trim, x,
+                        data_min, data_max, lA is not None,
+                        lower_bounds, upper_bounds, c)
+
+                l, nodes, ret = self.bab(
+                    data=x, targets=init_failure_idx, time_stamp=time_stamp,
+                    data_ub=data_max, data_lb=data_min, data_dict=data_dict,
+                    lower_bounds=lower_bounds, upper_bounds=upper_bounds,
+                    c=c, reference_alphas=reference_alphas, cplex_processes=cplex_processes,
+                    activation_opt_params=results.get('activation_opt_params', None),
+                    refined_betas=results.get('refined_betas', None), rhs=rhs[0:1],
+                    reference_lA=lA_trim, attack_images=this_spec_attack_images,
+                    model_incomplete=model_incomplete, timeout=timeout, vnnlib=vnnlib,
+                    model=model_ori)
+                bab_ret.append([index, float(l), nodes,
+                                time.time() - start_time_bab,
+                                init_failure_idx.tolist()])
+            else:
+                assert arguments.Config['general']['complete_verifier'] == 'bab'
+                assert not arguments.Config['bab']['attack']['enabled'], (
+                    'BaB-attack must be used with incomplete verifier.')
+                # input split also goes here directly
+                l, nodes, ret = self.bab(
+                    data=x, targets=pidx, time_stamp=time_stamp,
+                    data_ub=data_max, data_lb=data_min, c=c, data_dict=data_dict,
+                    cplex_processes=cplex_processes,
+                    rhs=rhs, timeout=timeout, attack_images=this_spec_attack_images,
+                    vnnlib=vnnlib, model=model_ori)
+                bab_ret.append([index, l, nodes, time.time() - start_time_bab, pidx])
+
+            # terminate the corresponding cut inquiry process if exists
+            if cplex_cuts:
+                solved_c_rows.append(c)
+                terminate_mip_processes_by_c_matching(cplex_processes, solved_c_rows)
+
+            timeout = timeout_threshold - (time.time() - start_time)
+            if ret == 'unsafe':
+                return 'unsafe-bab'
+            elif ret == 'unknown' or timeout < 0:
+                return 'unknown'
+            elif ret != 'safe':
+                raise ValueError(f'Unknown return value of bab: {ret}')
         else:
-            vnnlib = vnnlib_all[new_idx]
+            return 'safe'
 
-        arguments.Config["bab"]["timeout"] = float(arguments.Config["bab"]["timeout"])
-        if arguments.Config["bab"]["timeout_scale"] != 1:
-            new_timeout = arguments.Config["bab"]["timeout"] * arguments.Config["bab"]["timeout_scale"]
-            print(f'Scaling timeout: {arguments.Config["bab"]["timeout"]} -> {new_timeout}')
-            arguments.Config["bab"]["timeout"] = new_timeout
-        if arguments.Config["bab"]["override_timeout"] is not None:
-            new_timeout = arguments.Config["bab"]["override_timeout"]
-            print(f'Overriding timeout: {new_timeout}')
-            arguments.Config["bab"]["timeout"] = new_timeout
-        timeout_threshold = arguments.Config["bab"]["timeout"]  # In case arguments.Config["bab"]["timeout"] is changed later.
+    def main(self):
+        print(f'Experiments at {time.ctime()} on {socket.gethostname()}')
+        torch.manual_seed(arguments.Config['general']['seed'])
+        random.seed(arguments.Config['general']['seed'])
+        np.random.seed(arguments.Config['general']['seed'])
+        torch.set_printoptions(precision=8)
+        device = arguments.Config['general']['device']
+        if device != 'cpu':
+            torch.cuda.manual_seed_all(arguments.Config['general']['seed'])
+            # Always disable TF32 (precision is too low for verification).
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+        if arguments.Config['general']['deterministic']:
+            os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
+            torch.use_deterministic_algorithms(True)
+        if arguments.Config['general']['double_fp']:
+            torch.set_default_dtype(torch.float64)
+        if arguments.Config['general']['precompile_jit']:
+            precompile_jit_kernels()
 
+        bab_args = arguments.Config['bab']
+        timeout_threshold = bab_args['timeout']
+        select_instance = arguments.Config['data']['select_instance']
+        (run_mode, save_path, file_root, example_idx_list, model_ori,
+        vnnlib_all, shape) = parse_run_mode()
+        logger = Logger(run_mode, save_path, timeout_threshold)
 
-        if arguments.Config["data"]["dataset"] == 'NN4SYS':
-            # FIXME_NOW: Remove this case. Should be handled generally.
-            verified_status = res = nn4sys_verification(model_ori, vnnlib, onnx_path=os.path.join(file_root, onnx_path))
-            print(res)
-        else:
+        for new_idx, csv_item in enumerate(example_idx_list):
+            arguments.Globals['example_idx'] = new_idx
+            vnnlib_id = new_idx + arguments.Config['data']['start']
+            # Select some instances to verify
+            if select_instance and not vnnlib_id in select_instance:
+                continue
+            logger.record_start_time()
+
+            print(f'\n {"%"*35} idx: {new_idx}, vnnlib ID: {vnnlib_id} {"%"*35}')
+            if arguments.Config['general']['save_output']:
+                arguments.Globals['out']['idx'] = new_idx   # saved for test
+
+            if run_mode != 'customized_data':
+                # FIXME Don't write arguments.Config['bab']['timeout']!
+                if len(csv_item) == 3:
+                    # model, vnnlib, timeout
+                    model_ori, shape, vnnlib, onnx_path = load_model_and_vnnlib(
+                        file_root, csv_item)
+                    arguments.Config['model']['onnx_path'] = os.path.join(file_root, csv_item[0])
+                    arguments.Config['specification']['vnnlib_path'] = os.path.join(
+                        file_root, csv_item[1])
+                else:
+                    # Each line contains only 1 item, which is the vnnlib spec.
+                    vnnlib = read_vnnlib(os.path.join(file_root, csv_item[0]))
+                    assert arguments.Config['model']['input_shape'] is not None, (
+                        'vnnlib does not have shape information, '
+                        'please specify by --input_shape')
+                    shape = arguments.Config['model']['input_shape']
+            else:
+                vnnlib = vnnlib_all[new_idx]  # vnnlib_all is a list of all standard vnnlib
+
+            # FIXME Don't write bab_args['timeout'] above.
+            # Then these updates can be moved to arguments.update_arguments()
+            bab_args['timeout'] = float(bab_args['timeout'])
+            if bab_args['timeout_scale'] != 1:
+                new_timeout = bab_args['timeout'] * bab_args['timeout_scale']
+                print(f'Scaling timeout: {bab_args["timeout"]} -> {new_timeout}')
+                bab_args['timeout'] = new_timeout
+            if bab_args['override_timeout'] is not None:
+                new_timeout = bab_args['override_timeout']
+                print(f'Overriding timeout: {new_timeout}')
+                bab_args['timeout'] = new_timeout
+            timeout_threshold = bab_args['timeout']
+            logger.update_timeout(timeout_threshold)
+
+            if arguments.Config['general']['complete_verifier'].startswith('Customized'):
+                res = eval(  # pylint: disable=eval-used
+                            arguments.Config['general']['complete_verifier']
+                            )(model_ori, vnnlib, os.path.join(file_root, onnx_path))
+                logger.summarize_results(res, new_idx)
+                continue
+
             model_ori.eval()
             vnnlib_shape = shape
 
-            # FIXME attack and initial_incomplete_verification only works for assert len(vnnlib) == 1
-            x_range = torch.tensor(vnnlib[0][0], dtype=torch.get_default_dtype())
-            data_min = x_range.select(-1, 0).reshape(vnnlib_shape)
-            data_max = x_range.select(-1, 1).reshape(vnnlib_shape)
-            x = x_range.mean(-1).reshape(vnnlib_shape)  # only the shape of x is important.
-
-            # auto tune args
-            update_parameters(model_ori, data_min, data_max)
+            # FIXME attack and initial_incomplete_verification only works for
+            # assert len(vnnlib) == 1
+            if isinstance(vnnlib[0][0], dict):
+                x = vnnlib[0][0]['X'].reshape(vnnlib_shape)
+                data_min = vnnlib[0][0]['data_min'].reshape(vnnlib_shape)
+                data_max = vnnlib[0][0]['data_max'].reshape(vnnlib_shape)
+            else:
+                x_range = torch.tensor(vnnlib[0][0])
+                data_min = x_range.select(-1, 0).reshape(vnnlib_shape)
+                data_max = x_range.select(-1, 1).reshape(vnnlib_shape)
+                x = x_range.mean(-1).reshape(vnnlib_shape)  # only the shape of x is important.
+            adhoc_tuning(data_min, data_max, model_ori)
 
             model_ori = model_ori.to(device)
             x, data_max, data_min = x.to(device), data_max.to(device), data_min.to(device)
+            verified_status, verified_success = 'unknown', False
 
-            verified_status = "unknown"
-            verified_success = False                
-
-            if arguments.Config["attack"]["pgd_order"] == "before":
-                verified_status, verified_success, attack_images, attack_margins, all_adv_candidates = attack(
-                    model_ori, x, data_min, data_max, vnnlib,
-                    verified_status, verified_success)
+            if arguments.Config['attack']['pgd_order'] == 'before':
+                verified_status, verified_success, _, attack_margins, all_adv_candidates = attack(
+                    model_ori, x, vnnlib, verified_status, verified_success)
             else:
-                attack_images = attack_margins = all_adv_candidates = None
+                attack_margins = all_adv_candidates = None
 
-            init_global_lb = saved_bounds = saved_slopes = y = lower_bounds = upper_bounds = None
-            activation_opt_params = model_incomplete = lA = cplex_processes = None
+            model_incomplete = cplex_processes = None
+            ret = {}
+
+            if arguments.Config['debug']['test_optimized_bounds']:
+                compare_optimized_bounds_against_lp_bounds(
+                    model_ori, x, data_ub=data_max, data_lb=data_min, vnnlib=vnnlib
+                )
 
             # Incomplete verification is enabled by default. The intermediate lower
             # and upper bounds will be reused in bab and mip.
             if (not verified_success and (
-                    arguments.Config["general"]["enable_incomplete_verification"]
-                    or arguments.Config["general"]["complete_verifier"] == "bab-refine")):
-                assert len(vnnlib) == 1
-                verified_status, init_global_lb, saved_bounds, saved_slopes, activation_opt_params = \
-                    incomplete_verifier(model_ori, x, data_ub=data_max, data_lb=data_min, vnnlib=vnnlib)
-                verified_success = verified_status != "unknown"
-                if not verified_success:
-                    model_incomplete, lower_bounds, upper_bounds = saved_bounds[:3]
-                    lA = saved_bounds[-1]
+                    arguments.Config['general']['enable_incomplete_verification']
+                    or arguments.Config['general']['complete_verifier'] == 'bab-refine')):
+                verified_status, ret = self.incomplete_verifier(
+                    model_ori, x, data_ub=data_max, data_lb=data_min, vnnlib=vnnlib)
+                verified_success = verified_status != 'unknown'
+                model_incomplete = ret.get('model', None)
 
-            if not verified_success and arguments.Config["attack"]["pgd_order"] == "after":
-                verified_status, verified_success, attack_images, attack_margins, all_adv_candidates = attack(
-                    model_ori, x, data_min, data_max, vnnlib,
-                    verified_status, verified_success)
+            if not verified_success and arguments.Config['attack']['pgd_order'] == 'after':
+                verified_status, verified_success, _, attack_margins, all_adv_candidates = attack(
+                    model_ori, x, vnnlib, verified_status, verified_success)
 
             # MIP or MIP refined bounds.
-            refined_betas = None
-            if not verified_success and (arguments.Config["general"]["complete_verifier"] == "mip" or arguments.Config["general"]["complete_verifier"] == "bab-refine"):
+            if not verified_success and (
+                    arguments.Config['general']['complete_verifier'] == 'mip'
+                    or arguments.Config['general']['complete_verifier'] == 'bab-refine'):
                 # rhs = ? NEED TO SAVE TO LIRPA_MODULE
-                verified_status, init_global_lb, lower_bounds, upper_bounds, refined_betas = mip(saved_bounds=saved_bounds)
-                verified_success = verified_status != "unknown"
+                mip_skip_unsafe = arguments.Config['solver']['mip']['skip_unsafe']
+                verified_status, ret_mip = mip(
+                    model_incomplete, ret, mip_skip_unsafe=mip_skip_unsafe)
+                verified_success = verified_status != 'unknown'
+                ret.update(ret_mip)
 
             # extract the process pool for cut inquiry
-            if arguments.Config["bab"]["cut"]["enabled"] and arguments.Config["bab"]["cut"]["cplex_cuts"]:
-                if saved_bounds is not None:
-                    # use nullity of saved_bounds as an indicator of whether cut processes are launched
-                    # saved_bounds[0] is the AutoLiRPA model instance
-                    cplex_processes = saved_bounds[0].processes
-                    mip_building_proc = saved_bounds[0].mip_building_proc
+            if bab_args['cut']['enabled'] and bab_args['cut']['cplex_cuts']:
+                assert arguments.Config['bab']['initial_max_domains'] == 1
+                # use nullity of model_incomplete as an indicator of whether cut
+                # processes are launched
+                if model_incomplete is not None:
+                    cplex_processes = model_incomplete.processes
+                    mip_building_proc = model_incomplete.mip_building_proc
 
             # BaB bounds. (not do bab if unknown by mip solver for now)
-            if not verified_success and arguments.Config["general"]["complete_verifier"] != "skip" and verified_status != "unknown-mip":
-                batched_vnnlib = batch_vnnlib(vnnlib)
-                verified_status = complete_verifier(
-                    model_ori, model_incomplete, batched_vnnlib, vnnlib, vnnlib_shape,
-                    init_global_lb, lower_bounds, upper_bounds, new_idx,
-                    timeout_threshold=timeout_threshold - (time.time() - start_time),
-                    bab_ret=bab_ret, lA=lA, cplex_processes=cplex_processes,
-                    reference_slopes=saved_slopes, activation_opt_params=activation_opt_params,
-                    refined_betas=refined_betas, attack_images=all_adv_candidates, attack_margins=attack_margins)
+            if (not verified_success
+                    and arguments.Config['general']['complete_verifier'] != 'skip'
+                    and verified_status != 'unknown-mip'):
+                batched_vnnlib = batch_vnnlib(vnnlib)  # [x, [(c, rhs, y, pidx)]] in batch-wise
+                verified_status = self.complete_verifier(
+                    model_ori, model_incomplete, vnnlib, batched_vnnlib, vnnlib_shape,
+                    new_idx, bab_ret=logger.bab_ret, cplex_processes=cplex_processes,
+                    timeout_threshold=timeout_threshold - (time.time() - logger.start_time),
+                    attack_images=all_adv_candidates,
+                    attack_margins=attack_margins, results=ret)
 
-            if arguments.Config["bab"]["cut"]["enabled"] and arguments.Config["bab"]["cut"]["cplex_cuts"] and saved_bounds is not None:
+            if (bab_args['cut']['enabled'] and bab_args['cut']['cplex_cuts']
+                    and model_incomplete is not None):
                 terminate_mip_processes(mip_building_proc, cplex_processes)
                 del cplex_processes
+            del ret
 
-            del init_global_lb, saved_bounds, saved_slopes
+            # Summarize results.
+            logger.summarize_results(verified_status, new_idx)
 
-        # Summarize results.
-        if run_mode == 'single_vnnlib':
-            # run in run_instance.sh
-            if 'unknown' in verified_status or 'timeout' in verified_status or 'timed out' in verified_status:
-                verified_status = 'timeout'
-            elif 'unsafe' in verified_status:
-                verified_status = 'sat'
-            elif 'safe' in verified_status:
-                verified_status = 'unsat'
-            else:
-                raise ValueError(f'Unknown verified_status {verified_status}')
-
-            print('Result:', verified_status)
-            print('Time:', time.time() - start_time)
-            with open(save_path, "w") as file:
-                file.write(verified_status)
-                if arguments.Config["general"]["save_adv_example"]:
-                    if verified_status == 'sat':
-                        file.write('\n')
-                        with open(arguments.Config["attack"]["cex_path"], "r") as adv_example:
-                            file.write(adv_example.read())
-                file.flush()
-        else:
-            cnt += 1
-            if time.time() - start_time > timeout_threshold:
-                if 'unknown' not in verified_status:
-                    verified_status += ' (timed out)'
-            verification_summary[verified_status].append(new_idx)
-            status_per_sample_list.append([verified_status, time.time() - start_time])  # [status, time]
-            with open(save_path, "wb") as f:
-                pickle.dump({"summary": verification_summary, "results": status_per_sample_list,  "bab_ret": bab_ret}, f)
-            print(f"Result: {verified_status} in {status_per_sample_list[-1][1]:.4f} seconds")
-
-    if run_mode != 'single_vnnlib':
-        # Finished all examples.
-        time_timeout = [s[1] for s in status_per_sample_list if "unknown" in s[0]]
-        time_verified = [s[1] for s in status_per_sample_list if "safe" in s[0] and "unsafe" not in s[0]]
-        time_unsafe = [s[1] for s in status_per_sample_list if "unsafe" in s[0]]
-        time_all_instances = [s[1] for s in status_per_sample_list]
-
-        with open(save_path, "wb") as f:
-            pickle.dump({"summary": verification_summary, "results": status_per_sample_list, "bab_ret": bab_ret}, f)
-
-        print("############# Summary #############")
-        print("Final verified acc: {}% (total {} examples)".format(len(time_verified) / len(example_idx_list) * 100., len(example_idx_list)))
-        print("Problem instances count:", len(time_verified) + len(time_unsafe) + len(time_timeout), ", total verified (safe/unsat):", len(time_verified),
-              ", total falsified (unsafe/sat):", len(time_unsafe), ", timeout:", len(time_timeout))
-        print(f"mean time for ALL instances (total {len(time_all_instances)}): {sum(time_all_instances)/(len(time_all_instances) + 1e-5)}, max time: {max(time_all_instances)}")
-        if len(time_verified) > 0:
-            print(f"mean time for verified SAFE instances (total {len(time_verified)}): "
-                  f"{sum(time_verified) / len(time_verified)}, max time: {max(time_verified)}")
-        if len(time_verified) > 0 and len(time_unsafe) > 0:
-            print(f"mean time for verified (SAFE + UNSAFE) instances (total {(len(time_verified) + len(time_unsafe))}):"
-                  f" {(sum(time_verified) + sum(time_unsafe)) / (len(time_verified) + len(time_unsafe))}, max time: "
-                  f"{max(max(time_verified), max(time_unsafe))}")
-        if len(time_verified) > 0 and len(time_timeout) > 0:
-            print(f"mean time for verified SAFE + TIMEOUT instances (total {(len(time_verified) + len(time_timeout))}):"
-                  f" {(sum(time_verified) + sum(time_timeout)) / (len(time_verified) + len(time_timeout))}, max time: "
-                  f"{max(max(time_verified), max(time_timeout))}")
-        if len(time_unsafe) > 0:
-            print(f"mean time for verified UNSAFE instances (total {len(time_unsafe)}): "
-                  f"{sum(time_unsafe) / len(time_unsafe)}, max time: {max(time_unsafe)}")
-
-        for k, v in verification_summary.items():
-            print(f"{k} (total {len(v)}), index:", v)
+        logger.finish()
 
 
-if __name__ == "__main__":
-    arguments.Config.parse_config()
-    main()
+if __name__ == '__main__':
+    abcrown = ABCROWN(args=sys.argv[1:])
+    abcrown.main()

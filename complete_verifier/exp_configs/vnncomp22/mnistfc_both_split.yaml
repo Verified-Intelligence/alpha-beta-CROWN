@@ -1,0 +1,38 @@
+# EXAMPLE for input + relu split.
+# python --config exp_configs/vnncomp22/mnistfc_both_split.yaml --start 24 --end 25
+general:
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/mnist_fc
+  csv_name: instances.csv
+  complete_verifier: bab
+model:
+  input_shape: [-1, 1, 28, 28]  # This onnx model has input shape [-1, 784] which is not compatible with our MIP solution
+data:
+  start: 0
+  end: 90
+solver:
+  batch_size: 1024
+  beta-crown:
+    iteration: 20
+    lr_beta: 0.03
+    enable_opt_interm_bounds: True
+  mip:
+    parallel_solvers: 32
+    solver_threads: 1
+    refine_neuron_time_percentage: 0.8
+  start_save_best: -1
+bab:
+  interm_transfer: true  # Must be true when using both input and relu split.
+  pruning_in_iteration: false
+  sort_domain_interval: 1
+  branching:
+    branching_input_and_activation: true
+    branching_input_and_activation_order: ["input", "relu"]
+    branching_input_iterations: 2
+    branching_relu_iterations: 2
+    method: intercept  # For relu split. For input split, smart branching is always used.
+    sb_coeff_thresh: 0.01
+    candidates: 5
+    reduceop: max
+attack:
+  attack_mode: diversed_PGD
+  pgd_restarts: 100

@@ -8,8 +8,8 @@ attack can search systematically in activation space using branch and bound.
 More details can be found in [our
 paper](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf):
 
-**A Branch and Bound Framework for Stronger Adversarial Attacks of ReLU Networks**  
-ICML 2022   
+**A Branch and Bound Framework for Stronger Adversarial Attacks of ReLU Networks**
+ICML 2022
 Huan Zhang\*, Shiqi Wang\*, Kaidi Xu, Yihan Wang, Suman Jana, Cho-Jui Hsieh, and Zico Kolter (\*Equal contribution)
 
 <p align="center">
@@ -31,7 +31,7 @@ the α,β-CROWN verifier.
 git clone https://github.com/huanzhang12/alpha-beta-CROWN
 # Remove the old environment, if necessary.
 conda deactivate; conda env remove --name bab-attack
-conda env create -f complete_verifier/environment.yml --name bab-attack  # install all dependents into the bab-attack environment
+conda env create -f complete_verifier/environment.yaml --name bab-attack  # install all dependents into the bab-attack environment
 conda activate bab-attack  # activate the environment
 ```
 

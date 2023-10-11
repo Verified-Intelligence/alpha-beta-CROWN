@@ -1,0 +1,21 @@
+# Configuration file for running the nn2sys_2022 benchmark.
+general:
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/nn4sys
+  csv_name: instances.csv
+  enable_incomplete_verification: False
+  loss_reduction_func: max
+  conv_mode: matrix
+solver:
+  batch_size: 256  # Number of parallel domains to compute on GPU.
+  auto_enlarge_batch_size: True
+  bound_prop_method: forward+backward
+bab:
+  initial_max_domains: 1000
+  branching:
+    method: sb  # Split on input space.
+    sb_coeff_thresh: 0.1
+    input_split:
+      enable: True
+      adv_check: .inf
+attack:
+  pgd_order: input_bab

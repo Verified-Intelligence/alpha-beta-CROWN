@@ -23,6 +23,9 @@ parser.add_argument("ONNX_FILE", type=str, default=None, help='ONNX_FILE')
 parser.add_argument("VNNLIB_FILE", type=str, default=None, help='VNNLIB_FILE')
 parser.add_argument("RESULTS_FILE", type=str, default=None, help='RESULTS_FILE')
 parser.add_argument("TIMEOUT", type=float, default=180, help='timeout for one property')
+parser.add_argument("--DEBUG", action='store_true', help='whether to run in debug mode (checking saved adv example)')
+parser.add_argument("--NOPGD", action='store_true', help='do not use pdg attack')
+parser.add_argument("--TRY_CROWN", action='store_true', help='overwrite bound-prop-method to CROWN to save memory')
 
 args = parser.parse_args()
 
@@ -49,8 +52,8 @@ elif args.CATEGORY == "verivital":
     cmd += "exp_configs/vnncomp21/verivital.yaml"
 
 # common
-elif args.CATEGORY == "acasxu":
-    cmd += "exp_configs/vnncomp22/acasxu.yaml"
+# elif args.CATEGORY == "acasxu":
+#     cmd += "exp_configs/vnncomp22/acasxu.yaml"
 
 elif args.CATEGORY == "cifar2020":
     cmd += "exp_configs/vnncomp22/cifar2020_2_255.yaml"
@@ -66,22 +69,16 @@ elif args.CATEGORY in ["mnist_fc", "mnistfc"]:  # same benchmark with different 
 
 # special case: both vnncomp 2021 and 2022 have nn4sys, but they are different
 elif args.CATEGORY == "nn4sys":
-    if 'lindex' in args.ONNX_FILE:
-        cmd += "exp_configs/vnncomp22/nn4sys_2022_lindex.yaml"
-    elif '128d' in args.ONNX_FILE:
-        cmd += "exp_configs/vnncomp22/nn4sys_2022_128d.yaml"
-    elif '2048d' in args.ONNX_FILE:
-        cmd += "exp_configs/vnncomp22/nn4sys_2022_2048d.yaml"
+    if 'lindex' in args.ONNX_FILE or '128d' in args.ONNX_FILE or '2048d' in args.ONNX_FILE or 'pensieve' in args.ONNX_FILE:
+        # All models in 2022 and 2023 use the same config file.
+        cmd += "exp_configs/vnncomp23/nn4sys_2023.yaml"
     else:
         # nn4sys in 2021
         cmd += "exp_configs/vnncomp21/nn4sys.yaml"
 
 # vnncomp 2022
 elif args.CATEGORY == "carvana_unet_2022":
-    if "unet_simp" in args.ONNX_FILE:
-        cmd += "exp_configs/vnncomp22/carvana-unet-simp.yaml"
-    else:
-        cmd += "exp_configs/vnncomp22/carvana-unet-upsample.yaml"
+    cmd += "exp_configs/vnncomp22/carvana-unet-all.yaml"
 
 elif args.CATEGORY == "cifar100_tinyimagenet_resnet":
     if 'CIFAR100_resnet_small' in args.ONNX_FILE:
@@ -98,8 +95,8 @@ elif args.CATEGORY == "cifar100_tinyimagenet_resnet":
 elif args.CATEGORY == "cifar_biasfield":
     cmd += "exp_configs/vnncomp22/cifar_biasfield.yaml"
 
-elif args.CATEGORY == "collins_rul_cnn":
-    cmd += "exp_configs/vnncomp22/collins-rul-cnn.yaml"
+# elif args.CATEGORY == "collins_rul_cnn":
+#     cmd += "exp_configs/vnncomp22/collins-rul-cnn.yaml"
 
 elif args.CATEGORY == "oval21":
     cmd += "exp_configs/vnncomp22/oval22.yaml"
@@ -130,6 +127,50 @@ elif args.CATEGORY == "tllverifybench":
 elif args.CATEGORY == "vggnet16_2022":
     cmd += "exp_configs/vnncomp22/vggnet16.yaml"
 
+# vnncomp 2023
+elif args.CATEGORY == "acasxu":
+    # caution: acasxu is actually a common benchmark across multiple years,
+    # we have exactly the same config file in vnncomp23/ and vnncomp22/ folders
+    # but for consistency, we point to the config in vnncomp23/ folder
+    cmd += "exp_configs/vnncomp23/acasxu.yaml"
+
+elif args.CATEGORY == "cctsdb_yolo":
+    cmd += "exp_configs/vnncomp23/cctsdb_yolo.yaml"
+
+elif args.CATEGORY == "cgan":
+    cmd += "exp_configs/vnncomp23/cgan.yaml"
+
+elif args.CATEGORY == "collins_rul_cnn":
+    cmd += "exp_configs/vnncomp23/collins-rul-cnn.yaml"
+
+elif args.CATEGORY == "collins_yolo_robustness":
+    cmd += "exp_configs/vnncomp23/collins_yolo_robustness.yaml"
+
+elif args.CATEGORY == "dist_shift":
+    cmd += "exp_configs/vnncomp23/dist-shift.yaml"
+
+elif args.CATEGORY == "metaroom":
+    cmd += "exp_configs/vnncomp23/metaroom.yaml"
+
+elif args.CATEGORY == "ml4acopf":
+    cmd += "exp_configs/vnncomp23/ml4acopf.yaml"
+
+elif args.CATEGORY == "tllverifybench":
+    cmd += "exp_configs/vnncomp23/tllVerifyBench.yaml"
+
+elif args.CATEGORY == "traffic_signs_recognition":
+    cmd += "exp_configs/vnncomp23/gtrsb.yaml"
+
+elif args.CATEGORY == "vggnet16":
+    # same config as last year
+    cmd += "exp_configs/vnncomp23/vggnet16.yaml"
+
+elif args.CATEGORY == "vit":
+    cmd += "exp_configs/vnncomp23/vit.yaml"
+
+elif args.CATEGORY == "yolo":
+    cmd += "exp_configs/vnncomp23/yolo-xiangruzh.yaml"
+
 elif args.CATEGORY == "test":
     pass
 
@@ -149,8 +190,27 @@ cmd += " --vnnlib_path " + str(args.VNNLIB_FILE)
 cmd += " --results_file " + str(args.RESULTS_FILE)
 cmd += " --timeout " + str(args.TIMEOUT)
 
+# save adv example to args.RESULTS_FILE
+cmd += " --save_adv_example"
+
+# use CROWN bound propagation, when original run triggers OOM, run_instance.sh will add this flag
+if args.TRY_CROWN:
+    # This also disables the use of output constraints. They are only useful for alpha-CROWN
+    cmd += " --bound_prop_method crown --apply_output_constraints_to"
+
+# verify the adv example everytime it's saved
+if args.DEBUG:
+    cmd += " --eval_adv_example"
+
+# do not use pdg attack during verification
+if args.NOPGD:
+    cmd += " --pgd_order=skip"
+
 print("\n------------------------- COMMAND ------------------------------")
 print(cmd)
 print("----------------------------------------------------------------\n")
 
-os.system(cmd)
+ret = os.system(cmd)
+if ret != 0:
+    # avoid original return code to be > 255, reserve its non-zero feature
+    sys.exit(int(ret) % 255 + 1)

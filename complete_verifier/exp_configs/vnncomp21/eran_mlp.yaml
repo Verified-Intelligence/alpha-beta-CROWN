@@ -5,7 +5,6 @@ general:
 model:
   onnx_optimization_flags: remove_ineffective_layers, remove_relu_in_last_layer
 data:
-  dataset: MNIST
   start: 0
   end: 36
 solver:
