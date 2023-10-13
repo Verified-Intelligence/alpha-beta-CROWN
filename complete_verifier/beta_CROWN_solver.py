@@ -22,7 +22,8 @@ import warnings
 
 from auto_LiRPA import BoundedModule, BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
-from auto_LiRPA.utils import stop_criterion_placeholder, stop_criterion_all
+from auto_LiRPA.utils import (
+        stop_criterion_placeholder, stop_criterion_all, reduction_str2func)
 
 from attack import attack_after_crown
 from attack.attack_pgd import save_cex, process_vnn_lib_attack

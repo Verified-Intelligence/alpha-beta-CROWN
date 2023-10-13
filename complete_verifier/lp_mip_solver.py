@@ -851,6 +851,172 @@ def all_node_split_LP(m, lower_bounds, upper_bounds, rhs):
     return lp_status, glbs
 
 
+def update_the_model_cut(m, cut, pre_lbs=None, pre_ubs=None, split=None, verbose=False):
+    """
+    recalculate the bound propagation using lp solver with cut constraints and split constraints
+    """
+    timeout = arguments.Config["bab"]["timeout"]
+    m.model_cut = copy_model(m.net.model)
+    primal_verbose = False
+
+    # Assert that this is as expected a network with a single output
+    orig_out_vars = m.net.final_node().solver_vars
+    assert len(orig_out_vars) == 1, "Network doesn't have scalar output"
+
+    pre_relu_layer_idx = []
+    layer_idx, relu_idx = 0, 0
+    m.layers = list(m.model_ori.children())
+    for layer_idx, layer in enumerate(m.layers):
+        if type(layer) is nn.ReLU:
+            pre_relu_layer_idx.append(layer_idx)
+            relu_idx += 1
+
+    lower_bounds, upper_bounds = None, None
+    if pre_lbs is not None:
+        lower_bounds = [lbs.clone().detach() for lbs in pre_lbs]
+        upper_bounds = [ubs.clone().detach() for ubs in pre_ubs]
+
+    pre_relu_layer_names = [relu_layer.inputs[0].name for relu_layer in m.net.relus]
+    relu_layer_names = [relu_layer.name for relu_layer in m.net.relus]
+
+    if split is not None and pre_lbs is not None:
+        # only support single neuron split for now
+        gurobi_splits = []
+        for split_idx, node in enumerate(split['decision']):
+            if split["choice"][split_idx] == 1:
+                split_var = m.model_cut.getVarByName(f"lay{pre_relu_layer_names[node[0]]}_{node[1]}")
+                gurobi_splits.append(m.model_cut.addConstr(split_var >= 0, name=f"split{split_idx}"))
+                print(f"split_expr:{split_var}>=0")
+                # orig_v = lower_bounds[node[0]].view(-1)[node[1]].item()
+                lower_bounds[node[0]].view(-1)[node[1]] = 0.
+                # if primal_verbose: print(orig_v, lower_bounds[node[0]].view(-1)[node[1]])
+            else:
+                split_var = m.model_cut.getVarByName(f"lay{pre_relu_layer_names[node[0]]}_{node[1]}")
+                gurobi_splits.append(m.model_cut.addConstr(split_var <= 0, name=f"split{split_idx}"))
+                print(f"split_expr:{split_var}<=0")
+                upper_bounds[node[0]].view(-1)[node[1]] = 0.
+        m.model_cut.update()
+
+    if pre_lbs is not None:
+        m.model_cut = update_model_bounds(m.model_cut, lower_bounds, upper_bounds,\
+                pre_relu_layer_names, relu_layer_names, m.net.model_type)
+
+    # post activation name: 'ReLU{relu_layer_names[relu_idx]}_{neuron_idx}'
+    # integer name: 'aReLU{relu_layer_names[relu_idx]}_{neuron_idx}'
+    # pre activation name: 'lay{pre_relu_layer_names[layer_idx]}_{neuron_idx}'
+    gurobi_cuts = []
+    # without cut, how many cut constraints are satisifed with previous primal values
+    sat_cnt = 0
+    if cut is None:
+        cut = []
+        print("warning: no cuts in update_the_model_cut")
+    for cut_idx, ci in enumerate(cut):
+        # ci is each individual cut
+        lin_expr = -ci["bias"]
+        # skip this constraint if any neuron is not unstable and not in guorbi model any more
+        constr_value = -ci["bias"]
+        constr_str = f"{-ci['bias']} + "
+        skip = False
+        for node, coeff in zip(ci["x_decision"], ci["x_coeffs"]):
+            if m.model_cut.getVarByName(f"inp_{node[1]}") is None:
+                print(f"Warning: inp_{node[1]} not exists!")
+                skip = True
+                continue
+            z = m.net.model.getVarByName(f"inp_{node[1]}")
+            constr_str += f"{coeff} * {z.X:.3f} + "
+            constr_value += coeff * z.X
+            lin_expr += grb.LinExpr(coeff, m.model_cut.getVarByName(f"inp_{node[1]}"))
+        for node, coeff in zip(ci["relu_decision"], ci["relu_coeffs"]):
+            if m.model_cut.getVarByName(f"ReLU{relu_layer_names[node[0]]}_{node[1]}") is None:
+                print(f"Warning: ReLU{relu_layer_names[node[0]]}_{node[1]} not exists!")
+                skip = True
+                continue
+            z = m.net.model.getVarByName(f"ReLU{relu_layer_names[node[0]]}_{node[1]}")
+            constr_str += f"{coeff} * {z.X:.3f} + "
+            constr_value += coeff * z.X
+            lin_expr += grb.LinExpr(coeff, m.model_cut.getVarByName(f"ReLU{relu_layer_names[node[0]]}_{node[1]}"))
+        for node, coeff in zip(ci["arelu_decision"], ci["arelu_coeffs"]):
+            if m.model_cut.getVarByName(f"aReLU{relu_layer_names[node[0]]}_{node[1]}") is None:
+                print(f"Warning: aReLU{relu_layer_names[node[0]]}_{node[1]} not exists!")
+                skip = True
+                continue
+            z = m.net.model.getVarByName(f"aReLU{relu_layer_names[node[0]]}_{node[1]}")
+            constr_str += f"{coeff} * {z.X:.3f} + "
+            constr_value += coeff * z.X
+            lin_expr += grb.LinExpr(coeff, m.model_cut.getVarByName(f"aReLU{relu_layer_names[node[0]]}_{node[1]}"))
+        for node, coeff in zip(ci["pre_decision"], ci["pre_coeffs"]):
+            if m.model_cut.getVarByName(f"lay{pre_relu_layer_names[node[0]]}_{node[1]}") is None:
+                print(f"Warning: lay{pre_relu_layer_names[node[0]]}_{node[1]} not exists!")
+                skip = True
+                continue
+            z = m.net.model.getVarByName(f"lay{pre_relu_layer_names[node[0]]}_{node[1]}")
+            constr_str += f"{coeff} * {z.X:.3f} + "
+            constr_value += coeff * z.X
+            lin_expr += grb.LinExpr(coeff, m.model_cut.getVarByName(f"lay{pre_relu_layer_names[node[0]]}_{node[1]}"))
+
+        if not skip:
+            constr_sat = False
+            if ci["c"] == 1:
+                gurobi_cuts.append(m.model_cut.addConstr(lin_expr >= 0, name=f"cut{cut_idx}"))
+                if verbose:
+                    constr_sat = True if constr_value >= 0 else False
+                    if constr_sat is False:
+                        print(f"{cut_idx}: lin_expr:{lin_expr} >= 0")
+                        if primal_verbose: print(f"{constr_str[:-2]} ({constr_value}) >= 0; SAT:{constr_sat}\n")
+            else:
+                gurobi_cuts.append(m.model_cut.addConstr(lin_expr <= 0, name=f"cut{cut_idx}"))
+                if verbose:
+                    constr_sat = True if constr_value <= 0 else False
+                    if constr_sat is False:
+                        print(f"{cut_idx}: lin_expr:{lin_expr} <= 0")
+                        if primal_verbose: print(f"{constr_str[:-2]} ({constr_value}) <= 0; SAT:{constr_sat}\n")
+            if constr_sat: sat_cnt += 1
+        else:
+            pass
+
+    m.model_cut.update()
+    if verbose: print('Finished building Gurobi LP model. Start solving the LP!')
+
+    guro_start = time.time()
+    objVar = m.model_cut.getVarByName(orig_out_vars[0].VarName)
+
+    m.model_cut.setObjective(objVar, grb.GRB.MINIMIZE)
+    m.model_cut.update()
+    # m.model_cut.setObjective(objVar, grb.GRB.MAXIMIZE)
+    # m.model_cut.write("base_model_cut.lp")
+    m.model_cut.optimize()
+
+    # assert m.model_cut.status == 2, f"model not optimized with status {m.model_cut.status}"
+    if m.model_cut.status == 2:
+        glb = objVar.X
+    elif m.model_cut.status == 3:
+        print("warning, gurobi infeasible!")
+        glb = float('inf')
+    else:
+        print("model status not supported!")
+        exit()
+    # lower_bounds[-1] = torch.tensor([glb]).to(lower_bounds[0].device)
+    print("#### cut gurobi glb:", glb)
+
+    if split is not None:
+        for c in gurobi_splits:
+            print('The dual value of split %s : %g %g'%(c.constrName, c.pi, c.slack))
+
+    num_nonzero_beta = 0
+    sum_beta = 0.
+    for c in gurobi_cuts:
+        if verbose and c.pi > 0:
+            print('The dual value of %s : %g %g'%(c.constrName, c.pi, c.slack))
+        if c.pi != 0:
+            num_nonzero_beta += 1
+            # dual var might be negative depends on its >= or <=
+            sum_beta += c.pi if c.pi >0 else -c.pi
+    print(f"cut gurobi nonzero betas: {num_nonzero_beta}/{len(gurobi_cuts)}, beta sum: {sum_beta}, no cut primal SAT: {sat_cnt}\n")
+    guro_end = time.time()
+    print('Gurobi solved the LP with time', guro_end - guro_start)
+    del m.model_cut
+    # exit()
+    return glb
 
 build_the_model_mip_proto_gurobi_model = None
 def _build_the_model_mip_mps_save(args):
@@ -2137,6 +2303,43 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
     return lb_refined, ub_refined, ([splits], [retb])
 
 
+def check_lp_cut(self, pre_lbs, pre_ubs, lower_bounds, split, history):
+    if not (arguments.Config["bab"]["cut"]["enabled"]
+            and arguments.Config["bab"]["cut"]["bab_cut"]):
+        return
+    assert arguments.Config["bab"]["interm_transfer"], "Cut does not support no-intermediate-bound-transfer yet"
+    beta_crown_lbs = [i[-1] for i in lower_bounds]
+    refine_time = time.time()
+    cuts = arguments.Config["bab"]["cut"]["_tmp_cuts"]
+    if cuts is not None:
+        total_batch = len(split['decision'])
+        assert total_batch == pre_lbs[-1].size(0)
+        for bdi, bd in enumerate(split['decision']):
+            lbs = [lb[bdi: bdi + 1].detach().clone() for lb in pre_lbs]
+            ubs = [ub[bdi: bdi + 1].detach().clone() for ub in pre_ubs]
+
+            # we have multiple splits in the history, parse them and add into solver as well
+            multi_split = history[bdi]
+            msplit_decision, msplit_choice = [], []
+            for relu_idx, msplit in enumerate(multi_split):
+                if not msplit[0]:
+                    # no split in this relu layer
+                    continue
+                msplit_decision += [[relu_idx, neuron_idx] for neuron_idx in msplit[0]]
+                msplit_choice += msplit[1]
+            split1 = {'decision': msplit_decision + bd, 'choice': msplit_choice + [1]}
+            # using pre-lbs and ubs for lp verifier under cut constraints
+            cut_lp1 = self.update_the_model_cut(cuts, lbs, ubs, split1)
+            # using refined bounds with beta crown for lp verifier under cut constraints
+            split2 = {'decision': msplit_decision + bd, 'choice': msplit_choice + [0]}
+            cut_lp2 = self.update_the_model_cut(cuts, lbs, ubs, split2)
+            print("############ bound tightness summary ##############")
+            print(f"init opt crown: {pre_lbs[-1][bdi].item()}")
+            print("beta crown for split:", beta_crown_lbs[bdi], beta_crown_lbs[bdi + total_batch])
+            print(f"cut lp for split: [{cut_lp1}, {cut_lp2}]")
+            print("lp_refine time:", time.time() - refine_time)
+            assert cut_lp1 >= beta_crown_lbs[bdi]
+            assert cut_lp2 >= beta_crown_lbs[bdi + total_batch]
 
 
 def batch_verification_all_node_split_LP(net, d, ret, split):
@@ -2163,5 +2366,4 @@ def batch_verification_all_node_split_LP(net, d, ret, split):
             dom_lb_all[-1][domain_idx] = dlb
             dom_lb[domain_idx] = dlb
     return None
-
 
