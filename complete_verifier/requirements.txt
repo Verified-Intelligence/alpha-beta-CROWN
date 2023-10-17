@@ -1,0 +1,10 @@
+onnxruntime>=1.15
+onnxsim>=0.4.31
+skl2onnx>=1.14
+termcolor>=2.3.0
+onnxoptimizer>=0.3
+gurobipy>=10
+psutil>=5.9.5
+pyyaml>=6.0
+sortedcontainers>=2.4
+git+https://github.com/KaidiXu/onnx2pytorch.git
