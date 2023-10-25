@@ -23,7 +23,7 @@ Our BaB attack is built based on the state-of-the-art [α,β-CROWN
 verifier. We run our BaB attack on Python 3.7+ and PyTorch 1.11. It can be
 installed easily into a conda environment. If you don't have conda, you can
 install [miniconda](https://docs.conda.io/en/latest/miniconda.html). We
-tested the setup and repducing process in the September 2022 release of
+tested the setup and reproducing process in the September 2022 release of
 the α,β-CROWN verifier.
 
 ```bash
@@ -42,8 +42,8 @@ The configuration files of each experiment are located at the
 folder. The hard instance indices that most SOTA gradient based adversarial
 attacks fail are summarized in
 [`complete_verifier/exp_configs/bab_attack/attack_idx/`](https://github.com/huanzhang12/alpha-beta-CROWN/tree/main/complete_verifier/exp_configs/bab_attack/attack_idx).
-The hard instances that can be attacked directly using a MIP solver (can very
-slow) have their indices listed in `mip_unsafe_idx.txt`, and those cannot be
+The hard instances that can be attacked directly using a MIP solver (can be very
+slow) have their indices listed in `mip_unsafe_idx.txt`, and those that cannot be
 attacked using a MIP solver are listed in `mip_unknown_idx.txt`. These `.txt`
 indices are the "hard instances" reported in our paper.
 
