@@ -281,7 +281,7 @@ def set_cuts(self: 'LiRPANet', A, x, lower_bounds, upper_bounds,
         cuts = self.cutter.add_cuts()
         print(f'Cutter time: {time.time() - start_time}')
 
-    if arguments.Config["bab"]["cut"]["_tmp_cuts"] is not None:
+    if "_tmp_cuts" in arguments.Config["bab"]["cut"] and arguments.Config["bab"]["cut"]["_tmp_cuts"] is not None:
         # feed manual cuts
         from cuts.cut_utils import read_cut, read_cut_pt
         filename = arguments.Config['bab']['cut']['_tmp_cuts']
@@ -335,9 +335,10 @@ def enable_cuts(self: 'LiRPANet'):
     ### preprocessor-hint: private-section-start
     # Legacy methods for adding cuts
     cut_args = arguments.Config["bab"]["cut"]
-    if cut_args["add_implied_cuts"]:
+    #if cut_args["add_implied_cuts"]:
+    if "add_implied_cuts" in cut_args and cut_args["add_implied_cuts"]:
         cut_args["method"] = "implied_cuts"
-    elif cut_args["add_input_cuts"]:
+    elif "add_input_cuts" in cut_args and cut_args["add_input_cuts"]:
         cut_args["method"] = "input_cuts"
     ### preprocessor-hint: private-section-end
     self.return_A = True
