@@ -24,9 +24,9 @@ bab:
   initial_max_domains: 128
   branching:
     method: sb
-    sb_coeff_thresh: 1.0
     input_split:
       enable: True
+      sb_coeff_thresh: 1.0
 attack:
   pgd_order: after
   attack_mode: diversed_PGD

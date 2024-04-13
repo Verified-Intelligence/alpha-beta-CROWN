@@ -1,14 +1,14 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021-2022, Huan Zhang <huan@huan-zhang.com>           ##
-##                     Kaidi Xu, Zhouxing Shi, Shiqi Wang              ##
-##                     Linyi Li, Jinqi (Kathryn) Chen                  ##
-##                     Zhuolin Yang, Yihan Wang                        ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
 ##                                                                     ##
-##      See CONTRIBUTORS for author contacts and affiliations.         ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
-##     This program is licenced under the BSD 3-Clause License,        ##
+##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
@@ -79,10 +79,10 @@ class ConfigHandler:
                           help='When batch size is not 1, this reduction function is applied to reduce the bounds into a scalar (options are "sum" and "min").',
                           hierarchy=h + ["loss_reduction_func"])
         self.add_argument("--no_sparse_alpha", action='store_false',
-                          help='Disable sparse alpha.',
+                          help='Enable/disable sparse alpha.',
                           hierarchy=h + ["sparse_alpha"])
         self.add_argument("--no_sparse_interm", action='store_false',
-                          help='Disable sparse intermediate bounds.',
+                          help='Enable/disable sparse intermediate bounds.',
                           hierarchy=h + ["sparse_interm"])
         self.add_argument("--save_adv_example", action='store_true',
                           help='Save returned adversarial example in file.',
@@ -122,16 +122,20 @@ class ConfigHandler:
                           help='BoundedModule model graph optimizer function name. For examples of customized graph optimizer, please see the config files for '
                                'the gtrsb benchmark in VNN-COMP 2023.',
                           hierarchy=h + ["graph_optimizer"])
-        self.add_argument("--no_batchdim_buffers", action="store_true",
-                          help='In most cases, BoundBuffers do not imply a batch dimension in its shape, we may need to make this a default in the future.'
-                                'We have this option for now to accommodate some other benchmarks with issues (acasxu, etc.).',
-                          hierarchy=h + ["no_batchdim_buffers"])
+        self.add_argument("--buffer_has_batchdim", action="store_true",
+                          help='In most cases, the shape of buffers in an ONNX graph do not have a batch dimension. '
+                               'Enabling this option will help load models with a buffer object that has a batch dimension. '
+                               'In most case this can be inferred in the verifier automatically, and this option is not needed.',
+                          hierarchy=h + ["buffer_has_batchdim"])
         self.add_argument("--save_output", action='store_true',
                           help='Save output for test.',
                           hierarchy=h + ["save_output"])
         self.add_argument("--output_file", type=str, default='out.pkl',
                           help="Path to the output file.",
                           hierarchy=h + ["output_file"])
+        self.add_argument("--return_optimized_model", action='store_true',
+                          help="Return the model with optimized bounds after incomplete verification is done.",
+                          hierarchy=h + ["return_optimized_model"])
 
 
         h = ["model"]
@@ -184,6 +188,9 @@ class ConfigHandler:
         self.add_argument("--optimize_graph", type=str,
                           help="Specify a custom function for optimizing the graph on the BoundedModule.",
                           hierarchy=h + ["optimize_graph"])
+        self.add_argument('--model_with_jacobian', action='store_true',
+                          help='Indicate that the model contains JacobianOP.',
+                          hierarchy=h + ['with_jacobian'])
 
         h = ["data"]
         self.add_argument("--start", type=int, default=0, help='Start from the i-th property in specified dataset.',
@@ -217,11 +224,11 @@ class ConfigHandler:
                           hierarchy=h + ["data_idx_file"])
 
         h = ["specification"]
-        self.add_argument("--spec_type", type=str, default='lp', choices=['lp', 'box'],
+        self.add_argument("--spec_type", type=str, default='lp', choices=['lp', 'box', 'bound'],
                           help='Type of verification specification. "lp" = L_p norm, "box" = element-wise lower and upper bound provided by dataloader.',
                           hierarchy=h + ["type"])
         self.add_argument("--robustness_type", type=str, default="verified-acc",
-                          choices=["verified-acc", "runnerup", "clean-acc", "specify-target"],
+                          choices=["verified-acc", "runnerup", "clean-acc", "specify-target", "all-positive"],
                           help='For robustness verification: verify against all labels ("verified-acc" mode), or just the runnerup labels ("runnerup" mode), '
                                'or using a specified label in dataset ("speicify-target" mode, only used for oval20). Not used when a VNNLIB spec is used.',
                           hierarchy=h + ["robustness_type"])
@@ -278,6 +285,9 @@ class ConfigHandler:
         self.add_argument("--prune_after_crown", action='store_true',
                           help='After CROWN pass, prune verified labels before starting the alpha-CROWN pass.',
                           hierarchy=h + ["prune_after_crown"])
+        self.add_argument("--optimize_disjuncts_separately", action='store_true',
+                          help="If set, each neuron computes seperate bounds for each disjunct. If set, do not set prune_after_crown=True.",
+                          hierarchy=h + ["optimize_disjuncts_separately"])
 
         h = ["solver", "crown"]
         self.add_argument('--crown_batch_size', type=int, default=int(1e9),
@@ -286,6 +296,10 @@ class ConfigHandler:
         self.add_argument('--max_crown_size', type=int, default=int(1e9),
                           help='Max output size in CROWN (when there are too many output neurons, only part of them will be bounded by CROWN).',
                           hierarchy=h + ["max_crown_size"])
+        self.add_argument("--relu_option", default='adaptive',
+                          choices=["adaptive", "same-slope", "zero-lb", "one-lb"],
+                          help='Options for specifying the the way to initialize CROWN bounds for ReLU function.',
+                          hierarchy=h + ["relu_option"])
 
         h = ["solver", "alpha-crown"]
         self.add_argument('--no_alpha', action='store_false', dest='alpha',
@@ -304,7 +318,7 @@ class ConfigHandler:
                           help='Learning rate decay factor during alpha-CROWN optimization. Need to use a larger value like 0.99 or 0.995 when you increase the number of iterations.',
                           hierarchy=h + ["lr_decay"])
         self.add_argument("--no_full_conv_alpha", action='store_false', dest='full_conv_alpha',
-                          help='Use independent alpha for conv layers.',
+                          help='Enable/disable the use of independent alpha for conv layers.',
                           hierarchy=h + ["full_conv_alpha"])
         self.add_argument("--max_coeff_mul", type=float, default=torch.inf,
                           help='Maximum coefficient value in the optimizable parameters for BoundMul.',
@@ -312,12 +326,30 @@ class ConfigHandler:
         self.add_argument("--matmul_share_alphas", action='store_true',
                           help='Check alpha sharing for matmul.',
                           hierarchy=h + ['matmul_share_alphas'])
-        self.add_argument("--apply_output_constraints_to", type=str, nargs='*', default=[],
-                          help='Includes the output constraint in the optimization of linear layers. Can be a comma seperated list of layer types (e.g. "BoundLinear"), layer names (e.g. "/input.7") or "all". This will disable patch mode for listed conv layers.',
-                          hierarchy=h + ['apply_output_constraints_to'])
         self.add_argument("--disable_optimization", type=str, nargs='+', default=[],
                           help='A list of the names of operators which have bound optimization disabled.',
                           hierarchy=h + ['disable_optimization'])
+
+        h = ["solver", "invprop"]
+        self.add_argument("--apply_output_constraints_to", type=str, nargs='*', default=[],
+                          help='Includes the output constraint in the optimization of linear layers. Can be a comma seperated list of layer types (e.g. "BoundLinear"), layer names (e.g. "/input.7") or "all". This will disable patch mode for listed conv layers. When set, --optimize_disjuncts_separately must be set, too, if the safety property uses a disjunction.',
+                          hierarchy=h + ['apply_output_constraints_to'])
+        self.add_argument("--tighten_input_bounds", action='store_true',
+                          help='Tighten input bounds using output constraints. If set, --apply_output_constraints_to should contain "BoundInput" or the corresponding layer name.',
+                          hierarchy=h + ['tighten_input_bounds'])
+        self.add_argument("--best_of_oc_and_no_oc", action='store_true',
+                          help='Computes bounds of each layer both with and without output constraints. The best of both is used. Increases the runtime, but may improve the bounds.',
+                          hierarchy=h + ['best_of_oc_and_no_oc'])
+        self.add_argument("--directly_optimize", type=str, nargs='*', default=[],
+                          help='A list of layer names whose bounds should be directly optimized for. IBP is disabled for these layers. Should only be needed for backward verification (approximation of input bounds) where the first linear layer defines the cs and should be optimized.',
+                          hierarchy = h + ['directly_optimize'])
+        self.add_argument("--oc_lr", type=float, default=0.1,
+                          help='The learning rate for the dualized output constraints.',
+                          hierarchy = h + ['oc_lr'])
+        self.add_argument("--share_gammas", action='store_true',
+                          help='Shares gammas across neurons in the optimized layer.',
+                          hierarchy = h + ['share_gammas'])
+
 
         h = ["solver", "beta-crown"]
         self.add_argument("--lr_alpha", type=float, default=0.01,
@@ -335,10 +367,10 @@ class ConfigHandler:
                           help='Number of iteration for optimizing alpha and beta during branch and bound.',
                           hierarchy=h + ["iteration"])
         self.add_argument('--no_beta', action='store_false', dest='beta',
-                          help='Disable/Enable beta split constraint (this option is for ablation study only and should not be used normally).',
+                          help='Enable/disable beta split constraint (this option is for ablation study only and should not be used normally).',
                           hierarchy=h + ["beta"])
         self.add_argument('--no_beta_warmup', action='store_false', dest='beta_warmup',
-                          help='Do not use beta warmup from branching history (this option is for ablation study only and should not be used normally).',
+                          help='Enable/disable beta warmup from branching history (this option is for ablation study only and should not be used normally).',
                           hierarchy=h + ["beta_warmup"])
         self.add_argument('--enable_opt_interm_bounds', action='store_true', default=False,
                           help='Enable optimizing intermediate bounds for beta-CROWN, only used when mip refine for now.',
@@ -358,6 +390,9 @@ class ConfigHandler:
         self.add_argument('--forward_max_dim', type=int, default=10000,
                           help='Maximum input dimension for forward bounds in a batch.',
                           hierarchy=h + ["max_dim"])
+        self.add_argument('--reset_start_layer_threshold', type=float, default=1.0,
+                          help='Reset the start layer if timeout neurons are above the threshold.',
+                          hierarchy=h + ["reset_threshold"])
 
 
         h = ["solver", "multi_class"]
@@ -383,7 +418,7 @@ class ConfigHandler:
                           hierarchy=h + ["refine_neuron_time_percentage"])
         self.add_argument('--no_mip_early_stop', action='store_false',
                           dest='mip_early_stop',
-                          help='Not early stop when finding a positive lower bound or a adversarial example during MIP.',
+                          help='Enable/disable early stop when finding a positive lower bound or a adversarial example during MIP.',
                           hierarchy=h + ["early_stop"])
         self.add_argument('--disable_adv_warmup', action='store_false', dest='adv_warmup',
                           help='Disable using PGD adv as MIP refinement warmup starts.',
@@ -404,21 +439,20 @@ class ConfigHandler:
         self.add_argument("--decision_thresh", type=float, default=0,
                           help='Decision threshold of lower bounds. When lower bounds are greater than this value, verification is successful. Set to 0 for robustness verification.',
                           hierarchy=h + ["decision_thresh"])
-        # FIXME timeout should not be under "bab"
         self.add_argument("--timeout", type=float, default=360,
                           help='Timeout (in second) for verifying one image/property.',
                           hierarchy=h + ["timeout"])
         self.add_argument("--timeout_scale", type=float, default=1, help='Scale the timeout for development purpose.',
                           hierarchy=h + ["timeout_scale"])
+        self.add_argument("--max_iterations", type=int, default=-1,
+                          help='Maximum number of BaB iterations.',
+                          hierarchy=h + ["max_iterations"])
         self.add_argument("--override_timeout", type=float, default=None,
                           help='Override timeout.',
                           hierarchy=h + ["override_timeout"])
         self.add_argument("--get_upper_bound", action='store_true',
                           help='Update global upper bound during BaB (has extra overhead, typically the upper bound is not used).',
                           hierarchy=h + ["get_upper_bound"])
-        self.add_argument("--DFS_percent", type=float, default=0.,
-                          help='Percent of domains for depth first search (not used).',
-                          hierarchy=h + ["dfs_percent"])
         self.add_argument("--disable_pruning_in_iteration", action='store_false',
                           dest='pruning_in_iteration',
                           help='Disable verified domain pruning within iteration.',
@@ -505,10 +539,10 @@ class ConfigHandler:
                           help='Wait a bit after cplex warmup in seconds, so that we tend to get some cuts at early stage of branch and bound.',
                           hierarchy=h + ["cplex_cuts_wait"])
         self.add_argument("--no_cplex_cuts_revpickup", action='store_false',
-                          help='Disable the inverse order domain pickout when cplex is enabled.',
+                          help='Enable/disable the inverse order domain pickout when cplex is enabled.',
                           hierarchy=h + ["cplex_cuts_revpickup"])
         self.add_argument("--no_cut_reference_bounds", action='store_false',
-                          help='Disable using reference bounds when GCP-CROWN cuts are used.',
+                          help='Enable/disable using reference bounds when GCP-CROWN cuts are used.',
                           hierarchy=h + ["cut_reference_bounds"])
         self.add_argument("--fix_cut_intermediate_bounds", action='store_true',
                           help='Fix intermediate bounds when GCP-CROWN cuts are used.',
@@ -543,14 +577,10 @@ class ConfigHandler:
         self.add_argument("--branching_relu_iterations", type=int, default=50,
                           help="Number of iterations to run relu split before we run input split.",
                           hierarchy=h + ["branching_relu_iterations"])
-        # FIXME Move to input split
-        self.add_argument("--sb_coeff_thresh", default=1e-3, type=float,
-                          help='Clamp values of coefficient matrix (A matrix) for sb branching heuristic.',
-                          hierarchy=h + ["sb_coeff_thresh"])
 
         h = ["bab", "branching", "nonlinear_split"]
         self.add_argument("--nonlinear_split_method", type=str, default='shortcut',
-                          choices=['babsr-like', 'full-backward', 'shortcut'],
+                          choices=['babsr-like', 'shortcut'],
                           help='Branching heuristic for the general nonlinear functions.',
                           hierarchy=h + ['method'])
         self.add_argument("--branching_point_method", type=str, default='uniform',
@@ -559,16 +589,12 @@ class ConfigHandler:
         self.add_argument("--nonlinear_branches", type=int, default=2,
                           help='Number of branches for nonlinear branching.',
                           hierarchy=h + ['num_branches'])
-        self.add_argument("--branching_point_refinement", action='store_true',
-                          dest='branching_point_refinement',
-                          help='Refine branching points for selected neurons.',
-                          hierarchy=h + ['branching_point_refinement'])
-        self.add_argument("--nonlinear_branch_filtering", action='store_true',
-                          dest='nonlinear_branch_filtering',
+        self.add_argument("--nonlinear_split_filtering", action='store_true',
+                          dest='nonlinear_split_filtering',
                           help='KFSB-like filtering in general nonlinear branching.',
                           hierarchy=h + ['filter'])
-        self.add_argument("--nonlinear_branch_filtering_beta", action='store_true',
-                          dest='nonlinear_branch_filtering_beta',
+        self.add_argument("--nonlinear_split_filtering_beta", action='store_true',
+                          dest='nonlinear_split_filtering_beta',
                           help='Use beta in the KFSB-like filtering.',
                           hierarchy=h + ['filter_beta'])
         self.add_argument("--filter_batch_size", type=int, default=10000,
@@ -577,33 +603,20 @@ class ConfigHandler:
         self.add_argument("--filter_iterations", type=int, default=25,
                           help="Number of iterations for filtering.",
                           hierarchy=h + ['filter_iterations'])
-        self.add_argument("--nonlinear_split_shortlist_size",
-                           type=int, default=500,
-                           help='Size of a shortlist of neurons for which we compute bounds with backward bound propagation.',
-                           hierarchy=h + ['shortlist_size'])
-        # FIXME Move. These are not related to bab.
+        self.add_argument('--nonlinear_split_use_min',
+                          action="store_true",
+                          help='Use min instead of mean to aggregate the branching scores of multiple branches.',
+                          hierarchy=h + ['use_min'])
         self.add_argument("--loose_tanh_threshold", type=float, default=None,
                           help='Set a threshold for tanh/sigmoid to use a different relaxation when the pre-activation bounds are too loose.',
                           hierarchy=h + ['loose_tanh_threshold'])
-
-        # (Experimental) New input split that is integrated into the activation split
-        h = ["bab", "branching", "new_input_split"]
-        self.add_argument("--enable_new_input_split", action='store_true',
-                          help='Consider branching on the input domain.',
-                          hierarchy=h + ["enable"])
-        self.add_argument("--init_input_split_batch_size", type=int, default=2,
-                          help='Batch size for the initial input split.',
-                          hierarchy=h + ["batch_size"])
-        self.add_argument('--input_split_rounds', type=int, default=1,
-                          help='Number of BaB rounds for the input split.',
-                          hierarchy=h + ['rounds'])
-        self.add_argument('--input_split_init_alpha_batch_size', type=int,
-                          default=8192,
-                          help='The batch size for the first iteration initializing alphas.',
-                          hierarchy=h + ['init_alpha_batch_size'])
-        self.add_argument('--full_alpha_after_new_input_split', action='store_true',
-                          help='Use full alpha-CROWN after the new input split rounds.',
-                          hierarchy=h + ["full_alpha"])
+        self.add_argument("--dynamic_nonlinear_split_bbps", action="store_true",
+                          help="Decide branching points dynamically by BBPS.",
+                          hierarchy=h + ['dynamic_bbps'])
+        self.add_argument("--dynamic_nonlinear_split_options", nargs="+",
+                          help="Different options of branching points.",
+                          default=["uniform", "three_left", "three_right"],
+                          hierarchy=h + ['dynamic_options'])
 
         h = ["bab", "branching", "input_split"]
         self.add_argument("--enable_input_split", action='store_true',
@@ -632,12 +645,6 @@ class ConfigHandler:
         self.add_argument("--sb_margin_weight", default=1.0, type=float,
                           help='Weight for the margin term in the sb heuristic.',
                           hierarchy=h + ["sb_margin_weight"])
-        self.add_argument("--sb_primary_spec", type=int, default=None,
-                          help='A primary spec for the sb heuristic.',
-                          hierarchy=h + ["sb_primary_spec"])
-        self.add_argument('--sb_primary_spec_iter', type=int, default=1,
-                          help='Only use sb_primary_spec when the iteration count is at least this value.',
-                          hierarchy=h + ['sb_primary_spec_iter'])
         self.add_argument('--sb_sum', action='store_true',
                           help='Use sum for multiple specs in sb.',
                           hierarchy=h + ['sb_sum'])
@@ -647,9 +654,18 @@ class ConfigHandler:
         self.add_argument('--bf_rhs_offset', type=float, default=0,
                           help='An offset on RHS used in computing the brute force heuristic.',
                           hierarchy=h + ['bf_rhs_offset'])
+        self.add_argument('--bf_iters', type=int, default=1e9,
+                          help='Number of iterations to use brute force.',
+                          hierarchy=h + ['bf_iters'])
+        self.add_argument('--bf_batch_size', type=int, default=100000,
+                          help='A special batch size for brute force.',
+                          hierarchy=h + ['bf_batch_size'])
         self.add_argument('--bf_zero_crossing_score', action='store_true',
                           help='A zero crossing score in BF.',
                           hierarchy=h + ['bf_zero_crossing_score'])
+        self.add_argument('--touch_zero_score', type=float, default=0,
+                          help='A touch-zero score in BF.',
+                          hierarchy=h + ['touch_zero_score'])
         self.add_argument('--ibp_enhancement', action='store_true',
                           help='Use IBP bounds to enhance.',
                           hierarchy=h + ['ibp_enhancement'])
@@ -664,6 +680,19 @@ class ConfigHandler:
                           action='store_true',
                           help='Run attack during input split and update RHS. BaB does not stop even if any counterexample is found.',
                           hierarchy=h + ['update_rhs_with_attack'])
+        self.add_argument("--sb_coeff_thresh", default=1e-3, type=float,
+                          help='Clamp values of coefficient matrix (A matrix) for sb branching heuristic.',
+                          hierarchy=h + ["sb_coeff_thresh"])
+        self.add_argument('--input_split_sort_index', type=int,
+                          help='The output index to use for sorting domains in the input split.',
+                          hierarchy=h + ["sort_index"])
+        self.add_argument('--no_input_split_sort_descending', action='store_false',
+                          dest="input_split_sort_descending",
+                          help='Sort input split domains in an ascending/descending way.',
+                          hierarchy=h + ["sort_descending"])
+        self.add_argument('--input_split_show_progress', action='store_true',
+                          help='Show progress during input split.',
+                          hierarchy=h + ["show_progress"])
 
         h = ["bab", "attack"]  # BaB-Attack options.
         self.add_argument("--enable_bab_attack", action='store_true',
@@ -711,7 +740,7 @@ class ConfigHandler:
                           hierarchy=h + ["pgd_batch_size"])
         self.add_argument('--no_pgd_early_stop', action='store_false',
                           dest='pgd_early_stop',
-                          help="Early stop PGD when an adversarial example is found.",
+                          help="Enable/disable early stop PGD when an adversarial example is found.",
                           hierarchy=h + ["pgd_early_stop"])
         self.add_argument('--pgd_lr_decay', type=float, default=0.99,
                           help='Learning rate decay factor used in PGD attack.',
@@ -719,6 +748,9 @@ class ConfigHandler:
         self.add_argument('--pgd_alpha', type=str, default="auto",
                           help='Step size of PGD attack. Default (auto) is epsilon/4.',
                           hierarchy=h + ["pgd_alpha"])
+        self.add_argument('--pgd_alpha_scale', action='store_true',
+                          help='Scale PGD alpha according to data_max-data_min.',
+                          hierarchy=h + ["pgd_alpha_scale"])
         self.add_argument('--pgd_loss_mode', type=str, choices=['hinge', 'sum'],
                           help='Loss mode for choosing the best delta.',
                           hierarchy=h + ["pgd_loss_mode"])
@@ -813,6 +845,9 @@ class ConfigHandler:
         self.add_argument("--test_optimized_bounds_after_n_iterations", type=int, default=0,
                           help='Debugging option. Controls how many optimization steps for all layers are done before bounds are checked against the LP solver',
                           hierarchy=h + ['test_optimized_bounds_after_n_iterations'], private=True)
+        self.add_argument("--print_verbose_decisions", action="store_true",
+                          help="Print more detailed information about branching decisions",
+                          hierarchy=h + ['print_verbose_decisions'], private=True)
 
     def update_arguments(self):
         """Adaptively tune arguments."""
@@ -926,7 +961,7 @@ class ConfigHandler:
                     f.write(ret_string)
             return ret_string
 
-    def parse_config(self, args=None):
+    def parse_config(self, args=None, verbose=True):
         """
         Main function to parse parameter configurations. The commandline arguments have the highest priority;
         then the parameters specified in yaml config file. If a parameter does not exist in either commandline
@@ -957,8 +992,9 @@ class ConfigHandler:
         parsed_args = self.defaults_parser.parse_args(args)
         self.update_arguments()
         # Print all configuration.
-        print('Configurations:\n')
-        print(self.dump_config(self.all_args))
+        if verbose:
+            print('Configurations:\n')
+            print(self.dump_config(self.all_args))
         return parsed_args
 
     def positive_float_checker(self, x):

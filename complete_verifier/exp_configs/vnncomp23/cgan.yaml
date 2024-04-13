@@ -18,7 +18,7 @@ bab:
   initial_max_domains: 100
   branching:
     method: sb  # Split on input space.
-    sb_coeff_thresh: 0.01
     input_split:
       enable: True
       catch_assertion: true
+      sb_coeff_thresh: 0.01

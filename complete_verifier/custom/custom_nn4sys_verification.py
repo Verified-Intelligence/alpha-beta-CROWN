@@ -1,13 +1,14 @@
 #########################################################################
-##         This file is part of the alpha-beta-CROWN verifier          ##
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021, Huan Zhang <huan@huan-zhang.com>                ##
-##                     Kaidi Xu <xu.kaid@northeastern.edu>             ##
-##                     Shiqi Wang <sw3215@columbia.edu>                ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
 ##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Yihan Wang <yihanwang@ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
 ##                                                                     ##
-##     This program is licenced under the BSD 3-Clause License,        ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################

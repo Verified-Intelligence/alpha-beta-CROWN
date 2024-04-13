@@ -1,3 +1,17 @@
+#########################################################################
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
+##                                                                     ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """Update domains after applying a split."""
 
 from collections import defaultdict
@@ -17,27 +31,6 @@ def repeat(x, num_copy, unsqueeze=False):
         return x.unsqueeze(0).repeat(num_copy, *[1]*x.ndim)
     else:
         return x.repeat(num_copy, *[1]*(x.ndim - 1))
-
-
-def retain_valid_domains(data, valid_domains, is_alpha=False):
-    if data is None:
-        return None
-    elif isinstance(data, list):
-        data = [item for i, item in enumerate(data) if valid_domains[i]]
-    elif isinstance(data, torch.Tensor):
-        if is_alpha:
-            data = data[:, :, valid_domains]
-        else:
-            try:
-                data = data[valid_domains]
-            except:
-                import pdb; pdb.set_trace()
-    elif isinstance(data, dict):
-        data = {k: retain_valid_domains(v, valid_domains, is_alpha=is_alpha)
-                for k, v in data.items()}
-    else:
-        raise NotImplementedError(type(data))
-    return data
 
 
 class DomainUpdater:
@@ -124,10 +117,6 @@ class DomainUpdater:
         self.device = d['lower_bounds'][self.final_name].device
         self.node_names = [k for k in d['lower_bounds'].keys() if k != self.final_name]
 
-        self.valid_domains = torch.ones(
-            self.num_copy, self.num_domain,
-            device=self.device, dtype=torch.bool)
-
         d['lower_bounds'] = {
             k: repeat(v, self.num_copy, unsqueeze=True)
             for k, v in d['lower_bounds'].items()}
@@ -149,44 +138,39 @@ class DomainUpdater:
 
         self._set_history_and_bounds(d, split, mode)
 
-        self.valid_domains = self.valid_domains.view(-1)
-
-        d['lower_bounds'] = retain_valid_domains(
-            {k: v.view(-1, *v.shape[2:])
-             for k, v in d['lower_bounds'].items()}, self.valid_domains)
-        d['upper_bounds'] = retain_valid_domains(
-            {k: v.view(-1, *v.shape[2:])
-             for k, v in d['upper_bounds'].items()}, self.valid_domains)
-        d['history'] = retain_valid_domains(self.new_history, self.valid_domains)
+        d['lower_bounds'] = {
+            k: v.view(-1, *v.shape[2:]) for k, v in d['lower_bounds'].items()}
+        d['upper_bounds'] = {
+            k: v.view(-1, *v.shape[2:]) for k, v in d['upper_bounds'].items()}
+        d['history'] = self.new_history
 
         if 'depths' in d:
             if mode == 'depth':
                 d['depths'] = [depth + self.num_split for depth in d['depths']]
             else:
                 d['depths'] = [depth + 1 for depth in d['depths']]
-            d['depths'] = retain_valid_domains(
-                d['depths'] * self.num_copy, self.valid_domains)
+            d['depths'] = d['depths'] * self.num_copy
         if 'alphas' in d:
             new_alphas = defaultdict(dict)
             for k, v in d['alphas'].items():
                 new_alphas[k] = {kk: torch.cat([vv] * self.num_copy, dim=2)
                     for kk, vv in v.items()}
-            d['alphas'] = retain_valid_domains(
-                new_alphas, self.valid_domains, is_alpha=True)
-
+            d['alphas'] = new_alphas
+        if 'lAs' in d:
+            d['lAs'] = {
+                k: repeat(v, self.num_copy)
+                for k, v in d['lAs'].items()
+            }
         for k in ['split_history', 'cs', 'betas', 'intermediate_betas',
                 'thresholds', 'x_Ls', 'x_Us']:
             if k in d:
                 d[k] = repeat(d[k], self.num_copy)
-                d[k] = retain_valid_domains(d[k], self.valid_domains)
         for k in split:
             if isinstance(split[k], list):
                 split[k] = split[k][-self.num_domain:] * self.num_copy
-                split[k] = retain_valid_domains(split[k], self.valid_domains)
             elif isinstance(split[k], torch.Tensor):
                 split[k] = split[k][-self.num_domain:].repeat(
                     self.num_copy, *[1]*(split[k].ndim - 1))
-                split[k] = retain_valid_domains(split[k], self.valid_domains)
 
     def _set_history_and_bounds(self, d, split, mode='depth'):
         if self.history is not None:
@@ -204,7 +188,7 @@ class DomainUpdater:
                         j_iter = range(self.num_copy)
                     else:
                         j_iter = range(cur_split*self.num_branches,
-                                    (cur_split+1)*self.num_branches)
+                                       (cur_split+1)*self.num_branches)
 
                     branch_idx = 0
                     count = 0
@@ -256,11 +240,6 @@ class DomainUpdater:
                     points = split['points'][cur_split*self.num_domain+i]
                 else:
                     points = 0.
-                if split.get('points_mask', None) is not None:
-                    points_mask = split['points_mask'][cur_split*self.num_domain+i]
-                else:
-                    points_mask = None
-                # TODO Allow some branching points to be invalid
 
                 if mode == 'depth':
                     j_iter = range(self.num_copy)
@@ -273,10 +252,6 @@ class DomainUpdater:
                 for j in j_iter:
                     history_idx = (-self.num_copy * self.num_domain
                                     + j * self.num_domain + i)
-                    if (points_mask is not None
-                            and branch_idx + 1 < self.num_branches
-                            and not points_mask[branch_idx]):
-                        self.valid_domains[j, i] = False
                     if branch_idx + 1 < self.num_branches:
                         val = points[branch_idx] if self.multi_branch else points
                         if self.history is not None:
@@ -363,45 +338,3 @@ class DomainUpdaterSimple(DomainUpdater):
                     upd_domain[k], upd_idx[k]] = upd_val[k]
                 d['upper_bounds'][k][1].view(self.num_domain, -1)[
                     upd_domain[k], upd_idx[k]] = upd_val[k]
-
-
-class DomainUpdaterInputSplit(DomainUpdater):
-
-    def set_branched_bounds(self, d, split, mode='depth'):
-        # Disable history during the input split
-        # d['history'] = None
-        # # Just need the input and the final output bounds
-        d['lower_bounds'] = {k: v for k, v in d['lower_bounds'].items()
-                                if k in [self.root.name, self.final_name]}
-        d['upper_bounds'] = {k: v for k, v in d['upper_bounds'].items()
-                                if k in [self.root.name, self.final_name]}
-        super().set_branched_bounds(d, split, mode)
-
-    def _set_history_and_bounds(self, d, split, mode='depth'):
-        assert mode == 'depth'
-        assert split.get('points', None) is not None
-        assert self.num_split == 1
-        assert self.num_copy == self.num_branches
-
-        if self.num_branches == 2:
-            # Shortcut
-            assert split['points'].ndim == 1
-            idx = self.as_tensor([split['decision'][i][1]
-                                  for i in range(self.num_domain)])
-            ub = d['upper_bounds'][self.root.name].view(
-                self.num_copy, self.num_domain, -1)
-            ub[0].scatter_(dim=-1, index=idx.unsqueeze(-1),
-                           src=split['points'].unsqueeze(-1))
-            lb = d['lower_bounds'][self.root.name].view(
-                self.num_copy, self.num_domain, -1)
-            lb[1].scatter_(dim=-1, index=idx.unsqueeze(-1),
-                           src=split['points'].unsqueeze(-1))
-            d['upper_bounds'][self.root.name] = ub.view(
-                d['upper_bounds'][self.root.name].shape)
-            d['lower_bounds'][self.root.name] = lb.view(
-                d['lower_bounds'][self.root.name].shape)
-        else:
-            raise NotImplementedError
-
-            # FIXME Some None issue in the history
-            # super()._set_history_and_bounds(d, split, mode)

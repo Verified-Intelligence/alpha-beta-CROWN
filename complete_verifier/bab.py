@@ -1,14 +1,14 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021-2022, Huan Zhang <huan@huan-zhang.com>           ##
-##                     Kaidi Xu, Zhouxing Shi, Shiqi Wang              ##
-##                     Linyi Li, Jinqi (Kathryn) Chen                  ##
-##                     Zhuolin Yang, Yihan Wang                        ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
 ##                                                                     ##
-##      See CONTRIBUTORS for author contacts and affiliations.         ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
-##     This program is licenced under the BSD 3-Clause License,        ##
+##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
@@ -24,7 +24,6 @@ from attack.domains import SortedReLUDomainList
 from attack.bab_attack import bab_loop_attack
 from heuristics import get_branching_heuristic
 from input_split.input_split_on_relu_domains import input_split_on_relu_domains, InputReluSplitter
-from new_input_split import NewInputSplit
 from lp_mip_solver import batch_verification_all_node_split_LP
 from cuts.cut_verification import cut_verification, get_impl_params
 from cuts.cut_utils import fetch_cut_from_cplex, clean_net_mps_process, cplex_update_general_beta
@@ -48,7 +47,7 @@ def get_split_depth(batch_size, min_batch_size):
 
 def split_domain(net, domains, d, batch, impl_params=None, stats=None,
                  set_init_alpha=False, fix_interm_bounds=True,
-                 branching_heuristic=None):
+                 branching_heuristic=None, iter_idx=None):
     solver_args = arguments.Config['solver']
     bab_args = arguments.Config['bab']
     branch_args = bab_args['branching']
@@ -61,16 +60,14 @@ def split_domain(net, domains, d, batch, impl_params=None, stats=None,
     print('batch:', batch)
 
     stats.timer.start('decision')
-    if getattr(net, 'new_input_split_now', False):
-        split_depth = 1
-    else:
-        split_depth = get_split_depth(batch, min_batch_size)
+    split_depth = get_split_depth(batch, min_batch_size)
     # Increase the maximum number of candidates for fsb and kfsb if there are more splits needed.
-    branching_decision, branching_points, branching_points_mask, split_depth = (
+    branching_decision, branching_points, split_depth = (
         branching_heuristic.get_branching_decisions(
             d, split_depth, method=branch_args['method'],
             branching_candidates=max(branch_args['candidates'], split_depth),
-            branching_reduceop=branch_args['reduceop']))
+            branching_reduceop=branch_args['reduceop'],
+            iter_idx=iter_idx, num_all_domains=len(domains)))
     print_average_branching_neurons(
         branching_decision, stats.implied_cuts, impl_params=impl_params)
     if len(branching_decision) < len(next(iter(d['mask'].values()))):
@@ -86,13 +83,14 @@ def split_domain(net, domains, d, batch, impl_params=None, stats=None,
     split = {
         'decision': branching_decision,
         'points': branching_points,
-        'points_mask': branching_points_mask,
     }
     if split['points'] is not None and not bab_args['interm_transfer']:
         raise NotImplementedError(
             'General branching points are not supported '
             'when interm_transfer==False')
-    print_splitting_decisions(net, d, split_depth, split)
+    print_splitting_decisions(
+        net, d, split_depth, split,
+        verbose=arguments.Config['debug']['print_verbose_decisions'])
     stats.timer.add('decision')
 
     stats.timer.start('set_bounds')
@@ -111,6 +109,8 @@ def split_domain(net, domains, d, batch, impl_params=None, stats=None,
     stats.timer.add('solve')
 
     if solver_args['beta-crown']['all_node_split_LP']:
+        # FIXME build_history_and_set_bounds doesn't return correct split
+        # (just dummy elements) when split_depth > 1
         ret_lp = batch_verification_all_node_split_LP(net, d, ret, split)
         if ret_lp is not None:
             # lp_status == "unsafe"
@@ -164,8 +164,8 @@ def act_split_round(domains, net, batch, iter_idx, stats=None, impl_params=None,
     if d['mask'] is not None:
         split_domain(net, domains, d, batch, impl_params=impl_params,
                      stats=stats, fix_interm_bounds=not recompute_interm,
-                     branching_heuristic=branching_heuristic)
-        print('length of domains:', len(domains))
+                     branching_heuristic=branching_heuristic, iter_idx=iter_idx)
+        print('Length of domains:', len(domains))
         stats.timer.print()
 
     if len(domains) == 0:
@@ -189,33 +189,11 @@ def act_split_round(domains, net, batch, iter_idx, stats=None, impl_params=None,
     return global_lb
 
 
-def new_input_split_round(splitter, net, batch, iter_idx, stats=None):
-    sort_domain_iter = arguments.Config['bab']['sort_domain_interval']
-    full_alpha = arguments.Config['bab']['branching']['new_input_split']['full_alpha']
-    stats.timer.start('pickout')
-    d, domains_target, set_init_alpha, source = splitter.pickout(iter_idx, batch)
-    stats.timer.add('pickout')
-    if d['mask'] is not None:
-        if full_alpha:
-            fix_interm_bounds = source == 'act'
-        else:
-            fix_interm_bounds = not net.new_input_split_now
-        split_domain(net, domains_target, d, batch,
-                     stats=stats, set_init_alpha=set_init_alpha,
-                     fix_interm_bounds=fix_interm_bounds)
-    stats.timer.print()
-    if sort_domain_iter > 0 and iter_idx % sort_domain_iter == 0:
-        splitter.sort()
-    global_lb = splitter.get_global_lb()
-    print(f'{stats.visited} domains visited')
-    return global_lb
-
-
 def general_bab(net, domain, x, refined_lower_bounds=None,
             refined_upper_bounds=None, activation_opt_params=None,
             reference_alphas=None, reference_lA=None, attack_images=None,
-            timeout=None, refined_betas=None, rhs=0, model_incomplete=None,
-            time_stamp=0):
+            timeout=None, max_iterations=None, refined_betas=None, rhs=0,
+            model_incomplete=None, time_stamp=0):
     # the crown_lower/upper_bounds are present for initializing the unstable
     # indx when constructing bounded module
     # it is ok to not pass them here, but then we need to go through a CROWN
@@ -232,7 +210,7 @@ def general_bab(net, domain, x, refined_lower_bounds=None,
     use_bab_attack = bab_args['attack']['enabled']
     cut_enabled = bab_args['cut']['enabled']
     branching_input_and_activation = branch_args['branching_input_and_activation']
-    new_input_split = branch_args['new_input_split']['enable']
+    max_iterations = max_iterations or bab_args['max_iterations']
 
     input_relu_splitter = (InputReluSplitter() if branching_input_and_activation
                            else None)
@@ -287,7 +265,7 @@ def general_bab(net, domain, x, refined_lower_bounds=None,
     # If we are not optimizing intermediate layer bounds, we do not need to
     # save all the intermediate alpha.
     # We only keep the alpha for the last layer.
-    if not solver_args['beta-crown']['enable_opt_interm_bounds'] and not net.new_input_split:
+    if not solver_args['beta-crown']['enable_opt_interm_bounds']:
         # new_alpha shape:
         # [dict[relu_layer_name, {final_layer: torch.tensor storing alpha}]
         # for each sample in batch]
@@ -295,15 +273,11 @@ def general_bab(net, domain, x, refined_lower_bounds=None,
 
     DomainClass = SortedReLUDomainList if use_bab_attack else BatchedDomainList
     # This is the first (initial) domain.
-    if new_input_split:
-        splitter = NewInputSplit(net, ret, lA, global_lb, global_ub, rhs, alpha)
-        num_domains = len(splitter)
-    else:
-        domains = DomainClass(
-            ret, lA, global_lb, global_ub, alpha,
-            copy.deepcopy(ret['history']), rhs, net=net,
-            x=x, branching_input_and_activation=branching_input_and_activation)
-        num_domains = len(domains)
+    domains = DomainClass(
+        ret, lA, global_lb, global_ub, alpha,
+        copy.deepcopy(ret['history']), rhs, net=net,
+        x=x, branching_input_and_activation=branching_input_and_activation)
+    num_domains = len(domains)
 
     # after domains are added, we replace global_lb, global_ub with the multile
     # targets "real" global lb and ub to make them scalars
@@ -322,15 +296,13 @@ def general_bab(net, domain, x, refined_lower_bounds=None,
     branching_heuristic = get_branching_heuristic(net)
 
     total_round = 0
-    while num_domains > 0:
+    while (num_domains > 0 and (max_iterations == -1
+                                or total_round < max_iterations)):
         total_round += 1
         global_lb = None
         print(f'BaB round {total_round}')
 
-        if new_input_split:
-            global_lb = new_input_split_round(
-                splitter, net, batch, iter_idx=total_round, stats=stats)
-        elif input_relu_splitter and input_relu_splitter.split_condition(
+        if input_relu_splitter and input_relu_splitter.split_condition(
                 total_round-1):
             global_lb = input_split_on_relu_domains(
                 domains, wrapped_net=net, batch_size=batch)
@@ -345,10 +317,7 @@ def general_bab(net, domain, x, refined_lower_bounds=None,
         if isinstance(global_lb, torch.Tensor):
             global_lb = global_lb.max().item()
 
-        if new_input_split:
-            num_domains = len(splitter)
-        else:
-            num_domains = len(domains)
+        num_domains = len(domains)
 
         result = None
         if stats.all_node_split:
@@ -368,10 +337,7 @@ def general_bab(net, domain, x, refined_lower_bounds=None,
         # No domains left and not timed out.
         result = 'safe'
 
-    if new_input_split:
-        del splitter
-    else:
-        del domains
+    del domains
     clean_net_mps_process(net)
 
     return global_lb, stats.visited, result

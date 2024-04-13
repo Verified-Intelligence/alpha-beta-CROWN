@@ -1,3 +1,17 @@
+#########################################################################
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
+##                                                                     ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 import os
 import collections
 import gzip
@@ -29,7 +43,8 @@ def Customized(def_file, callable_name, *args, **kwargs):
     if def_file.endswith('.py'):
         # Use relatively path w.r.t. to the configuration file
         if arguments.Config['general']['root_path']:
-            path = os.path.join(arguments.Config['general']['root_path'], def_file)
+            path = os.path.join(
+                expand_path(arguments.Config['general']['root_path']), def_file)
         elif arguments.Config.file:
             path = os.path.join(os.path.dirname(arguments.Config.file), def_file)
         else:
@@ -147,8 +162,16 @@ def load_model_onnx(path, quirks=None, x=None):
     if onnx_shape[0] <= 1:
         onnx_shape = onnx_shape[1:]
 
-    pytorch_model = onnx2pytorch.ConvertModel(
-        onnx_model, experimental=True, quirks=quirks)
+    try:
+        pytorch_model = onnx2pytorch.ConvertModel(
+            onnx_model, experimental=True, quirks=quirks)
+    except TypeError as e:
+        print('\n\nA possible onnx2pytorch version error!')
+        print('If you see "unexpected keyword argument \'quirks\'", that indicates your onnx2pytorch version is incompatible.')
+        print('Please uninstall onnx2pytorch in your python environment (e.g., run "pip uninstall onnx2pytorch"), and then reinstall using:\n')
+        print('pip install git+https://github.com/KaidiXu/onnx2pytorch@fe7281b9b6c8c28f61e72b8f3b0e3181067c7399\n\n')
+        print('The error below may not a bug of alpha-beta-CROWN. See instructions above.')
+        raise(e)
     pytorch_model.eval()
     pytorch_model.to(dtype=torch.get_default_dtype())
 

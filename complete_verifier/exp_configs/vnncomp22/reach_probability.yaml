@@ -11,6 +11,7 @@ solver:
   beta-crown:
     iteration: 10  # Iterations for computing intermediate layer bounds.
 bab:
+  sort_domain_interval: 1
   branching:
     method: sb
     input_split:

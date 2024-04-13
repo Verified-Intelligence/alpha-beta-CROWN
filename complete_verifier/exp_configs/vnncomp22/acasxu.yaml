@@ -18,13 +18,13 @@ bab:
   branching:
     method: naive  # Split on input space.
     candidates: 3
-    sb_coeff_thresh: 0.01
     input_split:
       enable: True
       enhanced_bound_prop_method: alpha-crown
       enhanced_bound_patience: 20
       enhanced_branching_method: sb
       attack_patience: 80
+      sb_coeff_thresh: 0.01
 attack:
   pgd_order: after
   pgd_restarts: 10000

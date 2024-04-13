@@ -1,14 +1,14 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021-2022, Huan Zhang <huan@huan-zhang.com>           ##
-##                     Kaidi Xu, Zhouxing Shi, Shiqi Wang              ##
-##                     Linyi Li, Jinqi (Kathryn) Chen                  ##
-##                     Zhuolin Yang, Yihan Wang                        ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
 ##                                                                     ##
-##      See CONTRIBUTORS for author contacts and affiliations.         ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
-##     This program is licenced under the BSD 3-Clause License,        ##
+##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
@@ -31,8 +31,7 @@ from input_split.input_split_on_relu_domains import input_branching_decisions
 from utils import Timer
 from load_model import Customized
 from prune import PruneAfterCROWN
-from domain_updater import (DomainUpdater, DomainUpdaterSimple,
-                            DomainUpdaterInputSplit)
+from domain_updater import (DomainUpdater, DomainUpdaterSimple)
 from cuts.implied_cuts import DomainUpdaterImpliedCuts
 from heuristics.nonlinear import precompute_A
 
@@ -51,9 +50,9 @@ class LiRPANet:
         self.model_ori = model_ori
         self.input_shape = in_size
         self.device = device or general_args['device']
-        net = copy.deepcopy(model_ori)
+        model_ori_state_dict = copy.deepcopy(model_ori.state_dict())
         self.net = BoundedModule(
-            net, torch.zeros(in_size, device=self.device),
+            model_ori, torch.zeros(in_size, device=self.device),
             bound_opts={
                 'deterministic': general_args['deterministic'],
                 'conv_mode': general_args['conv_mode'],
@@ -70,9 +69,15 @@ class LiRPANet:
                 'fixed_reducemax_index': True,
                 'matmul': {'share_alphas': solver_args['alpha-crown']['matmul_share_alphas']},
                 'tanh': {'loose_threshold': bab_args['branching']['nonlinear_split']['loose_tanh_threshold']},
-                'buffers': {'no_batchdim': general_args['no_batchdim_buffers']},
+                'relu': solver_args['crown']['relu_option'],
+                'buffers': {'has_batchdim': general_args['buffer_has_batchdim']},
                 'optimize_bound_args': {
-                    'apply_output_constraints_to': solver_args['alpha-crown']['apply_output_constraints_to'],
+                    'apply_output_constraints_to': solver_args['invprop']['apply_output_constraints_to'],
+                    'tighten_input_bounds': solver_args['invprop']['tighten_input_bounds'],
+                    'best_of_oc_and_no_oc': solver_args['invprop']['best_of_oc_and_no_oc'],
+                    'directly_optimize': solver_args['invprop']['directly_optimize'],
+                    'oc_lr': solver_args['invprop']['oc_lr'],
+                    'share_gammas': solver_args['invprop']['share_gammas'],
                 },
                 "optimize_graph": {
                     "optimizer": eval(model_args['optimize_graph']) if model_args['optimize_graph'] else None,
@@ -81,7 +86,6 @@ class LiRPANet:
             device=self.device
         )
         self.net = eval(general_args['graph_optimizer'])(self.net)
-        self.new_input_split = bab_args['branching']['new_input_split']['enable']
         self.root = self.net[self.net.root_names[0]]
 
         self.net.eval()
@@ -100,18 +104,23 @@ class LiRPANet:
         # aligned with arg.bab.interm_transfer
         self.interm_transfer = True
 
-        # check conversion correctness
-        dummy = torch.randn(in_size, device=self.device)
-        try:
-            assert torch.allclose(net(dummy), self.net(dummy))
-        except AssertionError:
-            print('torch allclose failed: norm '
-                  f'{torch.norm(net(dummy) - self.net(dummy))}')
-
         self.final_name = self.net.final_name
         self.alpha_start_nodes = [self.final_name] + list(filter(
             lambda x: len(x.strip()) > 0,
             bab_args['optimized_interm'].split(',')))
+
+        if arguments.Config['model']['with_jacobian']:
+            print('Not checking the conversion correctness for this model with JacobianOP')
+        else:
+            # check conversion correctness
+            dummy = torch.randn(in_size, device=self.device)
+            try:
+                assert torch.allclose(model_ori(dummy), self.net(dummy))
+            except AssertionError:
+                print('torch allclose failed: norm '
+                    f'{torch.norm(model_ori(dummy) - self.net(dummy))}')
+
+        model_ori.load_state_dict(model_ori_state_dict, strict=False)
 
     @property
     def split_nodes(self):
@@ -130,6 +139,7 @@ class LiRPANet:
         input_primal = x_lb.clone().detach()
         input_primal[input_A_lower.squeeze(1) < 0] = x_ub[input_A_lower.squeeze(1) < 0]
 
+        assert self.c.size(0) == 1
         return input_primal, self.model_ori(input_primal).matmul(self.c[0].transpose(-1, -2))
 
     def get_interm_bounds(self, lb, ub=None, init=True, device=None):
@@ -157,10 +167,6 @@ class LiRPANet:
             ub = lb + torch.inf
         upper_bounds[self.final_name] = ub.flatten(1).detach()
 
-        if self.new_input_split:
-            lower_bounds[self.root.name] = self.root.lower.detach()
-            upper_bounds[self.root.name] = self.root.upper.detach()
-
         return lower_bounds, upper_bounds
 
     def get_mask(self):
@@ -181,8 +187,6 @@ class LiRPANet:
                transpose=True, device=None):
         lAs = {}
         nodes = list(self.net.get_splittable_activations())
-        if self.new_input_split:
-            nodes.append(self.root)
         for node in nodes:
             lA = getattr(node, 'lA', None)
             if lA is None:
@@ -206,8 +210,6 @@ class LiRPANet:
         return x[0:1].expand(batch, *[-1]*(x.ndim-1))
 
     def expand_x(self, batch, x_L=None, x_U=None, lb=None, ub=None):
-        if self.new_input_split and lb is not None:
-            x_L, x_U = lb[self.root.name], ub[self.root.name]
         if x_L is None and x_U is None:
             ptb = PerturbationLpNorm(
                 norm=self.x.ptb.norm, eps=self.x.ptb.eps,
@@ -228,6 +230,7 @@ class LiRPANet:
         # create new_x here since batch may change
         new_x = self.expand_x(batch, x_Ls, x_Us, lb, ub)
         if cs is None:
+            assert self.c.size(0) == 1
             cs = None if self.c is None else self.c.expand(new_x.shape[0], -1, -1)
         return interm_bounds, lb_last, ub_last, cs, new_x, x_Ls, x_Us
 
@@ -254,17 +257,13 @@ class LiRPANet:
         batch = d['upper_bounds'][self.final_name].shape[0]
         decision_thresh = d.get('thresholds', None)
 
-        if getattr(self, 'new_input_split_now', False):
-            # Disable beta in input splits
-            beta = False
-
         self.timer.start('func')
         self.timer.start('prepare')
 
         if self.net.cut_used:
             self.disable_cut_for_branching()
         if beta and not vanilla_crown:
-            splits_per_example = self.set_beta(d, beta, batch, bias=beta_bias)
+            splits_per_example = self.set_beta(d, bias=beta_bias)
             self.net.cut_used = (
                 arguments.Config['bab']['cut']['enabled']
                 and arguments.Config['bab']['cut']['bab_cut']
@@ -403,7 +402,7 @@ class LiRPANet:
         }
 
     def _get_split_nodes(self, verbose=False):
-        self.net.get_split_nodes(input_split=self.new_input_split)
+        self.net.get_split_nodes()
         self.split_activations = self.net.split_activations
         if verbose:
             print('Split layers:')
@@ -416,7 +415,8 @@ class LiRPANet:
 
     def build(self, input_domain, x,
               stop_criterion_func=stop_criterion_placeholder(),
-              bounding_method=None, decision_thresh=None, vnnlib_ori=None):
+              bounding_method=None, decision_thresh=None, vnnlib_ori=None,
+              interm_bounds=None):
         # TODO merge with build_with_refined_bounds()
         solver_args = arguments.Config['solver']
         bab_args = arguments.Config['bab']
@@ -501,7 +501,7 @@ class LiRPANet:
                 x=(x_expand,), C=c_to_use, method='CROWN-Optimized',
                 return_A=self.return_A, needed_A_dict=self.needed_A_dict,
                 bound_upper=False, aux_reference_bounds=aux_reference_bounds,
-                cutter=self.cutter)
+                cutter=self.cutter, interm_bounds=interm_bounds)
         elif bounding_method == 'alpha-forward':
             warnings.warn('alpha-forward can only be used with input split for now')
             self.net.bound_opts['optimize_bound_args']['init_alpha'] = True
@@ -776,20 +776,14 @@ class LiRPANet:
     def build_history_and_set_bounds(self, d, split, mode='depth', impl_params=None):
         _, num_split = DomainUpdater.get_num_domain_and_split(
             d, split, self.final_name)
-        input_split = getattr(self, 'new_input_split_now', False)
-
         args = (self.root, self.final_name, self.net.split_nodes)
-
         if impl_params is not None:
             domain_updater = DomainUpdaterImpliedCuts(*args, impl_params)
-        elif input_split:
-            domain_updater = DomainUpdaterInputSplit(*args)
         elif num_split == 1 and (split.get('points', None) is None
                                  or split['points'].ndim == 1):
             domain_updater = DomainUpdaterSimple(*args)
         else:
             domain_updater = DomainUpdater(*args)
-
         domain_updater.set_branched_bounds(d, split, mode)
 
     def _set_A_options(self, bab=False):
@@ -851,6 +845,9 @@ class LiRPANet:
                 'pruning_in_iteration_threshold': bab_args['pruning_in_iteration_ratio'],
                 'lr_cut_beta': bab_args['cut']['lr_beta'],
                 'apply_output_constraints_to': [],
+                'tighten_input_bounds': False,
+                'directly_optimize': [],
+                'share_gammas': False,
             })
         self.net.set_bound_opts({'optimize_bound_args': opt_bound_args})
 
@@ -870,10 +867,10 @@ class LiRPANet:
             for node in self.net.nodes():
                 if not node.perturbed:
                     continue
-                if isinstance(getattr(node, 'lower', None), torch.Tensor):
+                if isinstance(node.lower, torch.Tensor):
                     print(node)
                     print('  lower:', node.lower.reshape(-1)[:10])
-                    if isinstance(getattr(node, 'upper', None), torch.Tensor):
+                    if isinstance(node.upper, torch.Tensor):
                         print('  upper:', node.upper.reshape(-1)[:10])
                         print(' Average gap:', (node.upper-node.lower).mean())
 

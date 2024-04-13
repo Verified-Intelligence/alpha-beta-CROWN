@@ -3,7 +3,6 @@ general:
   root_path: ../../vnncomp2023_benchmarks/benchmarks/traffic_signs_recognition
   csv_name: instances.csv
   graph_optimizer: Customized("custom_graph_optimizer", "merge_sign")
-  no_batchdim_buffers: True
 model:
   onnx_loader: Customized("custom_model_loader", "customized_Gtrsb_loader")
   onnx_optimization_flags: fix_gtrsb

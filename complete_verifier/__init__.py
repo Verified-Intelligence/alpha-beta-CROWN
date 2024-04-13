@@ -12,4 +12,10 @@
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
-from .attack_pgd import attack, attack_pgd, attack_after_crown
+import sys
+import os
+
+print("Adding complete_verifier to sys.path")
+sys.path = [os.path.dirname(__file__)] + sys.path
+
+from abcrown import ABCROWN  # pylint: disable=wrong-import-position

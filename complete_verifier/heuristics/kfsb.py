@@ -1,3 +1,17 @@
+#########################################################################
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
+##                                                                     ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 from collections import defaultdict
 import torch
 import numpy as np
@@ -221,7 +235,7 @@ class KfsbBranching(BabsrBranching):
                               range(split_depth)]  # change the order of final decision to split_depth * batch
             final_decision = sum(final_decision, [])
 
-            return final_decision, None, None, split_depth  # None for points
+            return final_decision, None, split_depth  # None for points
         else:
             # keep all the k decisions
             # final_decision: batch -> k splits
@@ -262,4 +276,4 @@ class KfsbBranching(BabsrBranching):
             if random_decision_dict:
                 print(f'Random branching decision used for {{example_idx:n_random}}: {random_decision_dict}')
 
-            return final_decision, None, None, split_depth  # None for points
+            return final_decision, None, split_depth  # None for points

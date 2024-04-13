@@ -1,3 +1,17 @@
+#########################################################################
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
+##                                                                     ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 import torch
 import arguments
 
@@ -13,9 +27,7 @@ def copy_alpha(self: 'LiRPANet', reference_alphas, num_targets,
                batch_size=None):
     # alpha manipulation, since after init_alpha all things are copied
     # from alpha-CROWN and these alphas may have wrong shape
-    opt_interm_bounds = (
-        arguments.Config['solver']['beta-crown']['enable_opt_interm_bounds']
-        or arguments.Config['bab']['branching']['new_input_split']['enable'])
+    opt_interm_bounds = arguments.Config['solver']['beta-crown']['enable_opt_interm_bounds']
     final_name = self.net.final_node().name
     for m in self.net.optimizable_activations:
         keys = list(m.alpha.keys())
@@ -93,9 +105,6 @@ def get_alpha(self: 'LiRPANet', only_final=False, half=False, device=None):
     # alpha has size (2, spec, batch, *shape). When we save it,
     # we make batch dimension the first.
     # spec is some intermediate layer neurons, or output spec size.
-    new_input_split = arguments.Config['bab']['branching']['new_input_split']['enable']
-    if new_input_split:
-        only_final = False
     ret = {}
     for m in self.net.perturbed_optimizable_activations:
         ret[m.name] = {}
@@ -106,10 +115,6 @@ def get_alpha(self: 'LiRPANet', only_final=False, half=False, device=None):
 
 
 def set_alpha(self: 'LiRPANet', d, set_all=False):
-    new_input_split = arguments.Config['bab']['branching']['new_input_split']['enable']
-    if new_input_split:
-        set_all = True
-
     alpha = d['alphas']
     if len(alpha) == 0:
         return
@@ -133,16 +138,13 @@ def add_batch_alpha(self, alphas, reference_alphas):
     if arguments.Config['bab']['attack']['enabled']:
         # Save all alphas, which will be further refined in bab-attack.
         self.refined_alpha = reference_alphas
-    if not self.new_input_split:
-        # early alpha delete to save space
-        # If we are not optimizing intermediate layer bounds, we do not need
-        # to save all the intermediate alpha. We only keep the alpha for the
-        # last layer.`
-        new_batch_alphas = prune_alphas(batch_alphas, self.alpha_start_nodes)
-        del batch_alphas
-        batch_alphas = new_batch_alphas
-    else:
-        print('Keeping all the alphas for the new input split')
+    # early alpha delete to save space
+    # If we are not optimizing intermediate layer bounds, we do not need
+    # to save all the intermediate alpha. We only keep the alpha for the
+    # last layer.`
+    new_batch_alphas = prune_alphas(batch_alphas, self.alpha_start_nodes)
+    del batch_alphas
+    batch_alphas = new_batch_alphas
     for k, v in batch_alphas.items():
         if k not in alphas:
             alphas[k] = {}

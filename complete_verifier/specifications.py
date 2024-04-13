@@ -1,3 +1,17 @@
+#########################################################################
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
+##                                                                     ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 """Various kinds of specifications for verification."""
 
 import arguments
@@ -179,16 +193,32 @@ def sort_targets_cls(batched_vnnlib, init_global_lb, init_global_ub, scores,
 
 
 def trim_batch(model, init_global_lb, init_global_ub, reference_alphas_cp,
-               lower_bounds, upper_bounds, reference_alphas, lA, property_idx,
+               orig_lower_bounds, orig_upper_bounds, reference_alphas, lA, property_idx,
                c, rhs):
     net = model.net
+    optimize_disjuncts_separately = arguments.Config['solver']['optimize_disjuncts_separately']
+
     # FIXME (assigned to Kaidi, Jun 2023): this function might be wrong; it does not handles
     # the case with a few AND statements like yolo.
     # extract lower bound by (sorted) init_global_lb and batch size of initial_max_domains
     start_idx = property_idx * arguments.Config['bab']['initial_max_domains']
-    lower_bounds[net.final_name] = init_global_lb[start_idx: start_idx + c.shape[0]]
-    upper_bounds[net.final_name] = init_global_ub[start_idx: start_idx + c.shape[0]]
+    lower_bounds = {}
+    upper_bounds = {}
+    if optimize_disjuncts_separately:
+        for layer_name in orig_lower_bounds.keys():
+            lower_bounds[layer_name] = orig_lower_bounds[layer_name][start_idx: start_idx + c.shape[0]]
+            upper_bounds[layer_name] = orig_upper_bounds[layer_name][start_idx: start_idx + c.shape[0]]
+        assert torch.all(lower_bounds[net.final_name] == init_global_lb[start_idx: start_idx + c.shape[0]])
+        assert torch.all(upper_bounds[net.final_name] == init_global_ub[start_idx: start_idx + c.shape[0]])
+    else:
+        for layer_name in orig_lower_bounds.keys():
+            lower_bounds[layer_name] = orig_lower_bounds[layer_name]
+            upper_bounds[layer_name] = orig_upper_bounds[layer_name]
+        lower_bounds[net.final_name] = init_global_lb[start_idx: start_idx + c.shape[0]]
+        upper_bounds[net.final_name] = init_global_ub[start_idx: start_idx + c.shape[0]]
     if rhs.numel() > 1:
+        if optimize_disjuncts_separately:
+            raise NotImplementedError("Output constraints for disjunctions are not supported for rhs.numel() > 1")
         assert init_global_lb.numel() == rhs.numel()
         rhs = rhs[:, start_idx: start_idx + c.shape[0]]
     # trim reference slope by batch size of initial_max_domains accordingly
@@ -207,7 +237,7 @@ def trim_batch(model, init_global_lb, init_global_ub, reference_alphas_cp,
     if lA is not None:
         lA = {k: v[start_idx: start_idx + c.shape[0]] for k, v in lA.items()}
     return {
-        'lA': lA, 'rhs': rhs
+        'lA': lA, 'rhs': rhs, 'lower_bounds': lower_bounds, 'upper_bounds': upper_bounds
     }
 
 
@@ -307,6 +337,7 @@ def sort_targets(batched_vnnlib, init_global_lb, init_global_ub,
     bab_attack_enabled = arguments.Config['bab']['attack']['enabled']
     sort_targets = arguments.Config['bab']['sort_targets']
     cplex_cuts = arguments.Config['bab']['cut']['enabled'] and arguments.Config['bab']['cut']['cplex_cuts']
+    optimize_disjuncts_separately = arguments.Config['solver']['optimize_disjuncts_separately']
     reference_alphas = results.get('alpha', None)
     lA = results.get('lA', None)
 
@@ -332,6 +363,22 @@ def sort_targets(batched_vnnlib, init_global_lb, init_global_ub,
             scores=init_global_lb.flatten(), reference_alphas=reference_alphas,
             final_node_name=model_incomplete.net.final_node().name)
     if ret:
+        assert not optimize_disjuncts_separately, (
+            "Sorting targets is currently not supported when disjuncts are optimized separately."
+        )
         batched_vnnlib, init_global_lb, init_global_ub, lA = ret[:-1]
 
     return batched_vnnlib, init_global_lb, init_global_ub, lA, attack_images
+
+
+def add_rhs_offset(vnnlib, rhs_offset):
+    print('Add an offset to RHS for debugging:', rhs_offset)
+    vnnlib = [
+        (
+            v[0],
+            [(v[1][i][0], v[1][i][1] + rhs_offset)
+            for i in range(len(v[1]))]
+        )
+        for v in vnnlib
+    ]
+    return vnnlib

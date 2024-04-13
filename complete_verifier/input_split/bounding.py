@@ -1,3 +1,17 @@
+#########################################################################
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
+##                                                                     ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 import torch
 from collections import defaultdict
 
@@ -75,11 +89,10 @@ def get_lower_bound_naive(
                 lA = _get_lA(ret)
 
         if dm_lb is not None:
-            print('Old bound better ratio: ', (dm_lb > lb).float().mean().item())
             lb = torch.max(lb, dm_lb)
 
-        worst_idx = (lb-thresholds).amax(dim=-1).argmin()
-        print('Worst bound:', (lb-thresholds)[worst_idx])
+        worst_idx = (lb - thresholds).amax(dim=-1).argmin()
+        print('Worst bound:', (lb - thresholds)[worst_idx])
 
     with torch.no_grad():
         # Transfer everything to CPU.
@@ -107,8 +120,8 @@ def get_lower_bound_with_ibp_enhancement(
     lb = lb_ibp.clone()
     for node in self.net.nodes():
         if (node.perturbed
-            and isinstance(getattr(node, 'lower', None), torch.Tensor)
-            and isinstance(getattr(node, 'upper', None), torch.Tensor)):
+            and isinstance(node.lower, torch.Tensor)
+            and isinstance(node.upper, torch.Tensor)):
             reference_interm_bounds[node.name] = (node.lower, node.upper)
     unverified = torch.logical_not(
         stop_criterion_func(thresholds)(lb_ibp).any(dim=-1))

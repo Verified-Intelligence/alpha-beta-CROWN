@@ -12,4 +12,5 @@
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
-from .attack_pgd import attack, attack_pgd, attack_after_crown
+from heuristics.nonlinear.bbps import NonlinearBranching
+from heuristics.nonlinear.utils import precompute_A

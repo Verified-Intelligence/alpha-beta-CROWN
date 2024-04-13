@@ -1,3 +1,17 @@
+#########################################################################
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
+##                                                                     ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 import arguments
 import os
 import csv
@@ -134,15 +148,14 @@ def parse_run_mode():
     """ parse running by vnnlib or customized data
      if using customized data, we convert them to vnnlib format
      """
-    file_root = model_ori = vnnlib_all = shape = None
-
-    if (arguments.Config['general']['csv_name'] is not None
+    model_ori = vnnlib_all = shape = None
+    file_root = expand_path(arguments.Config['general']['root_path'])
+    if (arguments.Config['general']['csv_name']
             and arguments.Config['specification']['vnnlib_path'] is None):
         # A CSV filename is specified, and we will go over all models and specs in this csv file.
         # Used for running VNN-COMP benchmarks in batch mode.
         # In this case, vnnlib_path should not be specified, otherwise we will run only a single model/spec.
         run_mode = 'csv_file'
-        file_root = expand_path(arguments.Config['general']['root_path'])
         csv_path = os.path.join(file_root, arguments.Config['general']['csv_name'])
         with open(csv_path, newline='') as csv_f:
             reader = csv.reader(csv_f, delimiter=',')
@@ -174,11 +187,12 @@ def parse_run_mode():
         # Used for VNN-COMP in single instance mode, will be used in run_instance.sh
         run_mode = 'single_vnnlib'
         arguments.Config['data']['start'], arguments.Config['data']['end'] = 0, 1
-        csv_file = [(arguments.Config['model']['onnx_path'], arguments.Config['specification']['vnnlib_path'],
+        csv_file = [(arguments.Config['model']['onnx_path'],
+                     arguments.Config['specification']['vnnlib_path'],
                      arguments.Config['bab']['timeout'])]
         file_root = ''
         example_idx_list = csv_file[arguments.Config['data']['start']:arguments.Config['data']['end']]
-    elif arguments.Config['general']['csv_name'] is None:
+    elif not arguments.Config['general']['csv_name']:
         # No CSV specified, we will use specifications defined in yaml file.
         # This part replaces the old robustness_verifier.py interface.
         run_mode = 'customized_data'

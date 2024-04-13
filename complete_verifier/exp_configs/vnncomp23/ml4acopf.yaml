@@ -4,7 +4,6 @@ general:
   sparse_interm: false
   root_path: ../../vnncomp2023_benchmarks/benchmarks/ml4acopf
   csv_name: instances.csv
-  no_batchdim_buffers: True
 model:
   onnx_optimization_flags: ["remove_matmul_inplace"]
 attack:

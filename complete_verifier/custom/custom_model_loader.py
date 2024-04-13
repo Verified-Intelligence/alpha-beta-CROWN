@@ -1,14 +1,14 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021-2022, Huan Zhang <huan@huan-zhang.com>           ##
-##                     Kaidi Xu, Zhouxing Shi, Shiqi Wang              ##
-##                     Linyi Li, Jinqi (Kathryn) Chen                  ##
-##                     Zhuolin Yang, Yihan Wang                        ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
 ##                                                                     ##
-##      See CONTRIBUTORS for author contacts and affiliations.         ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
-##     This program is licenced under the BSD 3-Clause License,        ##
+##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
@@ -33,63 +33,6 @@ from load_model import load_model_onnx
 from loading import joint_optimization_with_onnx_and_vnnlib
 from read_vnnlib import read_vnnlib
 from model_defs import Step_carvana
-
-
-def get_path(onnx_file):
-    return f'{os.path.basename(onnx_file)}.pt'
-
-
-def convert_and_save_nn4sys(onnx_file):
-    model_ori, _ = load_model_onnx(onnx_file)
-    model_ori = convert_nn4sys_model(model_ori)
-    name = get_path(onnx_file)
-    torch.save(model_ori, name)
-    print(f'Converted model saved to {name}')
-
-
-def convert_nn4sys_model(model_ori):
-    model_ori = nn.Sequential(*list(model_ori._modules.values()))
-    # Split the model into v1 and v2 models to resolve numerical issues
-    modules_v1 = []
-    modules_v2 = []
-    stage = 1
-    for m in model_ori._modules.values():
-        if isinstance(m, nn.Linear):
-            if m.weight.abs().max() > 1e9:
-                stage = 2 if len(modules_v2) == 0 else 3
-                continue
-        else:
-            continue
-        if stage == 1:
-            modules_v1 += [m, nn.ReLU(inplace=True)]
-        elif stage == 2:
-            dim = modules_v1[-2].out_features - 1
-            lin = nn.Linear(m.in_features - dim, m.out_features - dim)
-            lin.weight.data = m.weight[:lin.out_features, :lin.in_features]
-            lin.weight.data = lin.weight.to(dtype=torch.float64)
-            lin.bias.data = m.bias[:lin.out_features]
-            lin.bias.data = lin.bias.to(dtype=torch.float64)
-            modules_v2 += [lin, nn.ReLU(inplace=True)]
-    x = torch.tensor([[119740.8]], dtype=torch.float64)
-    modules_v1 = modules_v1[:-1]
-    model_v1 = nn.Sequential(*modules_v1)
-    y = model_v1(x)
-    dim = y.size(-1) - 1
-    modules_v2 = modules_v2[:-1]
-    linear_ident = nn.Linear(1, dim, bias=False)
-    linear_ident.weight.data = torch.ones_like(linear_ident.weight, dtype=torch.float64)
-    modules_v2.insert(0, linear_ident)
-    model_v2 = nn.Sequential(*modules_v2)
-    y[:, :-2] *= (y[:, 1:-1] <= 0).int()
-    select = (y[:, :-1] > 0).int()
-    y2 = model_v2(x)
-    y2 = y2[:] * select
-    res = y2.sum(dim=-1, keepdim=True)
-    res_ref = model_ori(x)
-    print(res.item(), res_ref.item())
-
-    model_ori = (model_v1, model_v2, model_ori)
-    return model_ori
 
 
 def transpose_nhwc(model_ori, vnnlib, shape):
@@ -268,6 +211,55 @@ def customized_NN4SYS_loader(file_root, onnx_path, vnnlib_path):
     Customized NN4SYS loader.
     We split split the model into v1 and v2 models to resolve numerical issues
     """
+
+    def get_path(onnx_file):
+        return f'{os.path.basename(onnx_file)}.pt'
+
+    def convert_and_save_nn4sys(onnx_file):
+        model_ori, _ = load_model_onnx(onnx_file)
+        model_ori = nn.Sequential(*list(model_ori._modules.values()))
+        # Split the model into v1 and v2 models to resolve numerical issues
+        modules_v1 = []
+        modules_v2 = []
+        stage = 1
+        for m in model_ori._modules.values():
+            if isinstance(m, nn.Linear):
+                if m.weight.abs().max() > 1e9:
+                    stage = 2 if len(modules_v2) == 0 else 3
+                    continue
+            else:
+                continue
+            if stage == 1:
+                modules_v1 += [m, nn.ReLU(inplace=True)]
+            elif stage == 2:
+                dim = modules_v1[-2].out_features - 1
+                lin = nn.Linear(m.in_features - dim, m.out_features - dim)
+                lin.weight.data = m.weight[:lin.out_features, :lin.in_features]
+                lin.weight.data = lin.weight.to(dtype=torch.float64)
+                lin.bias.data = m.bias[:lin.out_features]
+                lin.bias.data = lin.bias.to(dtype=torch.float64)
+                modules_v2 += [lin, nn.ReLU(inplace=True)]
+        x = torch.tensor([[119740.8]], dtype=torch.float64)
+        modules_v1 = modules_v1[:-1]
+        model_v1 = nn.Sequential(*modules_v1)
+        y = model_v1(x)
+        dim = y.size(-1) - 1
+        modules_v2 = modules_v2[:-1]
+        linear_ident = nn.Linear(1, dim, bias=False)
+        linear_ident.weight.data = torch.ones_like(linear_ident.weight, dtype=torch.float64)
+        modules_v2.insert(0, linear_ident)
+        model_v2 = nn.Sequential(*modules_v2)
+        y[:, :-2] *= (y[:, 1:-1] <= 0).int()
+        select = (y[:, :-1] > 0).int()
+        y2 = model_v2(x)
+        y2 = y2[:] * select
+        res = y2.sum(dim=-1, keepdim=True)
+        res_ref = model_ori(x)
+        model_ori = (model_v1, model_v2, model_ori)
+        name = get_path(onnx_file)
+        torch.save(model_ori, name)
+        print(f'Converted model saved to {name}')
+
     shape = (-1, 1)
     path = get_path(os.path.join(file_root, onnx_path))
     if not os.path.exists(path):

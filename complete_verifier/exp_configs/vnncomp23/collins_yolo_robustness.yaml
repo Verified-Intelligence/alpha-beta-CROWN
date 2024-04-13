@@ -15,6 +15,6 @@ attack:
 bab:
   branching:
     method: sb  # Split on input space.
-    sb_coeff_thresh: 0.1
     input_split:
       enable: True
+      sb_coeff_thresh: 0.1

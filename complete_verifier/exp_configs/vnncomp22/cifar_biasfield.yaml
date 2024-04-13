@@ -16,10 +16,10 @@ bab:
   initial_max_domains: 10
   branching:
     method: sb
-    sb_coeff_thresh: 2.0
     input_split:
       enable: True
       enhanced_bound_prop_method: alpha-crown
+      sb_coeff_thresh: 2.0
 attack:
   pgd_order: after
   attack_mode: diversed_PGD

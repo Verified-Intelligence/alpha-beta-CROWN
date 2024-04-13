@@ -97,7 +97,7 @@ is cloned to `${HOME}/alpha-beta-CROWN`:
 # Please set this environment variable properly, see above instructions
 export VNNCOMP_PYTHON_PATH=${HOME}/miniconda3/envs/alpha-beta-crown/bin
 # Please check the path to the alpha-beta-CROWN repository and change it accordingly
-./run_all_categories.sh v1 ${HOME}/alpha-beta-CROWN/vnncomp_scripts $(pwd) results_vit.csv "vit" 0  # Example to run the vit benchmark
+./run_all_categories.sh v1 ${HOME}/alpha-beta-CROWN/vnncomp_scripts $(pwd) results_vit.csv counterexamples_vit "vit" all  # Example to run the vit benchmark
 ```
 
 Then results csv for the `vit` benchmark will be saved in

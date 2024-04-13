@@ -1,14 +1,14 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021-2022, Huan Zhang <huan@huan-zhang.com>           ##
-##                     Kaidi Xu, Zhouxing Shi, Shiqi Wang              ##
-##                     Linyi Li, Jinqi (Kathryn) Chen                  ##
-##                     Zhuolin Yang, Yihan Wang                        ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
 ##                                                                     ##
-##      See CONTRIBUTORS for author contacts and affiliations.         ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
-##     This program is licenced under the BSD 3-Clause License,        ##
+##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
@@ -35,7 +35,8 @@ from beta_CROWN_solver import LiRPANet
 from lp_mip_solver import mip
 from attack import attack
 from utils import Logger, print_model
-from specifications import trim_batch, batch_vnnlib, sort_targets, prune_by_idx
+from specifications import (trim_batch, batch_vnnlib, sort_targets,
+                            prune_by_idx, add_rhs_offset)
 from loading import load_model_and_vnnlib, parse_run_mode, adhoc_tuning, Customized  # pylint: disable=unused-import
 from bab import general_bab
 from input_split.batch_branch_and_bound import input_bab_parallel
@@ -45,14 +46,40 @@ from lp_test import compare_optimized_bounds_against_lp_bounds
 
 
 class ABCROWN:
-    def __init__(self, args):
+    def __init__(self, args=None, **kwargs):
+        for k, v in kwargs.items():
+            if isinstance(v, list):
+                args.append(f'--{k}')
+                args.extend(list(map(str, v)))
+            elif isinstance(v, bool):
+                if v:
+                    args.append(f'--{k}')
+                else:
+                    args.append(f'--no_{k}')
+            else:
+                args.append(f'--{k}={v}')
         arguments.Config.parse_config(args)
 
-    def incomplete_verifier(self, model_ori, data, data_ub=None, data_lb=None, vnnlib=None):
+    def incomplete_verifier(
+        self,
+        model_ori,
+        data,
+        data_ub=None,
+        data_lb=None,
+        vnnlib=None,
+        interm_bounds=None
+    ):
         # Generally, c should be constructed from vnnlib
         assert len(vnnlib) == 1, 'incomplete_verifier only support single x spec'
         input_x, specs = vnnlib[0]
         c_transposed = False
+        tighten_input_bounds = (
+            arguments.Config['solver']['invprop']['tighten_input_bounds']
+        )
+        apply_output_constraints_to = (
+            arguments.Config['solver']['invprop']['apply_output_constraints_to']
+        )
+
         if len(specs) > 1:
             # single OR with many clauses (e.g., robustness verification)
             assert all([len(_[0]) == 1 for _ in specs]), \
@@ -60,37 +87,46 @@ class ABCROWN:
             c = torch.concat([
                 item[0] if isinstance(item[0], torch.Tensor) else torch.tensor(item[0])
                 for item in specs], dim=0).unsqueeze(1).to(data)  # c shape: (batch, 1, num_outputs)
-            if c.shape[0] != 1 and data.shape[0] == 1:
+            do_transpose = not arguments.Config['solver']['optimize_disjuncts_separately']
+            rhs = torch.tensor(np.array([item[1] for item in specs])).to(data)  # (batch, 1)
+            if do_transpose and c.shape[0] != 1 and data.shape[0] == 1:
                 # transpose c to shape (1,batch,num_outputs) to share intermediate bounds
+                assert len(apply_output_constraints_to) == 0, (
+                    'To apply output constraints, set --optimize_disjuncts_separately'
+                )
                 c = c.transpose(0, 1)
+                rhs = rhs.t()  # (1, batch)
                 c_transposed = True
-            rhs = torch.tensor(np.array([item[1] for item in specs])).to(data).t()  # (batch, 1)
+            else:
+                if arguments.Config['solver']['prune_after_crown']:
+                    raise NotImplementedError(
+                        'To use optimize_disjuncts_separately=True, do not set '
+                        'prune_after_crown=True'
+                    )
             stop_func = stop_criterion_all(rhs)
 
         else:
             # single AND with many clauses (e.g., Yolo).
             # shape: (batch=1, num_clauses in AND, num_outputs)
             c = torch.tensor(specs[0][0]).unsqueeze(0).to(data)
-            # shape: (num_clauses in AND, 1)
+            # shape: (1, num_clauses in AND)
             rhs = torch.tensor(specs[0][1], dtype=data.dtype, device=data.device).unsqueeze(0)
             stop_func = stop_criterion_batch_any(rhs)
 
         model = LiRPANet(model_ori, in_size=data.shape, c=c)
 
-        apply_output_constraints_to = (
-            arguments.Config['solver']['alpha-crown']['apply_output_constraints_to']
-        )
         bound_prop_method = arguments.Config['solver']['bound_prop_method']
         if len(apply_output_constraints_to) > 0:
             assert bound_prop_method == 'alpha-crown'
             model.net.constraints = torch.tensor([x[0] for x in specs])
             assert model.net.constraints.ndim == 3
-            assert model.net.constraints.size(0) == 1
-            model.net.constraints = model.net.constraints.squeeze(0)
-            model.net.thresholds = rhs
-
-            # Currently, only a chain of AND is supported
-            assert len(specs) == 1
+            assert rhs.ndim ==  2
+            if len(specs) == 1:
+                assert rhs.size(0) == 1
+                model.net.thresholds = rhs.squeeze(0)
+            else:
+                assert rhs.size(1) == 1
+                model.net.thresholds = rhs.squeeze(1)
 
             # We need to use matrix mode for the layer that should utilize output constraints
             for node in model.net.nodes():
@@ -121,7 +157,11 @@ class ABCROWN:
         domain = torch.stack([data_lb.squeeze(0), data_ub.squeeze(0)], dim=-1)
         # one of them is sufficient.
         global_lb, ret = model.build(
-            domain, x, stop_criterion_func=stop_func, decision_thresh=rhs, vnnlib_ori=vnnlib)
+            domain, x, stop_criterion_func=stop_func, decision_thresh=rhs, vnnlib_ori=vnnlib,
+            interm_bounds=interm_bounds)
+
+        if arguments.Config['general']['return_optimized_model']:
+            return model
 
         if c_transposed:
             # transpose back to get ready for general verified condition check and final outputs
@@ -159,6 +199,20 @@ class ABCROWN:
 
         ret.update({'model': model, 'global_lb': global_lb, 'alpha': saved_alphas})
 
+        if tighten_input_bounds:
+            perturbed_root = None
+            for root in model.net.roots():
+                if hasattr(root, 'perturbation') and root.perturbation is not None:
+                    assert perturbed_root is None, (
+                        'BaB based on tightened bounds currently supports only one input layer'
+                    )
+                    perturbed_root = root
+            assert perturbed_root is not None
+            ret['tightened_input_bounds'] = [
+                perturbed_root.perturbation.x_L.detach(),
+                perturbed_root.perturbation.x_U.detach(),
+            ]
+
         return 'unknown', ret
 
     def bab(self, data_lb, data_ub, c, rhs,
@@ -167,19 +221,15 @@ class ABCROWN:
             reference_alphas=None, attack_images=None, cplex_processes=None,
             activation_opt_params=None, reference_lA=None,
             model_incomplete=None, refined_betas=None,
-            create_model=True, model=None, return_domains=False):
-        # This will use the refined bounds if the complete verifier is "bab-refine".
+            create_model=True, model=None, return_domains=False,
+            max_iterations=None):
+        # This will use the refined bounds if the complete verifier is 'bab-refine'.
         # FIXME do not repeatedly create LiRPANet which creates a new BoundedModule each time.
 
         # Save these arguments in case that they need to retrieved the next time
         # this function is called.
         self.data_lb, self.data_ub, self.c, self.rhs = data_lb, data_ub, c, rhs
         self.data, self.targets, self.vnnlib = data, targets, vnnlib
-
-        rhs_offset = arguments.Config['specification']['rhs_offset']
-        if rhs_offset is not None:
-            print('Add an offset to RHS for debugging:', rhs_offset)
-            rhs = rhs + rhs_offset
 
         # if using input split, transpose C if there are multiple specs with shared input,
         # to improve efficiency when calling the incomplete verifier later
@@ -233,17 +283,21 @@ class ABCROWN:
         self.domain = torch.stack([data_lb.squeeze(0), data_ub.squeeze(0)], dim=-1)
         if arguments.Config['bab']['branching']['input_split']['enable']:
             result = input_bab_parallel(
-                self.model, self.domain, x, rhs=rhs, timeout=timeout,
+                self.model, self.domain, x, rhs=rhs,
+                timeout=timeout, max_iterations=max_iterations,
                 vnnlib=vnnlib, c_transposed=c_transposed,
                 return_domains=return_domains)
+            if return_domains:
+                return result
         else:
-            assert not return_domains
+            assert not return_domains, 'return_domains is only for input split for now'
             result = general_bab(
                 self.model, self.domain, x,
                 refined_lower_bounds=lower_bounds, refined_upper_bounds=upper_bounds,
                 activation_opt_params=activation_opt_params, reference_lA=reference_lA,
                 reference_alphas=reference_alphas, attack_images=attack_images,
-                timeout=timeout, refined_betas=refined_betas, rhs=rhs,
+                timeout=timeout, max_iterations=max_iterations,
+                refined_betas=refined_betas, rhs=rhs,
                 model_incomplete=model_incomplete, time_stamp=time_stamp)
 
         min_lb = result[0]
@@ -313,6 +367,13 @@ class ABCROWN:
                 data_max = x_range.select(-1, 1).reshape(vnnlib_shape)
                 x = x_range.mean(-1).reshape(vnnlib_shape)  # only the shape of x is important.
                 data_dict = None
+            if 'tightened_input_bounds' in results:
+                assert (
+                    results['tightened_input_bounds'][0][property_idx:property_idx+1].shape
+                    == data_min.shape
+                )
+                data_min = results['tightened_input_bounds'][0][property_idx:property_idx+1]
+                data_max = results['tightened_input_bounds'][1][property_idx:property_idx+1]
 
             target_label_arrays = list(properties[1])  # properties[1]: (c, rhs, y, pidx)
             assert len(target_label_arrays) == 1
@@ -343,8 +404,12 @@ class ABCROWN:
                     reference_alphas_cp, lower_bounds, upper_bounds,
                     reference_alphas, lA, property_idx, c, rhs)
                 lA_trim, rhs = ret_trim['lA'], ret_trim['rhs']
+                trimmed_lower_bounds = ret_trim['lower_bounds']
+                trimmed_upper_bounds = ret_trim['upper_bounds']
             else:
                 lA_trim = lA.copy() if lA is not None else lA
+                trimmed_lower_bounds = lower_bounds
+                trimmed_upper_bounds = upper_bounds
 
             print(f'##### Instance {index} first 10 spec matrices: ')
             print(f'{c[:10]}\nthresholds: {rhs.flatten()[:10]} ######')
@@ -369,7 +434,7 @@ class ABCROWN:
                 if len(init_global_lb) > 1:  # if batch == 1, there is no need to filter here.
                     # Reuse results from incomplete results, or from refined MIPs.
                     # skip the prop that already verified
-                    rlb = lower_bounds[final_name]
+                    rlb = trimmed_lower_bounds[final_name]
                     # The following flatten is dangerous, each clause in OR only
                     # has one output bound.
                     assert len(rlb.shape) == len(rhs.shape) == 2
@@ -390,15 +455,15 @@ class ABCROWN:
                             f'bounds {rlb[init_failure_idx]} need to verify.')
 
                     (reference_alphas, lA_trim, x, data_min, data_max,
-                    lower_bounds, upper_bounds, c) = prune_by_idx(
+                    trimmed_lower_bounds, trimmed_upper_bounds, c) = prune_by_idx(
                         reference_alphas, init_verified_cond, final_name, lA_trim, x,
                         data_min, data_max, lA is not None,
-                        lower_bounds, upper_bounds, c)
+                        trimmed_lower_bounds, trimmed_upper_bounds, c)
 
                 l, nodes, ret = self.bab(
                     data=x, targets=init_failure_idx, time_stamp=time_stamp,
                     data_ub=data_max, data_lb=data_min, data_dict=data_dict,
-                    lower_bounds=lower_bounds, upper_bounds=upper_bounds,
+                    lower_bounds=trimmed_lower_bounds, upper_bounds=trimmed_upper_bounds,
                     c=c, reference_alphas=reference_alphas, cplex_processes=cplex_processes,
                     activation_opt_params=results.get('activation_opt_params', None),
                     refined_betas=results.get('refined_betas', None), rhs=rhs[0:1],
@@ -436,7 +501,15 @@ class ABCROWN:
         else:
             return 'safe'
 
-    def main(self):
+    def attack(self, model_ori, x, vnnlib, verified_status, verified_success):
+        if arguments.Config['model']['with_jacobian']:
+            print('Using BoundedModule for attack for this model with JacobianOP')
+            model = LiRPANet(model_ori, in_size=x.shape).net
+        else:
+            model = model_ori
+        return attack(model, x, vnnlib, verified_status, verified_success)
+
+    def main(self, interm_bounds=None):
         print(f'Experiments at {time.ctime()} on {socket.gethostname()}')
         torch.manual_seed(arguments.Config['general']['seed'])
         random.seed(arguments.Config['general']['seed'])
@@ -461,22 +534,25 @@ class ABCROWN:
         select_instance = arguments.Config['data']['select_instance']
         (run_mode, save_path, file_root, example_idx_list, model_ori,
         vnnlib_all, shape) = parse_run_mode()
-        logger = Logger(run_mode, save_path, timeout_threshold)
+        self.logger = Logger(run_mode, save_path, timeout_threshold)
 
+        if arguments.Config['general']['return_optimized_model']:
+            assert len(example_idx_list) == 1, (
+                'To return the optimized model, only one instance can be processed'
+            )
         for new_idx, csv_item in enumerate(example_idx_list):
             arguments.Globals['example_idx'] = new_idx
             vnnlib_id = new_idx + arguments.Config['data']['start']
             # Select some instances to verify
             if select_instance and not vnnlib_id in select_instance:
                 continue
-            logger.record_start_time()
+            self.logger.record_start_time()
 
             print(f'\n {"%"*35} idx: {new_idx}, vnnlib ID: {vnnlib_id} {"%"*35}')
             if arguments.Config['general']['save_output']:
                 arguments.Globals['out']['idx'] = new_idx   # saved for test
 
             if run_mode != 'customized_data':
-                # FIXME Don't write arguments.Config['bab']['timeout']!
                 if len(csv_item) == 3:
                     # model, vnnlib, timeout
                     model_ori, shape, vnnlib, onnx_path = load_model_and_vnnlib(
@@ -506,13 +582,13 @@ class ABCROWN:
                 print(f'Overriding timeout: {new_timeout}')
                 bab_args['timeout'] = new_timeout
             timeout_threshold = bab_args['timeout']
-            logger.update_timeout(timeout_threshold)
+            self.logger.update_timeout(timeout_threshold)
 
             if arguments.Config['general']['complete_verifier'].startswith('Customized'):
                 res = eval(  # pylint: disable=eval-used
-                            arguments.Config['general']['complete_verifier']
-                            )(model_ori, vnnlib, os.path.join(file_root, onnx_path))
-                logger.summarize_results(res, new_idx)
+                    arguments.Config['general']['complete_verifier']
+                )(model_ori, vnnlib, os.path.join(file_root, onnx_path))
+                self.logger.summarize_results(res, new_idx)
                 continue
 
             model_ori.eval()
@@ -531,12 +607,17 @@ class ABCROWN:
                 x = x_range.mean(-1).reshape(vnnlib_shape)  # only the shape of x is important.
             adhoc_tuning(data_min, data_max, model_ori)
 
+            rhs_offset = arguments.Config['specification']['rhs_offset']
+            if rhs_offset is not None:
+                vnnlib = add_rhs_offset(vnnlib, rhs_offset)
+
             model_ori = model_ori.to(device)
             x, data_max, data_min = x.to(device), data_max.to(device), data_min.to(device)
             verified_status, verified_success = 'unknown', False
 
             if arguments.Config['attack']['pgd_order'] == 'before':
-                verified_status, verified_success, _, attack_margins, all_adv_candidates = attack(
+                (verified_status, verified_success, _,
+                 attack_margins, all_adv_candidates) = self.attack(
                     model_ori, x, vnnlib, verified_status, verified_success)
             else:
                 attack_margins = all_adv_candidates = None
@@ -554,13 +635,25 @@ class ABCROWN:
             if (not verified_success and (
                     arguments.Config['general']['enable_incomplete_verification']
                     or arguments.Config['general']['complete_verifier'] == 'bab-refine')):
-                verified_status, ret = self.incomplete_verifier(
-                    model_ori, x, data_ub=data_max, data_lb=data_min, vnnlib=vnnlib)
+                incomplete_verification_output = self.incomplete_verifier(
+                    model_ori,
+                    x,
+                    data_ub=data_max,
+                    data_lb=data_min,
+                    vnnlib=vnnlib,
+                    interm_bounds=interm_bounds
+                )
+                if arguments.Config['general']['return_optimized_model']:
+                    return incomplete_verification_output
+                else:
+                    verified_status, ret = incomplete_verification_output
+
                 verified_success = verified_status != 'unknown'
                 model_incomplete = ret.get('model', None)
 
             if not verified_success and arguments.Config['attack']['pgd_order'] == 'after':
-                verified_status, verified_success, _, attack_margins, all_adv_candidates = attack(
+                (verified_status, verified_success, _,
+                 attack_margins, all_adv_candidates) = self.attack(
                     model_ori, x, vnnlib, verified_status, verified_success)
 
             # MIP or MIP refined bounds.
@@ -590,8 +683,8 @@ class ABCROWN:
                 batched_vnnlib = batch_vnnlib(vnnlib)  # [x, [(c, rhs, y, pidx)]] in batch-wise
                 verified_status = self.complete_verifier(
                     model_ori, model_incomplete, vnnlib, batched_vnnlib, vnnlib_shape,
-                    new_idx, bab_ret=logger.bab_ret, cplex_processes=cplex_processes,
-                    timeout_threshold=timeout_threshold - (time.time() - logger.start_time),
+                    new_idx, bab_ret=self.logger.bab_ret, cplex_processes=cplex_processes,
+                    timeout_threshold=timeout_threshold - (time.time() - self.logger.start_time),
                     attack_images=all_adv_candidates,
                     attack_margins=attack_margins, results=ret)
 
@@ -602,9 +695,10 @@ class ABCROWN:
             del ret
 
             # Summarize results.
-            logger.summarize_results(verified_status, new_idx)
+            self.logger.summarize_results(verified_status, new_idx)
 
-        logger.finish()
+        self.logger.finish()
+        return self.logger.verification_summary
 
 
 if __name__ == '__main__':

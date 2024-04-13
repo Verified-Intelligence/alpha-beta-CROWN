@@ -1,3 +1,17 @@
+#########################################################################
+##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
+##                                                                     ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##                                                                     ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##                                                                     ##
+##     This program is licensed under the BSD 3-Clause License,        ##
+##        contained in the LICENCE file in this directory.             ##
+##                                                                     ##
+#########################################################################
 import arguments
 
 from typing import TYPE_CHECKING
@@ -5,15 +19,11 @@ if TYPE_CHECKING:
     from beta_CROWN_solver import LiRPANet
 
 
-def set_beta(self: 'LiRPANet', d, beta, batch, bias=True):
-    if not beta:
-        for m in self.net.splittable_activations:
-            m.beta = None
-        return
-
+def set_beta(self: 'LiRPANet', d, bias=True):
     # count how many split nodes in each batch example (batch, num of layers)
     splits_per_example = []
     max_splits_per_layer = {}
+    batch = len(d['history'])
     for bi in range(batch):
         splits_per_example.append({})
         for k, v in d['history'][bi].items():

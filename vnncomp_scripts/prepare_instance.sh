@@ -2,6 +2,7 @@
 
 TOOL_NAME=alpha-beta-CROWN
 VERSION_STRING=v1
+
 if [[ -z "${VNNCOMP_PYTHON_PATH}" ]]; then
 	VNNCOMP_PYTHON_PATH=/home/ubuntu/miniconda/envs/alpha-beta-crown/bin
 	VNNCOMP_PYTHON_LEGACY_PATH=/home/ubuntu/miniconda/envs/alpha-beta-crown-2022/bin

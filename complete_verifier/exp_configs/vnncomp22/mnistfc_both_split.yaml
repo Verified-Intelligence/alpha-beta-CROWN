@@ -30,9 +30,10 @@ bab:
     branching_input_iterations: 2
     branching_relu_iterations: 2
     method: intercept  # For relu split. For input split, smart branching is always used.
-    sb_coeff_thresh: 0.01
     candidates: 5
     reduceop: max
+    input_split:
+      sb_coeff_thresh: 0.01
 attack:
   attack_mode: diversed_PGD
   pgd_restarts: 100

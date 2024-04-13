@@ -12,6 +12,15 @@
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
+"""
+Prepare for a new attack framework.
+
+This file currently duplicates attack_pgd.py. @ZhuoxuanZhangHarry is working
+working on merging the new attack into this file. Please update the comments
+after the merge is done.
+
+After the new attack is thoroughly tested, the old attack will be removed.
+"""
 
 import math
 import time
@@ -1218,16 +1227,14 @@ def attack_with_general_specs(model, x, data_min, data_max,
     device = x.device
 
     alpha = arguments.Config["attack"]["pgd_alpha"]
-    alpha_scale = arguments.Config["attack"]["pgd_alpha_scale"]
-    if alpha_scale:
-        alpha = (data_max - data_min) * float(alpha)
+    if alpha == 'auto':
+        max_eps = torch.max(data_max - data_min).item()/2
+        alpha = max_eps/4
+    elif alpha == 'auto-scaled':
+        alpha = (data_max - data_min) / 4
         use_adam = False
     else:
-        if alpha == 'auto':
-            max_eps = torch.max(data_max - data_min).item()/2
-            alpha = max_eps / 4
-        else:
-            alpha = float(alpha)
+        alpha = float(alpha)
 
     print(f'Attack parameters: initialization={initialization}, steps={arguments.Config["attack"]["pgd_steps"]}, restarts={arguments.Config["attack"]["pgd_restarts"]}, alpha={alpha}, initialization={initialization}, GAMA={GAMA_loss}')
 

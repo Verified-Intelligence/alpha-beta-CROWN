@@ -1,14 +1,14 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021-2022, Huan Zhang <huan@huan-zhang.com>           ##
-##                     Kaidi Xu, Zhouxing Shi, Shiqi Wang              ##
-##                     Linyi Li, Jinqi (Kathryn) Chen                  ##
-##                     Zhuolin Yang, Yihan Wang                        ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
 ##                                                                     ##
-##      See CONTRIBUTORS for author contacts and affiliations.         ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
-##     This program is licenced under the BSD 3-Clause License,        ##
+##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
@@ -17,6 +17,7 @@
 import time
 import torch
 import math
+import sys
 
 import arguments
 from auto_LiRPA.utils import stop_criterion_batch_any, stop_criterion_all
@@ -24,7 +25,7 @@ from input_split.branching_domains import UnsortedInputDomainList
 from input_split.attack import (massive_pgd_attack, check_adv,
                                 attack_in_input_bab_parallel,
                                 update_rhs_with_attack)
-from input_split.old_branching_heuristics import input_split_branching
+from input_split.branching_heuristics import input_split_branching
 from input_split.split import input_split_parallel, get_split_depth
 
 Visited, Solve_alpha, storage_depth = 0, False, 0
@@ -97,7 +98,7 @@ def batch_verification_input_split(
         f"decision: {decision_time:.4f}  bounding: {bounding_time:.4f} "
         f"add_domain: {adddomain_time:.4f}"
     )
-    print("length of domains:", len(d))
+    print("Length of domains:", len(d))
 
     Visited += len(new_x_L)
     print(f"{Visited} branch and bound domains visited")
@@ -116,13 +117,16 @@ def batch_verification_input_split(
         print(f'Current (lb-rhs): {global_lb}')
     else:
         print(f'Current (lb-rhs): {global_lb.max().item()}')
+    if input_split_args['show_progress']:
+        print(f'Progress: {d.get_progess():.10f}')
+    sys.stdout.flush()
 
     return global_lb
 
 
 def input_bab_parallel(net, init_domain, x, rhs=None,
-                       timeout=None, vnnlib=None, c_transposed=False,
-                       return_domains=False):
+                       timeout=None, max_iterations=None,
+                       vnnlib=None, c_transposed=False, return_domains=False):
     """Run input split bab.
 
     c_transposed: bool, by default False, indicating whether net.c matrix has
@@ -140,20 +144,23 @@ def input_bab_parallel(net, init_domain, x, rhs=None,
     # All supported arguments.
     global Visited, all_node_split
 
-    timeout = timeout or arguments.Config["bab"]["timeout"]
+    bab_args = arguments.Config["bab"]
+    branching_args = bab_args["branching"]
+    input_split_args = branching_args["input_split"]
+
+    timeout = timeout or bab_args["timeout"]
     batch = arguments.Config["solver"]["batch_size"]
     auto_enlarge_batch_size = arguments.Config["solver"]["auto_enlarge_batch_size"]
     bounding_method = arguments.Config["solver"]["bound_prop_method"]
     init_bounding_method = arguments.Config["solver"]["init_bound_prop_method"]
-    branching_args = arguments.Config["bab"]["branching"]
-    input_split_args = branching_args["input_split"]
+    max_iterations = max_iterations or bab_args['max_iterations']
+    sort_domain_iter = bab_args["sort_domain_interval"]
     branching_method = branching_args['method']
     adv_check = input_split_args['adv_check']
     split_partitions = input_split_args['split_partitions']
     catch_assertion = input_split_args['catch_assertion']
-    sort_domain_iter = arguments.Config["bab"]["sort_domain_interval"]
 
-    if net.device is not 'cpu' and auto_enlarge_batch_size:
+    if net.device != 'cpu' and auto_enlarge_batch_size:
         total_vram = torch.cuda.get_device_properties(net.device).total_memory
 
     if init_bounding_method == "same":
@@ -211,7 +218,10 @@ def input_bab_parallel(net, init_domain, x, rhs=None,
     )
     max_depth = max(int(math.log(max(min_batch_size, 1)) // math.log(split_partitions)), 1)
     storage_depth = min(max_depth, dm_l.shape[-1])
-    domains = UnsortedInputDomainList(storage_depth, use_alpha=use_alpha)
+    domains = UnsortedInputDomainList(
+        storage_depth, use_alpha=use_alpha,
+        sort_index=input_split_args['sort_index'],
+        sort_descending=input_split_args['sort_descending'])
 
     initial_verified, remaining_index = initial_verify_criterion(global_lb, rhs)
     if initial_verified:
@@ -229,7 +239,8 @@ def input_bab_parallel(net, init_domain, x, rhs=None,
 
     num_iter = 1
     enhanced_bound_initialized = False
-    while result == "unknown" and len(domains) > 0:
+    while (result == "unknown" and len(domains) > 0
+           and (max_iterations == -1 or num_iter <= max_iterations)):
         print(f'Iteration {num_iter}')
         # sort the domains every certain number of iterations
         if sort_domain_iter > 0 and num_iter % sort_domain_iter == 0:
@@ -263,6 +274,9 @@ def input_bab_parallel(net, init_domain, x, rhs=None,
                       f'batch_size increase to {batch}')
 
         batch_ = batch
+        if branching_method == 'brute-force' and num_iter <= input_split_args['bf_iters']:
+            batch_ = input_split_args['bf_batch_size']
+
         print('Batch size:', batch_)
         try:
             global_lb = batch_verification_input_split(
@@ -334,7 +348,16 @@ def input_bab_parallel(net, init_domain, x, rhs=None,
         result = "safe"
 
     if return_domains:
-        return global_lb.max(), Visited, result, domains
+        # Thresholds may have been updated by PGD attack so that different
+        # domains may have different thresholds. Restore thresholds to the
+        # default RHS for the sorting.
+        domains.threshold._storage.data[:] = rhs
+        domains.sort()
+        if return_domains == -1:
+            return_domains = len(domains)
+        lower_bound, x_L, x_U = domains.pick_out_batch(
+            return_domains, device='cpu')[1:4]
+        return lower_bound, x_L, x_U
     else:
         del domains
         return global_lb.max(), Visited, result

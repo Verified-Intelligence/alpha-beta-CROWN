@@ -15,9 +15,9 @@ bab:
   initial_max_domains: 1000
   branching:
     method: sb  # Split on input space.
-    sb_coeff_thresh: 0.1
     input_split:
       enable: True
       adv_check: .inf
+      sb_coeff_thresh: 0.1
 attack:
   pgd_order: input_bab

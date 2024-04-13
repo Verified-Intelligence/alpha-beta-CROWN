@@ -11,6 +11,8 @@ solver:
     lr_alpha: 0.03
     lr_beta: 0.08
     all_node_split_LP: True
+  mip:
+    parallel_solvers: 8
 bab:
   branching:
     method: kfsb  # Split on input space.

@@ -1,14 +1,14 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021-2022, Huan Zhang <huan@huan-zhang.com>           ##
-##                     Kaidi Xu, Zhouxing Shi, Shiqi Wang              ##
-##                     Linyi Li, Jinqi (Kathryn) Chen                  ##
-##                     Zhuolin Yang, Yihan Wang                        ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
 ##                                                                     ##
-##      See CONTRIBUTORS for author contacts and affiliations.         ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
-##     This program is licenced under the BSD 3-Clause License,        ##
+##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
@@ -51,6 +51,7 @@ def precompile_jit_kernels():
     c = torch.eye(num_outputs).type_as(data)[labels].unsqueeze(1) - torch.eye(num_outputs).type_as(data).unsqueeze(0)
     I = (~(labels.data.unsqueeze(1) == torch.arange(num_outputs).type_as(labels.data).unsqueeze(0)))
     c = (c[I].view(data.size(0), num_outputs - 1, num_outputs))
+    # TODO We should use a BoundedModule instead. See https://github.com/Verified-Intelligence/Verifier_Development/pull/248#discussion_r1376529149
     model = LiRPANet(model_ori, in_size=data.shape, c=c)
 
     data_lb = torch.tensor([[-2.5, -2.5, 0.]], device=device)
@@ -60,6 +61,8 @@ def precompile_jit_kernels():
 
     lb, ub, aux = model.net.init_alpha((x, ), share_alphas=True, c=c, bound_upper=False)
     model.net.set_bound_opts({'optimize_bound_args': {'iteration': 2, 'use_float64_in_last_iteration': False}})
+    # Output constraints might be activated for use on the real model. But for this toy model it must not be used, as the settings won't fit
+    model.net.set_bound_opts({'optimize_bound_args': {'apply_output_constraints_to': []}})
     ret = model.net.compute_bounds(x=(x,), method='CROWN-Optimized', C=c, bound_upper=False)
 
     del data, c, data_lb, data_ub, ptb, x, lb, ub, aux

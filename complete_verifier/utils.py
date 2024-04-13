@@ -1,14 +1,14 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-## Copyright (C) 2021-2022, Huan Zhang <huan@huan-zhang.com>           ##
-##                     Kaidi Xu, Zhouxing Shi, Shiqi Wang              ##
-##                     Linyi Li, Jinqi (Kathryn) Chen                  ##
-##                     Zhuolin Yang, Yihan Wang                        ##
+##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
+##                     Kaidi Xu <kx46@drexel.edu>                      ##
 ##                                                                     ##
-##      See CONTRIBUTORS for author contacts and affiliations.         ##
+##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
-##     This program is licenced under the BSD 3-Clause License,        ##
+##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
@@ -238,7 +238,7 @@ def fast_hist_copy(hists):
     return ret
 
 
-def print_splitting_decisions(net, d, split_depth, split):
+def print_splitting_decisions(net, d, split_depth, split, verbose=False):
     """Print the first two split for first 10 domains."""
     print('splitting decisions: ')
     branching_decision = split['decision']
@@ -248,9 +248,26 @@ def print_splitting_decisions(net, d, split_depth, split):
         for b in range(min(10, batch)):
             decision = branching_decision[l*batch + b]
             print(f'[{net.split_nodes[decision[0]].name}, {decision[1]}]',
-                end=' ')
+                  end=' ')
         print('')
-
+        if verbose:
+            if 'points' in split and split['points'] is not None:
+                print('Branching points:')
+                for b in range(min(50, batch)):
+                    idx = l * batch + b
+                    decision = branching_decision[l*batch + b]
+                    node = net.split_nodes[decision[0]]
+                    print('[{:.4f}, {:.4f}]'.format(
+                        d['lower_bounds'][node.name][idx].view(-1)[decision[1]],
+                        d['upper_bounds'][node.name][idx].view(-1)[decision[1]]),
+                        end=' ')
+                    print('branched at', end=' ')
+                    if split['points'].ndim == 1:
+                        print('{:.4f}'.format(split['points'][idx]))
+                    else:
+                        for i in range(split['points'].shape[-1]):
+                            print('{:.4f}'.format(split['points'][idx][i]), end=' ')
+                        print()
 
 def print_average_branching_neurons(branching_decision, impl_stats, impl_params=None):
     """Print and store the average branched neurons at each iteration."""
@@ -268,9 +285,9 @@ def print_average_branching_neurons(branching_decision, impl_stats, impl_params=
 
     impl_stats['average_branched_neurons'].append(average_branched_neurons)
     cur_step = len(impl_stats['average_branched_neurons'])
-
-    print(f'Average branched neurons at iteration {cur_step}: '
-          f'{average_branched_neurons: .4f}')
+    if impl_params:
+        print(f'Average branched neurons at iteration {cur_step}: '
+              f'{average_branched_neurons: .4f}')
 
 
 def check_infeasible_bounds(lower, upper, reduce=False):
@@ -351,8 +368,9 @@ def get_unstable_neurons(updated_mask):
 
 
 def expand_path(path):
-    return Template(path).substitute(
-        CONFIG_PATH=os.path.dirname(arguments.Config.file))
+    dirname = os.path.dirname(arguments.Config.file)
+    config_path = '.' if dirname == '' else dirname
+    return Template(path).substitute(CONFIG_PATH=config_path)
 
 
 def print_model(model):
