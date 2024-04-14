@@ -21,7 +21,6 @@ import arguments
 
 from tensor_storage import TensorStorage
 from utils import fast_hist_copy, check_infeasible_bounds
-from cuts.implied_cuts import pick_out_implied
 
 
 class AbstractDomainList():
@@ -362,9 +361,7 @@ class BatchedDomainList(AbstractDomainList):
             upper_bounds[k] = self.static_ub[k][:batch].clone()
 
         if impl_params is not None:
-            pick_out_implied(impl_params, histories, lower_bounds, upper_bounds,
-                             lb_row_selector, lb_col_selector,
-                             ub_row_selector, ub_col_selector)
+            pass
         else:
             # TODO merge the two loops
             for i in self.static_lb:

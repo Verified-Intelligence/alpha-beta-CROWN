@@ -27,7 +27,6 @@ from input_split.input_split_on_relu_domains import input_split_on_relu_domains,
 from lp_mip_solver import batch_verification_all_node_split_LP
 from cuts.cut_verification import cut_verification, get_impl_params
 from cuts.cut_utils import fetch_cut_from_cplex, clean_net_mps_process, cplex_update_general_beta
-from cuts.implied_cuts import print_impl_stats
 from utils import (print_splitting_decisions, print_average_branching_neurons,
                    Stats, get_unstable_neurons)
 from prune import prune_alphas
@@ -182,9 +181,6 @@ def act_split_round(domains, net, batch, iter_idx, stats=None, impl_params=None,
     else:
         print(f'Current (lb-rhs): {global_lb.max().item()}')
     print(f'{stats.visited} domains visited')
-
-    if impl_params:
-        print_impl_stats(stats, global_lb)
 
     return global_lb
 

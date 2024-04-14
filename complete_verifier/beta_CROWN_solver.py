@@ -32,7 +32,6 @@ from utils import Timer
 from load_model import Customized
 from prune import PruneAfterCROWN
 from domain_updater import (DomainUpdater, DomainUpdaterSimple)
-from cuts.implied_cuts import DomainUpdaterImpliedCuts
 from heuristics.nonlinear import precompute_A
 
 
@@ -777,9 +776,7 @@ class LiRPANet:
         _, num_split = DomainUpdater.get_num_domain_and_split(
             d, split, self.final_name)
         args = (self.root, self.final_name, self.net.split_nodes)
-        if impl_params is not None:
-            domain_updater = DomainUpdaterImpliedCuts(*args, impl_params)
-        elif num_split == 1 and (split.get('points', None) is None
+        if num_split == 1 and (split.get('points', None) is None
                                  or split['points'].ndim == 1):
             domain_updater = DomainUpdaterSimple(*args)
         else:
