@@ -40,7 +40,7 @@ Supported Features
 Our verifier consists of the following core algorithms:
 
 * **β-CROWN** ([Wang et al. 2021](https://arxiv.org/pdf/2103.06624.pdf)): complete verification with **CROWN** ([Zhang et al. 2018](https://arxiv.org/pdf/1811.00866.pdf)) and branch and bound for ReLU.
-* **CROWN-BaB** ([Shi et al. 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)): Branch and bound for general nonlinear functions.
+* **GenBaB** ([Shi et al. 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)): Branch and bound for general nonlinear functions.
 * **α-CROWN** ([Xu et al., 2021](https://arxiv.org/pdf/2011.13824.pdf)): incomplete verification with optimized CROWN bound.
 * **GCP-CROWN** ([Zhang et al. 2022](https://arxiv.org/pdf/2208.05740.pdf)): CROWN-like bound propagation with general cutting plane constraints.
 * **BaB-Attack** ([Zhang et al. 2022](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf)): Branch and bound based adversarial attack for tackling hard instances.
@@ -171,7 +171,7 @@ if you use our branch-and-bound based adversarial attack (falsifier).
 
 * **GCP-CROWN** ([Zhang et al., NeurIPS 2022](https://arxiv.org/pdf/2208.05740.pdf)) enables the use of general cutting planes methods for neural network verification in a GPU-accelerated and very efficient bound propagation framework. Cutting planes can significantly strengthen bound tightness.
 
-* **CROWN-BaB** ([Shi et al., WFVML 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)) enables branch-and-bound based verification for non-ReLU and general nonlinear functions, achieving significant improvements on verifying neural networks with non-ReLU activation functions such as Transformer and LSTM networks, and models that consist of neural networks and additional nonlinear operations such as [ML for AC Optimal Power Flow](https://github.com/AI4OPT/ml4acopf_benchmark).
+* **GenBaB** ([Shi et al., WFVML 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)) enables branch-and-bound based verification for non-ReLU and general nonlinear functions, achieving significant improvements on verifying neural networks with non-ReLU activation functions such as Transformer and LSTM networks, and models that consist of neural networks and additional nonlinear operations such as [ML for AC Optimal Power Flow](https://github.com/AI4OPT/ml4acopf_benchmark).
 
 * **INVPROP** ([Kotha et al., NeurIPS 2023](https://arxiv.org/pdf/2302.01404.pdf)) handles constraints on the outputs of neural networks which enables tight and provable bounds on the preimage of a neural network. We demonstrated several applications, including OOD detection, backward reachability analysis for NN-controlled systems, and tightening bounds for robustness verification.
 
