@@ -12,23 +12,24 @@ networks (e.g., millions of parameters). It also supports a wide range of
 neural network architectures (e.g., **CNN**, **ResNet**, and various activation
 functions), thanks to the versatile
 **[auto\_LiRPA](http://github.com/Verified-Intelligence/auto_LiRPA) library developed by us**.
-α,β-CROWN can provide **provable robustness guarantees against adversarial
-attacks** and can also verify other general properties of neural networks.
+α,β-CROWN can provide provable robustness guarantees against adversarial
+attacks and can also verify other general properties of neural networks,
+such as [Lyapunov stability](https://arxiv.org/pdf/2404.07956) in control.
 
 α,β-CROWN is the **winning verifier** in [VNN-COMP
 2021](https://sites.google.com/view/vnn2021), [VNN-COMP
 2022](https://sites.google.com/view/vnn2022), and [VNN-COMP
 2023](https://sites.google.com/view/vnn2023) (International Verification of
 Neural Networks Competition) with the highest total score, outperforming many
-other neural network verifiers on a wide range of benchmarks over 2 years.
+other neural network verifiers on a wide range of benchmarks over 3 years.
 Details of competition results can be found in [VNN-COMP 2021
 slides](https://docs.google.com/presentation/d/1oM3NqqU03EUqgQVc3bGK2ENgHa57u-W6Q63Vflkv000/edit#slide=id.ge4496ad360_14_21),
 [report](https://arxiv.org/abs/2109.00498), [VNN-COMP 2022 report](https://arxiv.org/pdf/2212.10376.pdf),
 [VNN-COMP 2023 slides](https://github.com/ChristopherBrix/vnncomp2023_results/blob/main/SCORING/slides.pdf) and [report](https://arxiv.org/abs/2312.16760).
 
-α,β-CROWN combines our efforts in neural network verification in **a series of
-papers building up the bound propagation framework** during the past five
-years. See the [Publications](#publications) section below.
+The α,β-CROWN team is created and led by Prof. [Huan Zhang](https://huan-zhang.com/) at UIUC with contributions from multiple institutions. See the **list of contributors** [below](#developers-and-copyright).
+α,β-CROWN combines our efforts in neural network verification in a series of
+papers building up the bound propagation framework since 2018. See [Publications](#publications) below.
 
 Supported Features
 ----------------------
@@ -39,15 +40,16 @@ Supported Features
 
 Our verifier consists of the following core algorithms:
 
-* **β-CROWN** ([Wang et al. 2021](https://arxiv.org/pdf/2103.06624.pdf)): complete verification with **CROWN** ([Zhang et al. 2018](https://arxiv.org/pdf/1811.00866.pdf)) and branch and bound for ReLU.
-* **GenBaB** ([Shi et al. 2024](https://arxiv.org/pdf/2405.21063.pdf)): Branch and bound for general nonlinear functions.
-* **α-CROWN** ([Xu et al., 2021](https://arxiv.org/pdf/2011.13824.pdf)): incomplete verification with optimized CROWN bound.
+* **CROWN** ([Zhang et al. 2018](https://arxiv.org/pdf/1811.00866.pdf)): the basic linear bound propagation framework for neural networks.
+* **α-CROWN** ([Xu et al., 2021](https://arxiv.org/pdf/2011.13824.pdf)): incomplete verification with gradient optimized bound propagation.
+* **β-CROWN** ([Wang et al. 2021](https://arxiv.org/pdf/2103.06624.pdf)): complete verification with bound propagation and branch and bound for ReLU networks.
+* **GenBaB** ([Shi et al. 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)): Branch and bound for general nonlinear functions.
 * **GCP-CROWN** ([Zhang et al. 2022](https://arxiv.org/pdf/2208.05740.pdf)): CROWN-like bound propagation with general cutting plane constraints.
 * **BaB-Attack** ([Zhang et al. 2022](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf)): Branch and bound based adversarial attack for tackling hard instances.
 * **MIP** ([Tjeng et al., 2017](https://arxiv.org/pdf/1711.07356.pdf)): mixed integer programming (slow but can be useful on small models).
 * **INVPROP** ([Kotha et al. 2023](https://arxiv.org/pdf/2302.01404.pdf)): tightens bounds with constraints on model outputs, and computes provable preimages for neural networks.
 
-Based on **auto_LiRPA** ([Xu et al., 2020](https://arxiv.org/pdf/2002.12920.pdf)) for general computational graphs, we support these neural network architectures:
+The bound propagation engine in α,β-CROWN is implemented as a separate library, [auto_LiRPA](https://github.com/Verified-Intelligence/auto_LiRPA), for computing symbolic bounds for general computational graphs. We support these neural network architectures:
 
 * Layers: fully connected (FC), convolutional (CNN), pooling (average pool and max pool), transposed convolution
 * Activation functions or nonlinear functions: ReLU, sigmoid, tanh, arctan, sin, cos, tan, gelu, pow, multiplication and self-attention
@@ -56,7 +58,7 @@ Based on **auto_LiRPA** ([Xu et al., 2020](https://arxiv.org/pdf/2002.12920.pdf)
 We support the following verification specifications:
 
 * Lp norm perturbation (p=1,2,infinity, as often used in robustness verification)
-* VNNLIB format input (at most two layers of AND/OR clause, as used in VNN-COMP 2021 and 2022)
+* VNNLIB format input (at most two layers of AND/OR clause, as used in VNN-COMP)
 * Any linear specifications on neural network output (which can be added as a linear layer)
 
 We provide many example configurations in
@@ -64,8 +66,9 @@ We provide many example configurations in
 start with:
 
 * MNIST: MLP and CNN models
-* CIFAR-10, CIFAR-100, TinyImageNet: CNN and ResNet models
-* ACASXu, NN4sys and other low input-dimension models
+* CIFAR-10, CIFAR-100, TinyImageNet: CNN and ResNet models with high dimensional inputs
+* ACASXu, NN4sys, ML4ACOPF and other relatively low-dimensional models
+* Stability verification of NN controllers: [Verified-Intelligence/Lyapunov_Stable_NN_Controllers](https://github.com/Verified-Intelligence/Lyapunov_Stable_NN_Controllers)
 
 See the [Guide on Algorithm
 Selection](/complete_verifier/docs/abcrown_usage.md#guide-on-algorithm-selection)
@@ -74,7 +77,7 @@ to find the most suitable example to get started.
 Installation and Setup
 ----------------------
 
-α,β-CROWN is tested on Python 3.7+ and PyTorch 1.11. It can be installed
+α,β-CROWN is tested on Python 3.11 and PyTorch 2.2.1 (lower versions, including Python 3.7 and PyTorch 1.11, may also work). It can be installed
 easily into a conda environment. If you don't have conda, you can install
 [miniconda](https://docs.conda.io/en/latest/miniconda.html).
 
@@ -93,11 +96,11 @@ conda env create -f complete_verifier/environment.yaml --name alpha-beta-crown
 conda activate alpha-beta-crown
 ```
 
-If you use the α-CROWN and/or β-CROWN verifiers (which covers the most use
-cases), a Gurobi license is *not needed*.  If you want to use MIP based
-verification algorithms (feasible only for small MLP models), you need to
+If you use the CROWN, α-CROWN and/or β-CROWN verifiers (which cover the most use
+cases), a Gurobi license is *not needed*.  If you want to use MIP-based
+verification algorithms (which are feasible only for small models), you need to
 install a Gurobi license with the `grbgetkey` command.  If you don't have
-access to a license, by default the above installation procedure includes a
+access to a license, by default, the above installation procedure includes a
 free and restricted license, which is actually sufficient for many relatively
 small NNs. If you use the GCP-CROWN verifier, an installation of IBM CPlex
 solver is required. Instructions to install the CPlex solver can be found
@@ -143,11 +146,11 @@ et al., 2018](https://arxiv.org/pdf/1811.00866.pdf)),
 **α-CROWN** ([Xu et al.,
 2021](https://arxiv.org/pdf/2011.13824.pdf)),
 **β-CROWN** ([Wang et al.,
-2021](https://arxiv.org/pdf/2103.06624.pdf)),
-**GCP-CROWN** ([Zhang et al.,
-2022](https://arxiv.org/pdf/2208.05740.pdf)),
-and **GenBaB** ([Shi et al.,
-2024](https://arxiv.org/pdf/2405.21063.pdf)).
+2021](https://arxiv.org/pdf/2103.06624.pdf))
+and **GCP-CROWN** ([Zhang et al.,
+2022](https://arxiv.org/pdf/2208.05740.pdf)).
+- **[Shi et al., 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)**,
+if you use branch-and-bound on non-ReLU nonlinearities.
 - **[Kotha et al., 2023](https://arxiv.org/pdf/2302.01404.pdf)** if you use constraints on the outputs of neural networks.
 - **[Salman et al., 2019](https://arxiv.org/pdf/1902.08722)**,
 if your work involves the convex relaxation of the NN verification.
@@ -157,7 +160,7 @@ if you use our branch-and-bound based adversarial attack (falsifier).
 
 α,β-CROWN combines our existing efforts on neural network verification:
 
-* **CROWN** ([Zhang et al. NeurIPS 2018](https://arxiv.org/pdf/1811.00866.pdf)) is a very efficient bound propagation based verification algorithm. CROWN propagates a linear inequality backwards through the network and utilizes linear bounds to relax activation functions.
+* **CROWN** ([Zhang et al. NeurIPS 2018](https://arxiv.org/pdf/1811.00866.pdf)) is a very efficient bound propagation based verification algorithm. CROWN propagates a linear inequality backward through the network and utilizes linear bounds to relax activation functions.
 
 * The **"convex relaxation barrier"** ([Salman et al., NeurIPS 2019](https://arxiv.org/pdf/1902.08722)) paper concludes that optimizing the ReLU relaxation allows CROWN (referred to as a "greedy" primal space solver) to achieve the same solution as linear programming (LP) based verifiers.
 
@@ -165,13 +168,13 @@ if you use our branch-and-bound based adversarial attack (falsifier).
 
 * **α-CROWN** (sometimes referred to as optimized CROWN or optimized LiRPA) is used in the Fast-and-Complete verifier ([Xu et al., ICLR 2021](https://arxiv.org/pdf/2011.13824.pdf)), which jointly optimizes intermediate layer bounds and final layer bounds in CROWN via variable α. α-CROWN typically has greater power than LP since LP cannot cheaply tighten intermediate layer bounds.
 
-* **β-CROWN** ([Wang et al., NeurIPS 2021](https://arxiv.org/pdf/2103.06624.pdf)) incorporates ReLU split constraints in branch and bound (BaB) into the CROWN bound propagation procedure via an additional optimizable parameter β. The combination of efficient and GPU accelerated bound propagation with branch and bound produces a powerful and scalable neural network verifier.
+* **β-CROWN** ([Wang et al., NeurIPS 2021](https://arxiv.org/pdf/2103.06624.pdf)) incorporates ReLU split constraints in branch and bound (BaB) into the CROWN bound propagation procedure via an additional optimizable parameter β. The combination of efficient and GPU-accelerated bound propagation with branch and bound produces a powerful and scalable neural network verifier.
 
 * **BaB-Attack** ([Zhang et al., ICML 2022](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf)) is a strong falsifier (adversarial attack) based on branch and bound, which can find adversarial examples for hard instances where gradient or input-space-search based methods cannot succeed.
 
 * **GCP-CROWN** ([Zhang et al., NeurIPS 2022](https://arxiv.org/pdf/2208.05740.pdf)) enables the use of general cutting planes methods for neural network verification in a GPU-accelerated and very efficient bound propagation framework. Cutting planes can significantly strengthen bound tightness.
 
-* **GenBaB** ([Shi et al., WFVML 2023](https://arxiv.org/pdf/2405.21063.pdf)) enables branch-and-bound based verification for non-ReLU and general nonlinear functions, achieving significant improvements on verifying neural networks with non-ReLU activation functions such as Transformer and LSTM networks, and models that consist of neural networks and additional nonlinear operations such as [ML for AC Optimal Power Flow](https://github.com/AI4OPT/ml4acopf_benchmark).
+* **CROWN-BaB** ([Shi et al., WFVML 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)) enables branch-and-bound based verification for non-ReLU and general nonlinear functions, achieving significant improvements on verifying neural networks with non-ReLU activation functions such as Transformer and LSTM networks, and models that consist of neural networks and additional nonlinear operations such as [ML for AC Optimal Power Flow](https://github.com/AI4OPT/ml4acopf_benchmark).
 
 * **INVPROP** ([Kotha et al., NeurIPS 2023](https://arxiv.org/pdf/2302.01404.pdf)) handles constraints on the outputs of neural networks which enables tight and provable bounds on the preimage of a neural network. We demonstrated several applications, including OOD detection, backward reachability analysis for NN-controlled systems, and tightening bounds for robustness verification.
 
@@ -260,12 +263,12 @@ We provide bibtex entries below:
 Developers and Copyright
 ----------------------
 
-The α,β-CROWN verifier is developed by a team from CMU, UCLA, Drexel University, Columbia University and UIUC:
+The α,β-CROWN verifier is currently being developed by a multi-institutional team:
 
-Team lead:
+**Team lead**:
 * Huan Zhang (huan@huan-zhang.com), UIUC
 
-Current developers:
+**Current developers**:
 * Zhouxing Shi (zshi@cs.ucla.edu), UCLA
 * Christopher Brix (brix@cs.rwth-aachen.de), RWTH Aachen University
 * Kaidi Xu (kx46@drexel.edu), Drexel University
@@ -274,7 +277,7 @@ Current developers:
 * Hao Chen (haoc8@illinois.edu), UIUC
 * Hongji Xu (hx84@duke.edu), Duke University
 
-Past developers:
+**Past developers**:
 * Linyi Li (linyi2@illinois.edu), UIUC
 * Zhuolin Yang (zhuolin5@illinois.edu), UIUC
 * Zhuowen Yuan (realzhuowen@gmail.com), UIUC
