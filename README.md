@@ -43,13 +43,13 @@ Our verifier consists of the following core algorithms:
 * **CROWN** ([Zhang et al. 2018](https://arxiv.org/pdf/1811.00866.pdf)): the basic linear bound propagation framework for neural networks.
 * **α-CROWN** ([Xu et al., 2021](https://arxiv.org/pdf/2011.13824.pdf)): incomplete verification with gradient optimized bound propagation.
 * **β-CROWN** ([Wang et al. 2021](https://arxiv.org/pdf/2103.06624.pdf)): complete verification with bound propagation and branch and bound for ReLU networks.
-* **GenBaB** ([Shi et al. 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)): Branch and bound for general nonlinear functions.
+* **GenBaB** ([Shi et al. 2024](https://arxiv.org/pdf/2405.21063.pdf)): Branch and bound for general nonlinear functions.
 * **GCP-CROWN** ([Zhang et al. 2022](https://arxiv.org/pdf/2208.05740.pdf)): CROWN-like bound propagation with general cutting plane constraints.
 * **BaB-Attack** ([Zhang et al. 2022](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf)): Branch and bound based adversarial attack for tackling hard instances.
 * **MIP** ([Tjeng et al., 2017](https://arxiv.org/pdf/1711.07356.pdf)): mixed integer programming (slow but can be useful on small models).
 * **INVPROP** ([Kotha et al. 2023](https://arxiv.org/pdf/2302.01404.pdf)): tightens bounds with constraints on model outputs, and computes provable preimages for neural networks.
 
-The bound propagation engine in α,β-CROWN is implemented as a separate library, [auto_LiRPA](https://github.com/Verified-Intelligence/auto_LiRPA), for computing symbolic bounds for general computational graphs. We support these neural network architectures:
+The bound propagation engine in α,β-CROWN is implemented as a separate library, **[auto_LiRPA](https://github.com/Verified-Intelligence/auto_LiRPA) ([Xu et al. 2020](https://arxiv.org/pdf/2002.12920.pdf))**, for computing symbolic bounds for general computational graphs. We support these neural network architectures:
 
 * Layers: fully connected (FC), convolutional (CNN), pooling (average pool and max pool), transposed convolution
 * Activation functions or nonlinear functions: ReLU, sigmoid, tanh, arctan, sin, cos, tan, gelu, pow, multiplication and self-attention
@@ -143,14 +143,10 @@ If you use our verifier in your work, **please kindly cite our papers**:
 - **CROWN** ([Zhang
 et al., 2018](https://arxiv.org/pdf/1811.00866.pdf)),
 **auto_LiRPA** ([Xu et al., 2020](https://arxiv.org/pdf/2002.12920.pdf)),
-**α-CROWN** ([Xu et al.,
-2021](https://arxiv.org/pdf/2011.13824.pdf)),
-**β-CROWN** ([Wang et al.,
-2021](https://arxiv.org/pdf/2103.06624.pdf))
-and **GCP-CROWN** ([Zhang et al.,
-2022](https://arxiv.org/pdf/2208.05740.pdf)).
-- **[Shi et al., 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)**,
-if you use branch-and-bound on non-ReLU nonlinearities.
+**α-CROWN** ([Xu et al., 2021](https://arxiv.org/pdf/2011.13824.pdf)),
+**β-CROWN** ([Wang et al., 2021](https://arxiv.org/pdf/2103.06624.pdf)),
+**GenBaB** ([Shi et al. 2024](https://arxiv.org/pdf/2405.21063.pdf)),
+and **GCP-CROWN** ([Zhang et al., 2022](https://arxiv.org/pdf/2208.05740.pdf)).
 - **[Kotha et al., 2023](https://arxiv.org/pdf/2302.01404.pdf)** if you use constraints on the outputs of neural networks.
 - **[Salman et al., 2019](https://arxiv.org/pdf/1902.08722)**,
 if your work involves the convex relaxation of the NN verification.
@@ -174,7 +170,7 @@ if you use our branch-and-bound based adversarial attack (falsifier).
 
 * **GCP-CROWN** ([Zhang et al., NeurIPS 2022](https://arxiv.org/pdf/2208.05740.pdf)) enables the use of general cutting planes methods for neural network verification in a GPU-accelerated and very efficient bound propagation framework. Cutting planes can significantly strengthen bound tightness.
 
-* **CROWN-BaB** ([Shi et al., WFVML 2023](https://files.sri.inf.ethz.ch/wfvml23/papers/paper_24.pdf)) enables branch-and-bound based verification for non-ReLU and general nonlinear functions, achieving significant improvements on verifying neural networks with non-ReLU activation functions such as Transformer and LSTM networks, and models that consist of neural networks and additional nonlinear operations such as [ML for AC Optimal Power Flow](https://github.com/AI4OPT/ml4acopf_benchmark).
+* **GenBaB** ([Shi et al. 2024](https://arxiv.org/pdf/2405.21063.pdf)) enables branch-and-bound based verification for non-ReLU and general nonlinear functions, achieving significant improvements on verifying neural networks with non-ReLU activation functions such as Transformer and LSTM networks, and models that consist of neural networks and additional nonlinear operations such as [ML for AC Optimal Power Flow](https://github.com/AI4OPT/ml4acopf_benchmark).
 
 * **INVPROP** ([Kotha et al., NeurIPS 2023](https://arxiv.org/pdf/2302.01404.pdf)) handles constraints on the outputs of neural networks which enables tight and provable bounds on the preimage of a neural network. We demonstrated several applications, including OOD detection, backward reachability analysis for NN-controlled systems, and tightening bounds for robustness verification.
 
@@ -240,11 +236,11 @@ We provide bibtex entries below:
   year={2022}
 }
 
-@article{shi2023generalnonlinear,
-  title={Formal Verification for Neural Networks with General Nonlinearities via Branch-and-Bound},
-  author={Shi, Zhouxing and Jin, Qirui and Kolter, J Zico and Jana, Suman and Hsieh, Cho-Jui and Zhang, Huan},
-  journal={2nd Workshop on Formal Verification of Machine Learning (WFVML 2023)},
-  year={2023}
+@article{shi2024genbab,
+  title={Neural Network Verification with Branch-and-Bound for General Nonlinearities},
+  author={Shi, Zhouxing and Jin, Qirui and Kolter, Zico and Jana, Suman and Hsieh, Cho-Jui and Zhang, Huan},
+  journal={arXiv preprint arXiv:2405.21063},
+  year={2024}
 }
 
 @inproceedings{kotha2023provably,
