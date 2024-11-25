@@ -245,7 +245,7 @@ def attack(model_ori, x, vnnlib, verified_status, verified_success,
             initialization=initialization, GAMA_loss=GAMA_loss)
 
     else:
-        raise NotImplementedError('Auto-attack interfact has not been implemented yet.')
+        raise NotImplementedError('Auto-attack interface has not been implemented yet.')
         # attack_ret, attack_images, attack_margins = auto_attack(model_ori, x, data_min=data_min, data_max=data_max, vnnlib=vnnlib)
 
     if attack_ret:
@@ -317,7 +317,7 @@ def default_pgd_loss(origin_out, output, C_mat, rhs_mat, cond_mat, same_number_c
 
 def test_conditions(input, output, C_mat, rhs_mat, cond_mat, same_number_const, data_max, data_min, return_success_idx=False):
     '''
-    Whether the output satisfies the specifiction conditions.
+    Whether the output satisfies the specification conditions.
     If the output satisfies the specification for adversarial examples, this function returns True, otherwise False.
 
     input: [num_exampele, num_restarts, num_or_spec, *input_shape]
@@ -485,7 +485,7 @@ def default_adv_example_finalizer(model_ori, x, best_deltas, data_max, data_min,
     if arguments.Config['general']['save_output']:
         arguments.Globals['out']['attack_margin'] = attack_margin.cpu()
 
-    print("PGD attack margin (first 2 examles and 10 specs):\n", attack_margin[:2, :, :10])
+    print("PGD attack margin (first 2 examples and 10 specs):\n", attack_margin[:2, :, :10])
     print("number of violation: ", (attack_margin < 0).sum().item())
     # print the first 10 specifications for the first 2 examples
 
@@ -792,7 +792,7 @@ def attack_pgd(model, X, y, epsilon, alpha, attack_iters, num_restarts,
 
     input_shape = X.size()
     if multi_targeted:
-        assert target is None  # Multi-targeted attack is for non-targed attack only.
+        assert target is None  # Multi-targeted attack is for non-targeted attack only.
         extra_dim = (num_restarts, num_classes - 1,)
         # Add two extra dimensions for targets. Shape is (batch, restarts, target, ...).
         X = X.unsqueeze(1).unsqueeze(1).expand(-1, *extra_dim, *(-1,) * (X.ndim - 1))

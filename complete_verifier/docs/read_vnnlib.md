@@ -293,7 +293,7 @@ The list a list containing 2-tuples:
 )]
 ```
 -**Output Explanation**:
->Note that since we defined X_? values in assertion, we reflect this constriction on  X ranges. If this definition can constrain X's original range, >we shorten the X range. If not, skip.<br>
+>Note that since we defined X_? values in assertion, we reflect this constriction on X ranges. If this definition can constrain X's original range, >we shorten the X range. If not, skip.<br>
 
 >In our case, X_range should be:<br>
 >[[0.6, 0.679857769], [-0.5, 0.5], [-0.5, 0.5], [0.45, 0.5], [-0.5, -0.45]]<br>

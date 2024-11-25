@@ -209,7 +209,7 @@ def split_carvana(path):
 def customized_NN4SYS_loader(file_root, onnx_path, vnnlib_path):
     """
     Customized NN4SYS loader.
-    We split split the model into v1 and v2 models to resolve numerical issues
+    We split the model into v1 and v2 models to resolve numerical issues
     """
 
     def get_path(onnx_file):

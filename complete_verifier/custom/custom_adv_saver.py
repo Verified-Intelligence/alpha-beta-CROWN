@@ -16,7 +16,7 @@ import numpy as np
 import torch.nn.functional as F
 
 def customized_gtrsb_saver(adv_example, adv_output, res_path):
-    # almost the same as the original save_cex fucntion
+    # almost the same as the original save_cex function
     # permute the input back before flattening the tensor
     # (See customized_Gtrsb_loader() from custom/custom_model_loader.py
 

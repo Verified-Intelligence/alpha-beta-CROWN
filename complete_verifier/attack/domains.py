@@ -259,7 +259,7 @@ class SortedReLUDomainList(AbstractDomainList):
             if not selected_candidate_domain.verify_criterion() and selected_candidate_domain.valid is True:
                 # unique = [x for i, x in enumerate(selected_candidate_domain.history) if i == selected_candidate_domain.history.index(x)]
                 # assert len(unique) == len(selected_candidate_domain.history)
-                # We transfer only some of the tensors directly to GPU. Other tensors will be transfered in batch later.
+                # We transfer only some of the tensors directly to GPU. Other tensors will be transferred in batch later.
                 to_device(selected_candidate_domain, device, partial=True)
                 idx += 1
                 lAs.append(selected_candidate_domain.lA)

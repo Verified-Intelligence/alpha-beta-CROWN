@@ -88,7 +88,7 @@ def compare_optimized_bounds_against_lp_bounds(
     # If output constraints are used, both the LP solver and compute_bounds needs bounds
     # on all layers (including layers behind(!) the optimized layer).
     # compute_bounds would optimize all bounds of all layers, but that could mean it
-    # get's better results than the LP solver which cannot tighten other layers
+    # gets better results than the LP solver which cannot tighten other layers
     # internally.
     known_layer_bounds = {}
     model.net.init_alpha(

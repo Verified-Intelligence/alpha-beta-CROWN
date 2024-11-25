@@ -107,7 +107,7 @@ class BatchedDomainList(AbstractDomainList):
             self.all_thresholds = TensorStorage(torch.cat([thresholds] * num).cpu())
         self.Cs = TensorStorage(net.c.cpu())
 
-        # === seperator, things above are big tensors, things below are lists ===
+        # === separator, things above are big tensors, things below are lists ===
         self.all_betas = [beta for _ in range(num)]
         self.all_intermediate_betas = [None for _ in range(num)]
         self.histories = [fast_hist_copy(history) for _ in range(num)]
@@ -144,7 +144,7 @@ class BatchedDomainList(AbstractDomainList):
 
     def sort(self):
         """
-        Sort all domains based the the margin between lower bounds and thresholds.
+        Sort all domains based on the margin between lower bounds and thresholds.
         """
         sort_time = time.time()
         N = self.u
@@ -329,7 +329,7 @@ class BatchedDomainList(AbstractDomainList):
         def _to(x, non_blocking=True):
             return x.to(device=device, non_blocking=non_blocking)
 
-        # place dummy place to record interm bounds
+        # place dummy place to record intermediate bounds
         lower_bounds, upper_bounds = {}, {}
         lower_bounds[self.final_name] = _to(
             self.all_lb_alls[self.final_name].pop(batch))

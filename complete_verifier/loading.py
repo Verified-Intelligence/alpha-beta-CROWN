@@ -62,7 +62,7 @@ def load_verification_dataset():
     # FIXME (01/10/22): fully document customized data loader.
     # Returns: X, labels, runnerup, data_max, data_min, eps, target_label.
     # X is the data matrix in (batch, ...).
-    # labels are the groud truth labels, a tensor of integers.
+    # labels are the ground truth labels, a tensor of integers.
     # runnerup is the runnerup label used for quickly verify against the runnerup (second largest) label, can be set to None.
     # data_max is the per-example perturbation upper bound, shape (batch, ...) or (1, ...).
     # data_min is the per-example perturbation lower bound, shape (batch, ...) or (1, ...).
@@ -159,7 +159,7 @@ def parse_run_mode():
         csv_path = os.path.join(file_root, arguments.Config['general']['csv_name'])
         with open(csv_path, newline='') as csv_f:
             reader = csv.reader(csv_f, delimiter=',')
-            # In VNN-COMP each line of the csv containts 3 elements: model, vnnlib, timeout
+            # In VNN-COMP each line of the csv contains 3 elements: model, vnnlib, timeout
             csv_file = [row for row in reader]
 
         if len(csv_file[0]) == 1:

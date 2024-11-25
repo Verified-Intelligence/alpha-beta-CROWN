@@ -166,7 +166,7 @@ class AdvExamplePool:
         for adv in selected_advs:
             for layer_i in range(self.nlayers):
                 all_patterns[layer_i].append(adv.activation_pattern[layer_i])
-        # Concate activation patterns accross examples.
+        # Concatenate activation patterns across examples.
         for layer_i in range(self.nlayers):
             layer_i_pattern = torch.stack(all_patterns[layer_i], dim=0)
             # Shape is (batch, neurons).
@@ -207,7 +207,7 @@ class AdvExamplePool:
             for layer_i in range(self.nlayers):
                 all_patterns[layer_i].append(adv.activation_pattern[layer_i])
         total_unstable = 0
-        # Concate activation patterns accross examples and count activations.
+        # Concatenate activation patterns across examples and count activations.
         for layer_i in range(self.nlayers):
             layer_i_pattern = torch.stack(all_patterns[layer_i], dim=0)
             # Count number of active neurons.
@@ -227,7 +227,7 @@ class AdvExamplePool:
             total_unstable += enabled_mask.sum().item()
             # Store the dominating activation status.
             all_status[layer_i] = counts > (total / 2)
-        # Find the boundarys of counts.
+        # Find the boundaries of counts.
         counts_length = torch.cumsum(torch.tensor([c.numel() for c in all_counts]), dim=0).tolist()
         counts_length = torch.tensor([0] + counts_length)
         # Flatten the counts tensor.
@@ -263,13 +263,13 @@ class AdvExamplePool:
                 return decisions[selected_indices], coeffs[selected_indices]
 
             else:
-                # Keeo most common ones.
+                # Keep most common ones.
                 return decisions[:n_activations], coeffs[:n_activations]
         else:
             return decisions, coeffs
 
     """
-    Given a list of unstable neurons, find the top-1 probability configuration based on activation databse.
+    Given a list of unstable neurons, find the top-1 probability configuration based on activation database.
     `decisions` is a list of neurons in [(layer, neuron_idx), (layer, neuron_idx), ... ].
     """
     def find_most_likely_activation(self, decisions, n_advs=-1):

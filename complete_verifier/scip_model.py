@@ -369,8 +369,8 @@ if __name__ == "__main__":
     model.setParam('Threads', 1)
     model.setParam("FeasibilityTol", 2e-5)
     model.setParam('TimeLimit', 10)
-    model.setParam('BestBdStop', 1e-5)  # Terminiate as long as we find a positive lower bound.
-    model.setParam('BestObjStop', 1e-5)  # Terminiate as long as we find a adversarial example.
+    model.setParam('BestBdStop', 1e-5)  # Terminate as long as we find a positive lower bound.
+    model.setParam('BestObjStop', 1e-5)  # Terminate as long as we find a adversarial example.
     # model.setParam('Heuristics', 0.5)  # no exact match
     # model.setParam('MIPFocus', 1) # no exact match
 

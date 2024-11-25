@@ -300,7 +300,7 @@ class NonlinearBranching(NeuronBranchingHeuristic):
 
         start_nodes = [act[0] for act in self.net.split_activations[name]]
 
-        # Specicial cases for now
+        # Special cases for now
         if len(start_nodes) == 1:
             if isinstance(start_nodes[0], (BoundRelu, BoundSign, BoundSignMerge)):
                 # For ReLU or LeakyReLU, always branch at 0.

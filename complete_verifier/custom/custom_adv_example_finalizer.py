@@ -45,7 +45,7 @@ def customized_gtrsb_adv_example_finalizer(model_ori, x, best_deltas, data_max, 
     if arguments.Config['general']['save_output']:
         arguments.Globals['out']['attack_margin'] = attack_margin.cpu()
 
-    print("PGD attack margin (first 2 examles and 10 specs):\n", attack_margin[:2, :, :10])
+    print("PGD attack margin (first 2 examples and 10 specs):\n", attack_margin[:2, :, :10])
     print("number of violation: ", (attack_margin < 0).sum().item())
     # print the first 10 specifications for the first 2 examples
 

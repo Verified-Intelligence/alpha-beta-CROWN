@@ -134,7 +134,7 @@ def load_model_onnx(path, quirks=None, x=None):
             raise
         assert isinstance(config_quirks, dict)
         deep_update(quirks, config_quirks)
-    print(f'Loading onnx {path} wih quirks {quirks}')
+    print(f'Loading onnx {path} with quirks {quirks}')
 
     onnx_model = unzip_and_optimize_onnx(path, onnx_optimization_flags)
 
