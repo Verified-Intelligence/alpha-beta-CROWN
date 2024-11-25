@@ -122,7 +122,7 @@ def input_split_on_relu_domains(domains, wrapped_net, batch_size):
         new_final_layer_lb = torch.max(ret[0].cpu(), new_final_layer_lb.cpu())
     time_bounding = time.time() - time_bounding
 
-    # Extract intemediate layer bounds from the network, and update.
+    # Extract intermediate layer bounds from the network, and update.
     time_transfer = time.time()
     new_interm_lbs, new_interm_ubs = wrapped_net.get_candidate_parallel(
             new_final_layer_lb, new_final_layer_ub, device='cpu')

@@ -35,7 +35,7 @@ def make_eps_tensor(eps):
 ########################################
 def preprocess_cifar(image, inception_preprocess=False, perturbation=False):
     """
-    Proprocess images and perturbations.Preprocessing used by the SDP paper.
+    Preprocess images and perturbations.Preprocessing used by the SDP paper.
     """
     MEANS = np.array([125.3, 123.0, 113.9], dtype=np.float32)/255
     STD = np.array([63.0, 62.1, 66.7], dtype=np.float32)/255

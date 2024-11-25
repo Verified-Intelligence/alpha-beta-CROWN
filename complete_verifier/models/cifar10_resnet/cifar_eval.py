@@ -64,7 +64,7 @@ def load_data(data_dir: str = "../../data", num_imgs: int = 25, random: bool = F
 def clean_acc(model_name, images, labels):
     
     """
-    :oad the resnet models and measure the clean accuracy
+    Load the resnet models and measure the clean accuracy
     Args:
         model_name:
             Either resnet2b or resnet4b

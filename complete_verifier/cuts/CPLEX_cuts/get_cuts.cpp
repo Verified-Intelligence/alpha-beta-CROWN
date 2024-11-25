@@ -56,7 +56,7 @@ typedef int (*GetNamesFunc)(CPXCENVptr, CPXCLPptr, char**, char*, CPXSIZE, CPXSI
 /* Get the name of rows in LP, from row begin to row end. */
 void getNames (GetNamesFunc func, CPXCENVptr env, CPXCLPptr lp, CPXDIM begin, CPXDIM end, const char* filename=NULL, bool print=true) {
     CPXDIM length = end - begin + 1;
-    size_t preallocated_size = length * 32;  // Asume each name is at most 20 characters.
+    size_t preallocated_size = length * 32;  // Assume each name is at most 20 characters.
     char** name = static_cast<char**>(malloc(length * sizeof(char*)));
     char* namestore = static_cast<char*>(malloc(preallocated_size * sizeof(char)));
     CPXSIZE surplus;
@@ -390,7 +390,7 @@ main (int  argc,
    status = CPXXsetcntparam (env, CPXPARAM_Threads, 10);
    if ( status )  goto TERMINATE;
 
-   /* Allow non-deterministic result. Disable it for reproduciability.*/
+   /* Allow non-deterministic result. Disable it for reproducibility.*/
 
    status = CPXXsetcntparam (env, CPXPARAM_Parallel, CPX_PARALLEL_OPPORTUNISTIC);
    if ( status )  goto TERMINATE;

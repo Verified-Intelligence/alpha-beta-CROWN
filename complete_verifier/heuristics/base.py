@@ -39,7 +39,7 @@ class NeuronBranchingHeuristic():
                 yield key, bounds[key]
 
     def update_batch_size_and_device(self, bounds):
-        """Set self.batch_size and self.device based on intermeidate bounds."""
+        """Set self.batch_size and self.device based on intermediate bounds."""
         assert isinstance(bounds, dict)
         first_bounds = bounds[list(bounds.keys())[0]]
         self.batch_size = first_bounds.size(0)
@@ -47,7 +47,7 @@ class NeuronBranchingHeuristic():
 
     def get_branching_decisions(self, domains, split_depth=1, **kwargs):
         r"""
-        Get branching decisions given intermediat layer bounds and a mask
+        Get branching decisions given intermediate layer bounds and a mask
         indicating which neurons are "splittable".
 
         Args:
@@ -160,7 +160,7 @@ class NeuronBranchingHeuristic():
                 # Update the number of valid scores based on the mask.
                 max_valid_scores += mask.sum(dim=1)
         # Since all elements in this batch must have the same split depth, we
-        # take the minumum.
+        # take the minimum.
         max_k = int(max_valid_scores.min().item())
         ret = (topk_neuron_layers[:, :max_k], topk_neuron_indices[:, :max_k])
         if return_scores:
@@ -206,7 +206,7 @@ class NeuronBranchingHeuristic():
 
 
 class RandomNeuronBranching(NeuronBranchingHeuristic):
-    """Randomly chooise k neurons among all layers."""
+    """Randomly choose k neurons among all layers."""
 
     def compute_neuron_scores(self, domains, **kwargs):
         scores = {}

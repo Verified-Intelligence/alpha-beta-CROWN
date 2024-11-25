@@ -119,7 +119,7 @@ def read_cut(cut_file):
 
 def read_cut_efficient(net, cut_bin, indx_bin):
     """
-        An auxilary function for efficient cut reading by first checking the timestamp of the cut to read and
+        An auxiliary function for efficient cut reading by first checking the timestamp of the cut to read and
         only reading when the cut is present and updated from net.net.cut_timestamp
         Used in cut_verification() and fetch_cut_from_cplex()
     :param net: auto_LiRPA module
@@ -181,7 +181,7 @@ def get_cplex_cut_timestamp(cut_bin):
     """
         get the modification time from cplex generated cut file and encode it to internal "signature" timestamp
     :param cut_bin: binary cut file path
-    :return: encoded timestamp (original timetamp * 100 mod 1e8) or None (if the file does not exist or enable to access)
+    :return: encoded timestamp (original timestamp * 100 mod 1e8) or None (if the file does not exist or enable to access)
     """
     try:
         # get modification time of the cut

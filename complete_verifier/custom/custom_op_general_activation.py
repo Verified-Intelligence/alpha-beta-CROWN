@@ -123,7 +123,7 @@ class BoundLinearMaskedSigmoid(BoundSigmoid):
 
     def bound_backward(self, last_lA, last_uA, x, mask, slope, bias, **kwargs):
         """Backward LiRPA (CROWN) bound propagation."""
-        # These are additional variabels that will be used in _backward_relaxation(), so we save them here.
+        # These are additional variables that will be used in _backward_relaxation(), so we save them here.
         self._mask = mask.buffer  # These are registered as buffers; see class BoundBuffer.
         self._slope = slope.buffer
         self._bias = bias.buffer

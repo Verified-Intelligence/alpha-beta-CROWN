@@ -50,7 +50,7 @@ INSTALLER_UI=silent
 LICENSE_ACCEPTED=true
 EOF
 sudo ./cplex_studio2210.linux_x86_64.bin -f response.txt
-# Build the C++ code for CPLEX interface. Assumming we are still inside the alpha-beta-CROWN folder.
+# Build the C++ code for CPLEX interface. Assuming we are still inside the alpha-beta-CROWN folder.
 sudo apt install build-essential  # A modern g++ (>=8.0) is required to compile the code.
 # Change CPX_PATH in complete_verifier/cuts/CPLEX_cuts/Makefile if you installed CPlex to a non-default location, like inside your home folder.
 make -C complete_verifier/cuts/CPLEX_cuts/

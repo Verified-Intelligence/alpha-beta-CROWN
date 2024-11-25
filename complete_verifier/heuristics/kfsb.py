@@ -118,7 +118,7 @@ class KfsbBranching(BabsrBranching):
             for l in decision_index:
                 # Go over each element in this batch.
                 l = l.item()
-                # Recover the (layer, idx) from the flattend array.
+                # Recover the (layer, idx) from the flattened array.
                 layer = np.searchsorted(score_length, l, side='right') - 1
                 idx = l - score_length[layer]
                 decision_max_.append([layer, idx])
@@ -183,7 +183,7 @@ class KfsbBranching(BabsrBranching):
 
         split_depth = min(split_depth, k_ret.shape[0])
         if not keep_all_decision:
-            # k_ret has shape (top-k, batch*2) and we take the score eveluated using bound propagation based on the top-k choice.
+            # k_ret has shape (top-k, batch*2) and we take the score evaluated using bound propagation based on the top-k choice.
             i_idx = k_ret.topk(split_depth, 0)
             rets = i_idx.values.cpu().numpy()
             rets_indices = i_idx.indices.cpu().numpy()

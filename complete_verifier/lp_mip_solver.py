@@ -176,7 +176,7 @@ def mip_solver(
         status_ub_r = -1  # Gurbo solver status.
         model.setObjective(v, grb.GRB.MAXIMIZE)
         model.reset()
-        model.setParam('BestBdStop', -eps)  # Terminiate as long as we find a negative upper bound.
+        model.setParam('BestBdStop', -eps)  # Terminate as long as we find a negative upper bound.
         try:
             model.optimize()
         except grb.GurobiError as e:
@@ -190,7 +190,7 @@ def mip_solver(
         status_lb_r = -1  # Gurbo solver status.
         model.setObjective(v, grb.GRB.MINIMIZE)
         model.reset()
-        model.setParam('BestBdStop', eps)  # Terminiate as long as we find a positive lower bound.
+        model.setParam('BestBdStop', eps)  # Terminate as long as we find a positive lower bound.
         try:
             model.optimize()
         except grb.GurobiError as e:
@@ -364,8 +364,8 @@ def mip_solver_attack(new_splits):
 
     ######### mip solve without async #########
     # refine_time = time.time()
-    # model.setParam('BestBdStop', 1e-5)  # Terminiate as long as we find a positive lower bound.
-    # model.setParam('BestObjStop', -1e-5)  # Terminiate as long as we find a adversarial example.
+    # model.setParam('BestBdStop', 1e-5)  # Terminate as long as we find a positive lower bound.
+    # model.setParam('BestObjStop', -1e-5)  # Terminate as long as we find a adversarial example.
     # model.setParam('OutputFlag', False)
     # model.setParam('Heuristics', 0.5)
     # model.setParam('MIPFocus', 1)
@@ -382,8 +382,8 @@ def mip_solver_attack(new_splits):
         return float("inf"), float("inf"), -1, torch.zeros([0,] + input_shape[1:], requires_grad=False)  # Solver skipped.
 
     refine_time = time.time()
-    model.setParam('BestBdStop', 1e-5)  # Terminiate as long as we find a positive lower bound.
-    model.setParam('BestObjStop', -1e-5)  # Terminiate as long as we find a adversarial example.
+    model.setParam('BestBdStop', 1e-5)  # Terminate as long as we find a positive lower bound.
+    model.setParam('BestObjStop', -1e-5)  # Terminate as long as we find a adversarial example.
     model.setParam('OutputFlag', bool(os.environ.get('ALPHA_BETA_CROWN_MIP_DEBUG', False)))
     model.setParam('Heuristics', 0.5)
     model.setParam('MIPFocus', 1)
@@ -445,10 +445,10 @@ def mip_solver_lb_ub(candidate, init=None, save_adv=None, mip_skip_unsafe=False)
     refine_time = time.time()
     if arguments.Config["solver"]["mip"]["early_stop"]:
         if arguments.Config["solver"]["mip"]["mip_solver"] == 'gurobi':
-            model.setParam('BestBdStop', 1e-5)  # Terminiate as long as we find a positive lower bound.
-            model.setParam('BestObjStop', -1e-5)  # Terminiate as long as we find a adversarial example.
+            model.setParam('BestBdStop', 1e-5)  # Terminate as long as we find a positive lower bound.
+            model.setParam('BestObjStop', -1e-5)  # Terminate as long as we find a adversarial example.
         elif arguments.Config["solver"]["mip"]["mip_solver"] == 'scip':
-            model.includeEventhdlr(EarlyStopEvent(), "EarlyStopEvent", "python event handler to early stop.")  # FIXME (01/13/22): threshold should be changable, based on specification.
+            model.includeEventhdlr(EarlyStopEvent(), "EarlyStopEvent", "python event handler to early stop.")  # FIXME (01/13/22): threshold should be changeable, based on specification.
         else:
             raise NotImplementedError
     if arguments.Config["solver"]["mip"]["mip_solver"] == 'scip':
@@ -636,8 +636,8 @@ def build_the_model_lp(
     """
     Before the first branching, we build the solver model
     using_integer:
-        True: using mip formulation with continuous integer varariable (model_type="lp_integer")
-        False: using triangle relaxation without integer varariable (model_type="lp")
+        True: using mip formulation with continuous integer variable (model_type="lp_integer")
+        False: using triangle relaxation without integer variable (model_type="lp")
     Output: the lower bound by solver model
     NOTE: We only consider one output node for now
     """
@@ -880,7 +880,7 @@ def update_the_model_cut(m, cut, pre_lbs=None, pre_ubs=None, split=None, verbose
     # integer name: 'aReLU{relu_layer_names[relu_idx]}_{neuron_idx}'
     # pre activation name: 'lay{pre_relu_layer_names[layer_idx]}_{neuron_idx}'
     gurobi_cuts = []
-    # without cut, how many cut constraints are satisifed with previous primal values
+    # without cut, how many cut constraints are satisfied with previous primal values
     sat_cnt = 0
     if cut is None:
         cut = []
@@ -1049,7 +1049,7 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
     candidates, candidate_neuron_ids, candidate_c_rows = [], [], []
     if labels_to_verify is not None: # sort the labels
         for pidx in labels_to_verify:
-            if lb[pidx] >= 0: continue # skip the label with intial bound >= 0
+            if lb[pidx] >= 0: continue # skip the label with initial bound >= 0
             if solver_pkg == 'gurobi':
                 candidates.append(out_vars[pidx].VarName)
             else:
@@ -1115,7 +1115,7 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
             try:
                 # use a try-catch block to try to ignore the interrupt signal between these two lines
                 # in an effort to avoid process termination *between* two following lines
-                # such termination results in absense of process records and ignorance of killing the launched process ->
+                # such termination results in absence of process records and ignorance of killing the launched process ->
                 # a possible cause of orphan process
                 proc, logfile = run_get_cuts_subprocess(model_filename_stamped)
                 processes[pidx] = {'pid': proc.pid, '_logfile': logfile, '_fname_stamped': model_filename_stamped, 'c': model_c_row}
@@ -1179,7 +1179,7 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
     return lb, ub, status
 
 def run_get_cuts_subprocess(model_filename):
-    # remove legancy file to avoid collision
+    # remove legacy file to avoid collision
     cut_file_path = f"{model_filename}.cuts"
     idx_file_path = f"{model_filename}.indx"
     log_file_path = f"{model_filename}.log"
@@ -1636,7 +1636,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
     m.net.solver_model.setParam("FeasibilityTol", 2e-5)
 
     #############
-    # Config the hyperparameters for intermeidate bounds refinement with mip.
+    # Config the hyperparameters for intermediate bounds refinement with mip.
 
     if mip_multi_proc is None:
         mip_multi_proc = multiprocessing.cpu_count()
@@ -1784,11 +1784,11 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                                 refined_relu_layer.sparse_betas[key] = SparseBeta((1, max_splits_per_layer), device=device)
                             for neuron_idx, (stable_neuron_idx, sign) in enumerate(unstable_to_stable[relu_idx-1]):
                                 for key in refined_relu_layer.sparse_betas.keys():
-                                    # Assign split constraint into all intermdiate betas
+                                    # Assign split constraint into all intermediate betas
                                     refined_relu_layer.sparse_betas[key].loc[0, neuron_idx] = stable_neuron_idx
                                     refined_relu_layer.sparse_betas[key].sign[0, neuron_idx] = sign
                         print("relu layer:", relu_idx-1, "has unstable to stable neurons:", unstable_to_stable[relu_idx-1])
-                        # When use the convolutional layer, beta should be forbiddened by setting beta to false.
+                        # When use the convolutional layer, beta should be forbidden by setting beta to false.
                         m.net.set_bound_opts({'optimize_bound_args': {'enable_beta_crown': arguments.Config['solver']['beta-crown']['beta'], 
                             "verbose": True}, 'enable_opt_interm_bounds': arguments.Config['solver']['beta-crown']['enable_opt_interm_bounds']})
                         

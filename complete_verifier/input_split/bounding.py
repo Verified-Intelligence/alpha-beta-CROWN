@@ -101,7 +101,7 @@ def get_lower_bound_naive(
             ret_s = self.get_alpha(device='cpu', half=True)
         else:
             # There might be alphas in initial alpha-crown,
-            # which will be used in all later bounding stpes.
+            # which will be used in all later bounding steps.
             # Here only the references in the list is copied.
             # The alphas will be actually duplicated in TensorStorage.
             ret_s = alphas * (batch * 2)

@@ -275,7 +275,7 @@ def general_bab(net, domain, x, refined_lower_bounds=None,
         x=x, branching_input_and_activation=branching_input_and_activation)
     num_domains = len(domains)
 
-    # after domains are added, we replace global_lb, global_ub with the multile
+    # after domains are added, we replace global_lb, global_ub with the multiple
     # targets "real" global lb and ub to make them scalars
     global_lb, global_ub = all_label_global_lb, all_label_global_ub
     updated_mask, tot_ambi_nodes = get_unstable_neurons(updated_mask)

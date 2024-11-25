@@ -73,7 +73,7 @@ class ConfigHandler:
                           help='Run code in CUDA deterministic mode, which has slower performance but better reproducibility.',
                           hierarchy=h + ["deterministic"])
         self.add_argument("--double_fp", action='store_true',
-                          help='Use double precision floating point. GPUs with good double precision support are preferable (NVIDIA P100, V100, A100, H100; AMD Radeon Instinc MI50, MI100).',
+                          help='Use double precision floating point. GPUs with good double precision support are preferable (NVIDIA P100, V100, A100, H100; AMD Radeon Instinct MI50, MI100).',
                           hierarchy=h + ["double_fp"])
         self.add_argument("--loss_reduction_func", default="sum",
                           help='When batch size is not 1, this reduction function is applied to reduce the bounds into a scalar (options are "sum" and "min").',
@@ -230,7 +230,7 @@ class ConfigHandler:
         self.add_argument("--robustness_type", type=str, default="verified-acc",
                           choices=["verified-acc", "runnerup", "clean-acc", "specify-target", "all-positive"],
                           help='For robustness verification: verify against all labels ("verified-acc" mode), or just the runnerup labels ("runnerup" mode), '
-                               'or using a specified label in dataset ("speicify-target" mode, only used for oval20). Not used when a VNNLIB spec is used.',
+                               'or using a specified label in dataset ("specify-target" mode, only used for oval20). Not used when a VNNLIB spec is used.',
                           hierarchy=h + ["robustness_type"])
         self.add_argument("--norm", type=float, default='inf',
                           help='Lp-norm for epsilon perturbation in robustness verification (1, 2, inf).',
@@ -286,7 +286,7 @@ class ConfigHandler:
                           help='After CROWN pass, prune verified labels before starting the alpha-CROWN pass.',
                           hierarchy=h + ["prune_after_crown"])
         self.add_argument("--optimize_disjuncts_separately", action='store_true',
-                          help="If set, each neuron computes seperate bounds for each disjunct. If set, do not set prune_after_crown=True.",
+                          help="If set, each neuron computes separate bounds for each disjunct. If set, do not set prune_after_crown=True.",
                           hierarchy=h + ["optimize_disjuncts_separately"])
 
         h = ["solver", "crown"]
@@ -298,7 +298,7 @@ class ConfigHandler:
                           hierarchy=h + ["max_crown_size"])
         self.add_argument("--relu_option", default='adaptive',
                           choices=["adaptive", "same-slope", "zero-lb", "one-lb"],
-                          help='Options for specifying the the way to initialize CROWN bounds for ReLU function.',
+                          help='Options for specifying the way to initialize CROWN bounds for ReLU function.',
                           hierarchy=h + ["relu_option"])
 
         h = ["solver", "alpha-crown"]
@@ -332,7 +332,7 @@ class ConfigHandler:
 
         h = ["solver", "invprop"]
         self.add_argument("--apply_output_constraints_to", type=str, nargs='*', default=[],
-                          help='Includes the output constraint in the optimization of linear layers. Can be a comma seperated list of layer types (e.g. "BoundLinear"), layer names (e.g. "/input.7") or "all". This will disable patch mode for listed conv layers. When set, --optimize_disjuncts_separately must be set, too, if the safety property uses a disjunction.',
+                          help='Includes the output constraint in the optimization of linear layers. Can be a comma separated list of layer types (e.g. "BoundLinear"), layer names (e.g. "/input.7") or "all". This will disable patch mode for listed conv layers. When set, --optimize_disjuncts_separately must be set, too, if the safety property uses a disjunction.',
                           hierarchy=h + ['apply_output_constraints_to'])
         self.add_argument("--tighten_input_bounds", action='store_true',
                           help='Tighten input bounds using output constraints. If set, --apply_output_constraints_to should contain "BoundInput" or the corresponding layer name.',
@@ -458,7 +458,7 @@ class ConfigHandler:
                           help='Disable verified domain pruning within iteration.',
                           hierarchy=h + ["pruning_in_iteration"])
         self.add_argument("--pruning_in_iteration_ratio", type=float, default=0.2,
-                          help='When ratio of positive domains >= this ratio, prunning in iteration optimization is open.',
+                          help='When ratio of positive domains >= this ratio, pruning in iteration optimization is open.',
                           hierarchy=h + ["pruning_in_iteration_ratio"])
         self.add_argument('--sort_targets', action='store_true',
                           help='Sort targets before BaB.',
@@ -758,7 +758,7 @@ class ConfigHandler:
                           help='Use MIP (Gurobi) based attack if PGD cannot find a successful adversarial example.',
                           hierarchy=h + ["enable_mip_attack"])
         self.add_argument("--adv_saver", type=str, default='default_adv_saver',
-                          help='Customized saver of adverserial examples.',
+                          help='Customized saver of adversarial examples.',
                           hierarchy=h + ["adv_saver"])
         self.add_argument("--early_stop_condition", type=str, default='default_early_stop_condition',
                           help='Customized early stop condition.',
@@ -830,7 +830,7 @@ class ConfigHandler:
 
         h = ["debug"]
         self.add_argument('--view_model', action='store_true',
-                          help='Print more detailed model information for analyis.',
+                          help='Print more detailed model information for analysis.',
                           hierarchy=h + ['view_model'])
         self.add_argument("--lp_test", type=str, default=None,
                           choices=["MIP", "LP", None],
