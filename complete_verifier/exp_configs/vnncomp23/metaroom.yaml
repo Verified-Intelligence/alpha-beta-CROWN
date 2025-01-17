@@ -1,14 +1,17 @@
-# Configuration file for running the sri_resnet_a benchmark (all properties).
 general:
   root_path: ../../vnncomp2023_benchmarks/benchmarks/metaroom
   csv_name: instances.csv
 model:
   onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
 solver:
-  batch_size: 256
+  batch_size: 384
   beta-crown:
-    lr_beta: 0.05
-    iteration: 10
+    lr_alpha: 0.1
+    lr_beta: 0.2
+    iteration: 50
+  alpha-crown:
+    lr_alpha: 0.25
+    iteration: 100
   prune_after_crown: True
 bab:
   initial_max_domains: 100

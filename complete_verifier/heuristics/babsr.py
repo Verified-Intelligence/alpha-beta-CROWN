@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -152,8 +152,10 @@ class BabsrBranching(NeuronBranchingHeuristic):
         return score, intercept_tb
 
     @torch.no_grad()
-    def get_branching_decisions(self, domains, split_depth, branching_reduceop='min', use_beta=False, keep_all_decision=False,
-                                prioritize_alphas='none',  method='kfsb', sparsest_layer=0, max_info_threshold=0.001,
+    def get_branching_decisions(self, domains, split_depth,
+                                branching_reduceop='min',
+                                prioritize_alphas='none',
+                                sparsest_layer=0, max_info_threshold=0.001,
                                 **kwargs):
         """
         choose the dimension to split on
@@ -171,7 +173,7 @@ class BabsrBranching(NeuronBranchingHeuristic):
         batch = get_batch_size_from_masks(orig_mask)
         # Mask is 1 for unstable neurons. Otherwise it's 0.
         mask = orig_mask
-        reduce_op = get_reduce_op(branching_reduceop)
+        reduce_op = get_reduce_op(branching_reduceop, with_dim=False)
 
         number_bounds = 1 if cs is None else cs.shape[1]
         score, intercept_tb = self.babsr_score(

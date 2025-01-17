@@ -2,7 +2,7 @@
 model:
   name: cifar_conv_big  # This model is defined in model_defs.py. Add your own model definitions there.
   # The model is from "Training Certifiably Robust Neural Networks with Efficient Local Lipschitz Bounds (Huang et al., NeurIPS 2021)"
-  # wget https://github.com/yjhuangcd/local-lipschitz/raw/main/pretrained/relu/cifar_4C3F_relu_best.pth
+  # wget https://github.com/yjhuangcd/local-lipschitz/raw/main/pretrained/relu/cifar_4C3F_best.pth
   path: cifar_l2_4c3f.pth
 data:
   dataset: CIFAR  # Dataset name. This is just the standard CIFAR-10 test set defined in the "load_verification_dataset()" function in utils.py

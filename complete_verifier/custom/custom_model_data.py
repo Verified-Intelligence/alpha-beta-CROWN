@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -26,6 +26,16 @@ from torchvision import transforms
 from torchvision import datasets
 import arguments
 
+
+def try_model_fsb(in_dim=784, out_dim=10):
+    model = nn.Sequential(
+        nn.Linear(28*28, 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, 10)
+    )
+    return model
 
 def simple_conv_model(in_channel, out_dim):
     """Simple Convolutional model."""
@@ -68,6 +78,41 @@ def simple_box_data(spec):
     data_max = torch.tensor(10.).reshape(1, -1)
     data_min = torch.tensor(-10.).reshape(1, -1)
     return X, labels, data_max, data_min, eps_temp
+
+def all_node_split_test_model(in_dim=2, out_dim=2):
+    """A very simple model, 2 inputs, 20 ReLUs, 2 outputs"""
+    model = nn.Sequential(
+        nn.Linear(in_dim, 20),
+        nn.ReLU(),
+        nn.Linear(20, out_dim)
+    )
+    model[0].weight.data = torch.tensor([[-1.1258, -1.1524],
+                                        [ 0.2506, -0.4339],
+                                        [ 0.8487,  0.6920],
+                                        [-0.3160, -2.1152],
+                                        [ 0.4681, -0.1577],
+                                        [ 1.4437,  0.2660],
+                                        [ 0.1665,  0.8744],
+                                        [-0.1435, -0.1116],
+                                        [ 0.4736, -0.0729],
+                                        [-0.8460,  0.1241],
+                                        [ 0.2664,  0.4124],
+                                        [-1.1480, -0.9625],
+                                        [ 0.2343,  0.1264],
+                                        [ 0.6591, -1.6591],
+                                        [-1.0093, -1.4070],
+                                        [ 0.2204, -0.1970],
+                                        [-1.0683, -0.0390],
+                                        [ 0.6933, -0.0684],
+                                        [-0.5896,  0.7262],
+                                        [ 0.8356, -0.1248]])
+    model[0].bias.data = torch.tensor([-0.0043,  0.0017,  0.0020, -0.0005, -0.0030,  0.0011, -0.0029, -0.0023,  0.0037,  0.0023, -0.0025,  0.0041, -0.0082, -0.0077,  0.0006, -0.0022, -0.0045,  0.0003, -0.0033,  0.0020])
+    model[2].weight.data = torch.tensor([[ 1.2026, -1.0299, -0.0809,  0.4990, -0.6472, -0.2247,  0.0726, -0.2912, -0.5695,  0.8674,
+                                        -0.6774,  0.2767,  0.1709, -0.2701, -0.5633,  0.2803, -1.0325, -0.6330,  0.3569, -0.0638],
+                                        [ 0.0129,  0.2553, -0.2982, -0.1459, -0.1255,  0.1057, -0.9055,  0.4570,  0.4074,  0.3204,
+                                        -0.0127,  0.7773, -0.0831,  0.3661, -0.6250, -0.7922, -0.1339,  0.2914,  0.2083, -0.4933]])
+    model[2].bias.data = torch.tensor([ 0.2484,  0.4397])
+    return model
 
 
 def box_data(dim, low=0., high=1., segments=10, num_classes=10, eps=None):

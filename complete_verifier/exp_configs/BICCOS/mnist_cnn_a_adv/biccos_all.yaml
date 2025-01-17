@@ -1,0 +1,30 @@
+model:
+  name: mnist_cnn_4layer
+  path: models/sdp/mnist_cnn_a_adv.model
+data:
+  dataset: MNIST_SDP
+specification:
+  norm: .inf
+  epsilon: 0.3
+solver:
+  batch_size: 4096
+  auto_enlarge_batch_size: true
+  beta-crown:
+    iteration: 20
+bab:
+  timeout: 200
+  tree_traversal: breadth_first
+  cut:
+    enabled: true
+    bab_cut: true
+    number_cuts: 500
+    biccos:
+      enabled: true
+      auto_param: false
+      multi_tree_branching:
+        enabled: true
+        restore_best_tree: true
+  branching:
+    reduceop: max
+attack:
+  pgd_restarts: 50

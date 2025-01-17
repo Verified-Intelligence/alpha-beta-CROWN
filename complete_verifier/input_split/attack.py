@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -15,8 +15,7 @@
 import torch
 import arguments
 from attack.attack_pgd import (
-    pgd_attack_with_general_specs, test_conditions,
-    default_adv_example_finalizer, save_cex,
+    pgd_attack_with_general_specs, default_adv_example_finalizer, test_conditions, check_and_save_cex,
     process_vnn_lib_attack, build_conditions)
 from load_model import Customized
 
@@ -76,17 +75,14 @@ def attack_in_input_bab_parallel(model_ori, domains, x, vnnlib=None):
 
     res, idx = test_conditions(attack_image.unsqueeze(1), attack_output.unsqueeze(1),
                            Cs, rhs, cond_mat, True, ubs, lbs, return_success_idx=True)
-    if res.all() and arguments.Config["general"]["save_adv_example"]:
-        try:
-            save_cex(
-                attack_image[:,idx].unsqueeze(1), attack_output[:,idx],
-                attack_x.unsqueeze(1), vnnlib,
-                arguments.Config["attack"]["cex_path"],
-                ubs[:,idx].unsqueeze(1), lbs[:,idx].unsqueeze(1))
-        except Exception as e:
-            print(str(e))
-            print('save adv example failed')
-    return res
+    if res.all():
+        print("pgd attack succeed in input bab parallel, with idx:", idx)
+        _, verified_success = check_and_save_cex(attack_image[:, idx], attack_output[:, idx], vnnlib,
+                                                 arguments.Config["attack"]["cex_path"], "unsafe")
+                
+        return verified_success
+        
+    return False
 
 
 def massive_pgd_attack(x, model_ori, vnnlib=None):
@@ -118,25 +114,25 @@ def massive_pgd_attack(x, model_ori, vnnlib=None):
 
     attack_image, attack_output, attack_margin = eval(arguments.Config["attack"]["adv_example_finalizer"])(
         model_ori, x, best_deltas, data_max, data_min, C_mat, rhs_mat, cond_mat)
-
+     
     if test_conditions(attack_image.unsqueeze(1), attack_output,
                        C_mat, rhs_mat, cond_mat, True, data_max, data_min).all():
         print("pgd attack succeed in massive attack")
-        if arguments.Config["general"]["save_adv_example"]:
-            try:
-                save_cex(attack_image, attack_output, x, vnnlib, arguments.Config["attack"]["cex_path"], data_max, data_min)
-            except Exception as e:
-                print(str(e))
-                print('save adv example failed')
-        return attack_margin, True
-    else:
-        return attack_margin, False
+        # attack_image has shape (batch, specs, c, h, w)
+        _, verified_success = check_and_save_cex(attack_image[:, 0:1].squeeze(1), attack_output[:, 0:1].squeeze(1),
+                                                 vnnlib, arguments.Config["attack"]["cex_path"], "unsafe")
+        return attack_margin, verified_success
+    return attack_margin, False
 
 
-def check_adv(domains, model_ori, vnnlib=None):
+def check_adv(domains, model_ori, x, vnnlib=None):
     """check whether exiting domains have adv example or not.
-    By naively forward inputs' lower and upper bound."""
-    device = list(model_ori.parameters())[0].device
+    By using inputs' lower and upper bound as attack starting points."""
+    if len(vnnlib) != 1:
+        print('Multiple x in check_adv() is not supported so far!')
+        return False
+
+    device = x.device
     max_num_domains = arguments.Config['attack']['input_split_check_adv']['max_num_domains']
     worst_indices = domains.get_topk_indices(k=min(max_num_domains, len(domains)))
     best_idx = domains.get_topk_indices(largest=True).item()
@@ -150,40 +146,34 @@ def check_adv(domains, model_ori, vnnlib=None):
         c.append(val[3][None, ...].detach().cpu())
         threshold.append(val[4].detach().cpu())
 
-    adv_example = torch.cat(
-        [torch.cat([dm_l[i], dm_u[i]]) for i in range(len(worst_indices))]
-    )
-    adv_example = torch.cat([adv_example, dm_l[-1], dm_u[-1]])
-    adv_example = adv_example.unsqueeze(0).to(device, non_blocking=True)
-    # [num_or, input_shape]
+    # we pick the worst domains (smallest lower bounds) since they are less likely to be verified.
+    # we use their input range: dm_l and dm_u as attacking starting points.
+    starting_points = torch.cat([torch.cat([dm_l[i], dm_u[i]]) for i in range(len(worst_indices))])
+    # we also include the most recent added domain to have a try.
+    starting_points = torch.cat([starting_points, dm_l[-1], dm_u[-1]])
+    starting_points = starting_points.unsqueeze(0).to(device, non_blocking=True)
+    # [1, num_starting_points, *input_shape], num_starting_points = 2 * (worst_indices + 1)
 
-    prop_mat = torch.cat([torch.cat([c[i], c[i]]) for i in range(len(worst_indices))])
-    prop_mat = torch.cat([prop_mat, c[-1], c[-1]]).to(device, non_blocking=True)
-    # [num_or, num_and, output_dim]
+    C_mat = torch.cat([torch.cat([c[i], c[i]]) for i in range(len(worst_indices))])
+    C_mat = torch.cat([C_mat, c[-1], c[-1]]).to(device, non_blocking=True)
+    # [num_starting_points, num_and, output_dim]
 
-    prop_rhs = [threshold[i] for i in range(len(worst_indices))]
-    prop_rhs.append(threshold[-1])
-    prop_rhs = torch.stack(prop_rhs).repeat_interleave(2, dim=0)
-    # [num_or, num_and]
+    rhs_mat = [threshold[i] for i in range(len(worst_indices))]
+    rhs_mat.append(threshold[-1])
+    rhs_mat = torch.stack(rhs_mat).repeat_interleave(2, dim=0)
+    # [num_starting_points, num_and]
 
-    cond_mat = [[prop_mat.shape[1]] * prop_mat.shape[0]]
-    # [1, num_or, input_shape]
-    prop_mat = prop_mat.view(1, -1, prop_mat.shape[-1])
-    # [1, num_spec, output_dim]
-    prop_rhs = prop_rhs.view(1, -1).to(device, non_blocking=True)
-    # [1, num_spec]
+    # we need to manually construct condition/property/rhs matrix with the PGD random starts as num_starting_points
+    cond_mat = [[C_mat.shape[1]] * C_mat.shape[0]]
+    # list: [num_and, num_and, num_and ,...] with the length of num_starting_points
+    prop_mat = C_mat.view(1, -1, C_mat.shape[-1])
+    # [1, num_starting_points * num_and, output_dim]
+    rhs_mat = rhs_mat.view(1, -1).to(device, non_blocking=True)
+    # [1, num_starting_points * num_and]
 
-    data_max = torch.cat(
-        [torch.cat([dm_u[i], dm_u[i]]) for i in range(len(worst_indices))]
-    )
-    data_max = torch.cat([data_max, dm_u[-1], dm_u[-1]])
-    data_max = data_max.unsqueeze(0).to(device, non_blocking=True)
-
-    data_min = torch.cat(
-        [torch.cat([dm_l[i], dm_l[i]]) for i in range(len(worst_indices))]
-    )
-    data_min = torch.cat([data_min, dm_l[-1], dm_l[-1]])
-    data_min = data_min.unsqueeze(0).to(device, non_blocking=True)
+    data_min = x.ptb.x_L.unsqueeze(1)
+    data_max = x.ptb.x_U.unsqueeze(1)
+    # [1, 1, *input_shape], all attack_images share the same data_min/max
 
     pgd_steps = arguments.Config["attack"]["input_split_check_adv"]["pgd_steps"]
 
@@ -193,54 +183,28 @@ def check_adv(domains, model_ori, vnnlib=None):
         alpha = float(arguments.Config["attack"]["input_split_check_adv"]["pgd_alpha"])
 
     best_deltas = pgd_attack_with_general_specs(
-        model_ori, adv_example, data_min, data_max, prop_mat, prop_rhs,
+        model_ori, starting_points, data_min, data_max, prop_mat, rhs_mat,
         cond_mat, same_number_const=True, alpha=alpha,
         pgd_steps=pgd_steps, only_replicate_restarts=True)[0]
 
-    attack_image = best_deltas + adv_example.squeeze(1)
+    attack_image = best_deltas + starting_points.squeeze(1)
     attack_image = torch.min(torch.max(attack_image, data_min), data_max)
+    # [1, num_starting_points, *input_shape]
 
     attack_output = model_ori(attack_image.view(-1, *attack_image.shape[2:])).view(
-        *attack_image.shape[:2], -1
-    )
-    # [1, num_or_spec, output_dim]
-    res, idx = test_conditions(
-        attack_image.unsqueeze(1),
-        attack_output.unsqueeze(1),
-        prop_mat.unsqueeze(1),
-        prop_rhs,
-        cond_mat,
-        True,
-        data_max,
-        data_min,
-        return_success_idx=True
-    )
+        *attack_image.shape[:2], -1)
+    # [1, num_starting_points, output_dim]
+
+    # in test_conditions() the attack_image and attack_output requires the shape:
+    # [num_example, num_restarts, num_or_spec, *input_shape]
+    # We currently don't have num_restarts dim, so we unsqueeze(1) for them.
+    res, idx = test_conditions(attack_image.unsqueeze(1), attack_output.unsqueeze(1), prop_mat.unsqueeze(1), rhs_mat,
+                               cond_mat, True, data_max.unsqueeze(1), data_min.unsqueeze(1), return_success_idx=True)
     if res.all():
-        print("pgd attack succeed in check_adv")
-        # save
-        if arguments.Config["general"]["save_adv_example"]:
-            try:
-                save_cex(
-                    attack_image[:, idx].unsqueeze(1),
-                    attack_output[:, idx],
-                    adv_example[:, idx].unsqueeze(1), vnnlib,
-                    arguments.Config["attack"]["cex_path"],
-                    data_max[:, idx].unsqueeze(1),
-                    data_min[:, idx].unsqueeze(1))
-            except Exception as e:
-                print(str(e))
-                print('save adv example failed')
-
-        # FIMXE: prop_rhs and attack_output shape inconsistent!
-        # Skip this part for now
-
-        # if attack_output.size(-1) == 1:
-        #     max_violation_idx = (attack_output.squeeze(-1) - prop_rhs).min(-1).indices
-        #     max_violation = attack_output[:, max_violation_idx].cpu()
-        #     violated_input = attack_image[:, max_violation_idx].cpu()
-        #     print('violated input: \n', violated_input)
-        #     print('violation: ', max_violation)
-        return True
+        print("pgd attack succeed in check_adv, with idx:", idx)
+        _, verified_success = check_and_save_cex(attack_image[:, idx], attack_output[:, idx], vnnlib,
+                                                 arguments.Config["attack"]["cex_path"], "unsafe")
+        return verified_success
 
     return False
 

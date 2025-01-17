@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -12,6 +12,9 @@
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
+import hashlib
+import time
+from typing import Optional, List
 import os
 import collections
 import gzip
@@ -81,15 +84,17 @@ def deep_update(d, u):
     return d
 
 
-def unzip_and_optimize_onnx(path, onnx_optimization_flags='none'):
-    if onnx_optimization_flags == 'none':
+def unzip_and_optimize_onnx(path, onnx_optimization_flags: Optional[List[str]] = None):
+    if onnx_optimization_flags is None:
+        onnx_optimization_flags = []
+    if len(onnx_optimization_flags) == 0:
         if path.endswith('.gz'):
             onnx_model = onnx.load(gzip.GzipFile(path))
         else:
             onnx_model = onnx.load(path)
         return onnx_model
     else:
-        print(f'Onnx optimization with flag: {onnx_optimization_flags}')
+        print(f'Onnx optimization with flags: {onnx_optimization_flags}')
         npath = path + '.optimized'
         if os.path.exists(npath):
             print(f'Found existed optimized onnx model at {npath}')
@@ -117,12 +122,34 @@ def inference_onnx(path, input):
 
 @torch.no_grad()
 def load_model_onnx(path, quirks=None, x=None):
+    start_time = time.time()
     onnx_optimization_flags = arguments.Config['model']['onnx_optimization_flags']
+
     if arguments.Config['model']['cache_onnx_conversion']:
-        path_cache = f'{path}.cache'
-        if os.path.exists(path_cache):
-            print(f'Loading converted model from {path_cache}')
-            return torch.load(path_cache)
+        cached_onnx_suffix = ".cached"
+        cached_onnx_filename = f'{path}{cached_onnx_suffix}'
+
+        with open(path, "rb") as file:
+            curfile_sha256 = hashlib.sha256(file.read()).hexdigest()
+
+        if os.path.exists(cached_onnx_filename):
+            print(f'Loading cached onnx model from {cached_onnx_filename}')
+            read_error = False
+            try:
+                pytorch_model, onnx_shape, old_file_sha256 = torch.load(cached_onnx_filename)
+            except (Exception, ValueError, EOFError):
+                print("Cannot read cached onnx file. Regenerating...")
+                read_error = True
+            if not read_error:
+                if curfile_sha256 == old_file_sha256:
+                    end_time = time.time()
+                    print(f'Cached converted model loaded in {end_time - start_time:.4f} seconds')
+                    return pytorch_model, onnx_shape
+                else:
+                    print(f"{cached_onnx_filename} file sha256: {curfile_sha256} does not match the current onnx sha256: {old_file_sha256}. Regenerating...")
+        else:
+            print(f"{cached_onnx_filename} does not exist.")
+
     quirks = {} if quirks is None else quirks
     if arguments.Config['model']['onnx_quirks']:
         try:
@@ -169,7 +196,7 @@ def load_model_onnx(path, quirks=None, x=None):
         print('\n\nA possible onnx2pytorch version error!')
         print('If you see "unexpected keyword argument \'quirks\'", that indicates your onnx2pytorch version is incompatible.')
         print('Please uninstall onnx2pytorch in your python environment (e.g., run "pip uninstall onnx2pytorch"), and then reinstall using:\n')
-        print('pip install git+https://github.com/KaidiXu/onnx2pytorch@fe7281b9b6c8c28f61e72b8f3b0e3181067c7399\n\n')
+        print('pip install git+https://github.com/Verified-Intelligence/onnx2pytorch@fe7281b9b6c8c28f61e72b8f3b0e3181067c7399\n\n')
         print('The error below may not a bug of alpha-beta-CROWN. See instructions above.')
         raise(e)
     pytorch_model.eval()
@@ -185,7 +212,7 @@ def load_model_onnx(path, quirks=None, x=None):
             x = torch.randn([1, *onnx_shape])
         output_pytorch = pytorch_model(x).numpy()
         try:
-            if arguments.Config['model']['check_optmized']:
+            if arguments.Config['model']['check_optimized']:
                 output_onnx = inference_onnx(path+'.optimized', x.numpy())
             else:
                 output_onnx = inference_onnx(path, x.numpy())
@@ -206,17 +233,28 @@ def load_model_onnx(path, quirks=None, x=None):
         print('Model might not be converted correctly. Please check onnx conversion carefully.')
         print('Output by pytorch:', output_pytorch)
         print('Output by onnx:', output_onnx)
-        print('Max error:', torch.tensor(output_pytorch - output_onnx).abs().max())
+        diff = torch.tensor(output_pytorch - output_onnx).abs().reshape(-1)
+        print('Max error:', diff.max())
+        index = diff.argmax()
+        print('Max error index:', diff.argmax())
+        print(f'Output by pytorch at {index}: ',
+              torch.tensor(output_pytorch).reshape(-1)[index])
+        print(f'Output by onnx at {index}: ',
+              torch.tensor(output_onnx).reshape(-1)[index])
         print('**************************\n')
+
         if arguments.Config["model"]["debug_onnx"]:
             debug_onnx(onnx_model, pytorch_model, x.numpy())
-
-    if arguments.Config["model"]["cache_onnx_conversion"]:
-        torch.save((pytorch_model, onnx_shape), path_cache)
 
     # TODO merge into the unzip_and_optimize_onnx()
     if arguments.Config["model"]["flatten_final_output"]:
         pytorch_model = nn.Sequential(pytorch_model, nn.Flatten())
+
+    if arguments.Config["model"]["cache_onnx_conversion"]:
+        torch.save((pytorch_model, onnx_shape, curfile_sha256), cached_onnx_filename)
+
+    end_time = time.time()
+    print(f'Finished onnx model loading in {end_time - start_time:.4f} seconds')
 
     return pytorch_model, onnx_shape
 

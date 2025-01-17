@@ -8,4 +8,4 @@ psutil>=5.9.5
 pyyaml>=6.0
 sortedcontainers>=2.4
 pandas>=2.0
-git+https://github.com/KaidiXu/onnx2pytorch.git
+git+https://github.com/Verified-Intelligence/onnx2pytorch.git

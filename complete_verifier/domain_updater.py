@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -19,6 +19,7 @@ from collections import defaultdict
 import torch
 
 from utils import fast_hist_copy
+import arguments
 
 
 def repeat(x, num_copy, unsqueeze=False):
@@ -41,6 +42,11 @@ class DomainUpdater:
 
         self.device = 'cpu'
         self.node_names = []
+        cut_args = arguments.Config['bab']['cut']
+        self.cut_usage = cut_args['enabled']
+        self.biccos_usage = cut_args['enabled'] and cut_args['biccos']['enabled']
+        self.multi_tree_searching = (self.biccos_usage and
+                            cut_args['biccos']['multi_tree_branching']['enabled'])
 
     @staticmethod
     def get_num_domain_and_split(d, split, final_name):
@@ -65,38 +71,17 @@ class DomainUpdater:
 
         return (torch.tensor(history[0], dtype=torch.long),
                 torch.tensor(history[1]),
-                torch.tensor(history[2]))
-
-    def _append_history(self, idx, node, item):
-        if self.new_history[idx] is None:
-            return
-        if len(self.new_history[idx][node][0]) == 0:
-            loc = torch.tensor([item[0]], dtype=torch.long)
-            sign = torch.tensor([item[1]])
-            bias = torch.tensor([item[2]])
-        else:
-            self.new_history[idx][node] = self._convert_history_from_list(
-                self.new_history[idx][node])
-            shape = self.new_history[idx][node][0].numel() + 1
-            loc = torch.empty(shape, dtype=torch.long)
-            sign = torch.empty(shape)
-            bias = torch.zeros(shape)
-            loc[:shape-1] = self.new_history[idx][node][0]
-            sign[:shape-1] = self.new_history[idx][node][1]
-            if self.new_history[idx][node][2].numel() > 0:
-                bias[:shape-1] = self.new_history[idx][node][2]
-            loc[shape-1] = item[0]
-            sign[shape-1] = item[1]
-            bias[shape-1] = item[2]
-        self.new_history[idx][node] = (loc, sign, bias)
+                torch.tensor(history[2]),
+                torch.tensor(history[3]),
+                torch.tensor(history[4]))
 
     def set_branched_bounds(self, d, split, mode='depth'):
         """
         d: Domains
         split: Split decisions
-        mode ('depth' or 'breath'): For multiple candidate decisions, whether to
+        mode ('depth' or 'breadth'): For multiple candidate decisions, whether to
         stack them in the depth direction (to apply all the decisions) or
-        breath direction (to try different decisions separately).
+        breadth direction (to try different decisions separately).
         """
         self.num_domain, self.num_split = self.get_num_domain_and_split(
             d, split, self.final_name)
@@ -112,6 +97,7 @@ class DomainUpdater:
             # fewer branching points).
             self.num_copy = self.num_branches**self.num_split # TODO support multiple branches
         else:
+            assert mode == 'breadth', f"Unsupported splitting mode {mode}"
             self.num_copy = self.num_branches * self.num_split
 
         self.device = d['lower_bounds'][self.final_name].device
@@ -221,13 +207,41 @@ class DomainUpdater:
                         shape_base = 0
                     loc = torch.empty(shape_base + l, dtype=torch.long)
                     sign = torch.empty(shape_base + l)
-                    bias = torch.zeros(shape_base + l)
+                    bias = torch.empty(shape_base + l)
+                    score = torch.empty(shape_base + l) if self.biccos_usage else None
+                    depth = torch.empty(shape_base + l) if self.multi_tree_searching else None
                     if len(self.new_history[i][node][0]) > 0:
                         loc[:shape_base] = self.new_history[i][node][0]
                         sign[:shape_base] = self.new_history[i][node][1]
-                        if self.new_history[i][node][2].numel() > 0:
+                        if self.new_history[i][node][2] is not None and self.new_history[i][node][2].numel() > 0:
                             bias[:shape_base] = self.new_history[i][node][2]
-                    self.new_history[i][node] = (loc, sign, bias)
+                        if self.new_history[i][node][3] is not None and self.new_history[i][node][3].numel() > 0:
+                            score[:shape_base] = self.new_history[i][node][3]
+                        if self.new_history[i][node][4] is not None and self.new_history[i][node][4].numel() > 0:
+                            depth[:shape_base] = self.new_history[i][node][4]
+                    max_depth = -1
+
+                    # x[4] is the depth of the split
+                    # this block is to find the maximum depth of the split
+                    # in the current domain
+                    # ONLY used in multi-tree-shearching
+                    if self.multi_tree_searching:
+                        for x in self.new_history[i].values():
+                            if isinstance(x[4], list):
+                                if len(x[4]) == 0:
+                                    continue
+                                max_depth = max(max_depth, max(x[4]))
+                            else:
+                                assert x[4].ndim == 1
+                                if x[4].numel() > 0:
+                                    max_depth = max(max_depth, torch.max(x[4]))
+                                else:
+                                    # Handle the case where x[4] is empty
+                                    # For example, it might just skip this step or assign a default value
+                                    max_depth = max(max_depth, 0)
+                        depth[shape_base:] = max_depth + 1
+
+                    self.new_history[i][node] = (loc, sign, bias, score, depth)
 
         for i in range(self.num_domain):
             cycle = 1
@@ -308,33 +322,117 @@ class DomainUpdaterSimple(DomainUpdater):
     def _set_history_and_bounds(self, d, split, *args):
         assert self.num_copy == 2
 
-        upd_domain, upd_idx, upd_val = self.empty_dict(), self.empty_dict(), self.empty_dict()
-        upd = [upd_domain, upd_idx, upd_val]
+        upd_domain, upd_idx= self.empty_dict(), self.empty_dict()
+        upd = [upd_domain, upd_idx]
+
+        branching_points = split.get('points', None) is not None
+
+        if branching_points:
+            upd_val = self.empty_dict()
+            upd.append(upd_val)
 
         for i in range(self.num_domain):
             # FIXME Inconsistent node index for new_history (split_indices)
             # and elsewhere.
             node, idx = split['decision'][i]
             node = self.split_nodes[node].name
-            if split.get('points', None) is not None:
-                points = split['points'][i]
-            else:
-                points = 0.
+            points = split['points'][i] if branching_points else None
             for j in range(2):
                 history_idx = (-self.num_copy * self.num_domain
                                + j * self.num_domain + i)
                 upd_domain[node].append(i)
                 upd_idx[node].append(idx)
-                upd_val[node].append(points)
+                if branching_points:
+                    upd_val[node].append(points)
                 if self.history is not None:
-                    self._append_history(history_idx, node, (idx, 1 - j * 2, points))
+                    self._append_history(
+                        history_idx, node, idx, 1 - j * 2, points)
 
         for upd_list in upd:
             for k in upd_list:
                 upd_list[k] = self.as_tensor(upd_list[k])
         for k in self.node_names:
             if len(upd_domain[k]):
-                d['lower_bounds'][k][0].view(self.num_domain, -1)[
-                    upd_domain[k], upd_idx[k]] = upd_val[k]
-                d['upper_bounds'][k][1].view(self.num_domain, -1)[
-                    upd_domain[k], upd_idx[k]] = upd_val[k]
+                if branching_points:
+                    d['lower_bounds'][k][0].view(self.num_domain, -1)[
+                        upd_domain[k], upd_idx[k]] = upd_val[k]
+                    d['upper_bounds'][k][1].view(self.num_domain, -1)[
+                        upd_domain[k], upd_idx[k]] = upd_val[k]
+                else:
+                    d['lower_bounds'][k][0].view(self.num_domain, -1)[
+                        upd_domain[k], upd_idx[k]] = 0.
+                    d['upper_bounds'][k][1].view(self.num_domain, -1)[
+                        upd_domain[k], upd_idx[k]] = 0.
+
+    def _append_history(self, idx, node, this_loc, this_sign, this_points):
+        # new_history stores the information about all performed splits in this domain.
+        # loc/sign/bias define which node was split which way.
+        # score is the score computed for BICCOS, which may be used to tighten inferred constraints.
+        # depth encodes in which order the nodes were split.
+        if self.new_history[idx] is None:
+            return
+        if this_points is None:
+            this_points = 0.
+        max_depth = -1
+        if self.multi_tree_searching:
+            for x in self.new_history[idx].values():
+                if isinstance(x[4], list):
+                    if len(x[4]) == 0:
+                        continue
+                    max_depth = max(max_depth, max(x[4]))
+                else:
+                    assert x[4].ndim == 1
+                    if x[4].numel() > 0:
+                        max_depth = max(max_depth, torch.max(x[4]))
+                    else:
+                        max_depth = max(max_depth, 0)
+
+        if len(self.new_history[idx][node][0]) == 0:
+            loc = torch.tensor([this_loc], dtype=torch.long)
+            sign = torch.tensor([this_sign])
+            if this_points is not None:
+                bias = torch.tensor([this_points])
+            else:
+                bias = None
+            score = torch.tensor([0.]) if self.biccos_usage else None
+            depth = torch.tensor([max_depth + 1]) if self.multi_tree_searching else None
+        else:
+            self.new_history[idx][node] = self._convert_history_from_list(
+                self.new_history[idx][node])
+            shape = self.new_history[idx][node][0].numel()
+            loc = torch.empty(shape + 1, dtype=torch.long)
+            sign = torch.empty(shape + 1)
+            bias = torch.empty(shape + 1)
+            score = torch.empty(shape + 1) if self.biccos_usage else None
+            depth = torch.empty(shape + 1) if self.multi_tree_searching else None
+            loc[:shape] = self.new_history[idx][node][0]
+            sign[:shape] = self.new_history[idx][node][1]
+
+            if self.new_history[idx][node][2] is not None and self.new_history[idx][node][2].numel() > 0:
+                bias[:shape] = self.new_history[idx][node][2]
+
+            if score is not None and self.new_history[idx][node][3] is not None:
+                if self.new_history[idx][node][3].numel() > 0:
+                    score[:shape] = self.new_history[idx][node][3]
+
+            # Ensure the source tensor has enough elements to be assigned to depth
+            if depth is not None and self.new_history[idx][node][4] is not None:
+                if self.new_history[idx][node][4].numel() >= shape:
+                    depth[:shape] = self.new_history[idx][node][4][:shape]
+                else:
+                    depth[:self.new_history[idx][node][4].numel()] = self.new_history[idx][node][4]
+
+            loc[shape] = this_loc
+            sign[shape] = this_sign
+            if this_points is not None:
+                bias = torch.zeros(shape + 1)
+                if self.new_history[idx][node][2].numel() > 0:
+                    bias[:shape] = self.new_history[idx][node][2]
+                bias[shape] = this_points
+            else:
+                bias = None
+            if self.biccos_usage:
+                score[shape] = 0.
+            if self.multi_tree_searching:
+                depth[shape] = max_depth + 1
+        self.new_history[idx][node] = (loc, sign, bias, score, depth)

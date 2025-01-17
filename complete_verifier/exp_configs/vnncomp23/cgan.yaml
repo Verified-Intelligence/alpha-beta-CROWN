@@ -5,6 +5,7 @@ general:
 model:
   onnx_optimization_flags: ["remove_squeeze_in_last_layer", "merge_gemm_reshape_bn", "merge_bn_reshape_gemm", "check_duplicate_upsample_initializers"]
   onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
+  cache_onnx_conversion: True
 attack:
   pgd_order: before
   pgd_restarts: 100
@@ -20,5 +21,6 @@ bab:
     method: sb  # Split on input space.
     input_split:
       enable: True
-      catch_assertion: true
+      # enable_clip_domains: True
+      # reorder_bab: True
       sb_coeff_thresh: 0.01

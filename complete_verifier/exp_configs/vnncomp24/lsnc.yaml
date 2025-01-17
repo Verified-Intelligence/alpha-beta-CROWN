@@ -1,0 +1,26 @@
+general:
+  root_path: ../../vnncomp2024_benchmarks/benchmarks/lsnc
+  csv_name: instances.csv
+  enable_incomplete_verification: false
+attack:
+  pgd_order: skip
+solver:
+  batch_size: 500000
+  min_batch_size_ratio: 0.
+  bound_prop_method: crown
+  auto_enlarge_batch_size: True
+bab:
+  branching:
+    method: sb
+    input_split:
+      enable: True
+      # enable_clip_domains: True
+      # reorder_bab: True
+      split_hint: [0.]
+      ibp_enhancement: True
+      compare_with_old_bounds: True
+      sb_coeff_thresh: 1.e-2
+      sb_primary_spec: 0
+      touch_zero_score: 0.1
+      sort_descending: False
+      adv_check: -1

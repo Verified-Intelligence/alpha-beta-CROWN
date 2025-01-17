@@ -1,29 +1,26 @@
 general:
-  conv_mode: matrix
+  root_path: ../../vnncomp2023_benchmarks/benchmarks/vit
+  csv_name: instances.csv
   loss_reduction_func: min
   sparse_alpha: false
   sparse_interm: false
-  root_path: ../../vnncomp2023_benchmarks/benchmarks/vit
-  csv_name: instances.csv
-# model:
-#   onnx_optimization_flags: merge_vit
+  conv_mode: matrix
 attack:
   pgd_order: skip
 solver:
-  batch_size: 50
+  batch_size: 32
   min_batch_size_ratio: 0.0
+  auto_enlarge_batch_size: True
   alpha-crown:
-    lr_alpha: 0.1
-    iteration: 20
-    matmul_share_alphas: true
+    lr_alpha: 0.5
+    iteration: 50
+    max_time: 0.3
     disable_optimization: ['Exp']
   beta-crown:
+    lr_alpha: 0.05
+    lr_beta: 0.05
     iteration: 10
 bab:
   pruning_in_iteration: False
   branching:
-    method: nonlinear
-    nonlinear_split:
-      num_branches: 2
-      method: shortcut
-      use_min: True
+    reduceop: min

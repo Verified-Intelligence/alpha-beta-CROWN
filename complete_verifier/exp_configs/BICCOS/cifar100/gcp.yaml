@@ -1,0 +1,32 @@
+general:
+  csv_name: instances.csv
+  root_path: ../../vnncomp2024_benchmarks/benchmarks/cifar100
+model:
+  onnx_optimization_flags: [merge_bn]
+specification:
+  norm: .inf
+solver:
+  batch_size: 128
+  auto_enlarge_batch_size: true
+  prune_after_crown: true
+  alpha-crown:
+    lr_alpha: 0.25
+    iteration: 20
+    full_conv_alpha: false
+  beta-crown:
+    lr_alpha: 0.1
+    lr_beta: 0.2
+    iteration: 10
+bab:
+  interm_transfer: false
+  cut:
+    enabled: true
+    bab_cut: true
+    number_cuts: 500
+    cplex_cuts: true
+  branching:
+    candidates: 7
+    reduceop: max
+attack:
+  pgd_order: middle
+  pgd_restarts: 10

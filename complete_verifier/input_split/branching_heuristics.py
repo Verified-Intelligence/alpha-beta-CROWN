@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -19,12 +19,11 @@ Old branching heuristics, must be removed very soon (assigned to Kaidi).
 import torch
 from auto_LiRPA import BoundedTensor, PerturbationLpNorm
 import arguments
-
+from typing import Tuple
 
 @torch.no_grad()
 def input_split_branching(net, dom_lb, x_L, x_U, lA, thresholds,
-                          branching_method, split_depth=1, num_iter=0,
-                          last_split_idx=None):
+                          branching_method, split_depth=1, num_iter=0):
     """
     Produce input split according to branching methods.
     """
@@ -41,23 +40,33 @@ def input_split_branching(net, dom_lb, x_L, x_U, lA, thresholds,
         assert split_depth == 1
         if num_iter <= arguments.Config['bab']['branching']['input_split']['bf_iters']:
             return input_split_heuristic_bf(
-                net, x_L, x_U, dom_lb, thresholds, lA, last_split_idx)
+                net, x_L, x_U, dom_lb, thresholds, lA)
         else:
             return input_split_heuristic_sb(
                 x_L, x_U, dom_lb, thresholds, lA, split_depth)
     else:
         raise NameError(f'Unsupported branching method "{branching_method}" for input splits.')
 
-
-def input_split_heuristic_sb(x_L, x_U, dom_lb, thresholds, lA, split_depth=1):
+def input_split_heuristic_sb(x_L, x_U, dom_lb, thresholds, lA, split_depth=1) -> Tuple[torch.Tensor]:
+    """
+    Smart branching where the sensitivities for each input is calculated as a score. More sensitive inputs are split.
+    @param x_L:             The lower bound on the inputs of the subdomains
+    @param x_U:             The upper bound on the inputs of the subdomains
+    @param dom_lb:          The lower bound on the outputs of the subdomains
+    @param thresholds:      The specification threshold where dom_lb > thresholds implies the subdomain is verified
+    @param lA:              CROWN lA for subdomains
+    @param split_depth:     How many splits we wish to consider for all subdomains where split_depth <= input_dim
+    @return:                Input indices to split on for each batch
+    """
     branching_args = arguments.Config['bab']['branching']
     input_split_args = branching_args['input_split']
     lA_clamping_thresh = input_split_args['sb_coeff_thresh']
     sb_margin_weight = input_split_args['sb_margin_weight']
     sb_sum = input_split_args['sb_sum']
+    sb_primary_spec = input_split_args['sb_primary_spec']
     touch_zero_score = input_split_args['touch_zero_score']
 
-    lA = lA.view(lA.shape[0], lA.shape[1], -1)
+    lA = lA.flatten(2)
     # lA shape: (batch, spec, # inputs)
     perturb = (x_U - x_L).unsqueeze(-2)
     # perturb shape: (batch, 1, # inputs)
@@ -75,7 +84,11 @@ def input_split_heuristic_sb(x_L, x_U, dom_lb, thresholds, lA, split_depth=1):
         score = (lA.abs().clamp(min=lA_clamping_thresh) * perturb / 2
                 + (dom_lb.to(lA.device).unsqueeze(-1)
                     - thresholds.unsqueeze(-1)) * sb_margin_weight)
-        score = score.amax(dim=-2)
+        if sb_primary_spec is not None:
+            assert score.ndim == 3
+            score = score[:, sb_primary_spec, :]
+        else:
+            score = score.amax(dim=-2)
     # note: the k (split_depth) in topk <= # inputs, because split_depth is computed as
     # min(max split depth, # inputs).
     # 1) If max split depth <= # inputs, then split_depth <= # inputs.
@@ -83,8 +96,7 @@ def input_split_heuristic_sb(x_L, x_U, dom_lb, thresholds, lA, split_depth=1):
     return torch.topk(score, split_depth, -1).indices
 
 
-def input_split_heuristic_bf(net, x_L, x_U, dom_lb, thresholds, lA,
-                             last_split_idx):
+def input_split_heuristic_bf(net, x_L, x_U, dom_lb, thresholds, lA):
     branching_args = arguments.Config['bab']['branching']
     input_split_args = branching_args['input_split']
     lA_clamping_thresh = input_split_args['sb_coeff_thresh']
@@ -161,8 +173,6 @@ def input_split_heuristic_bf(net, x_L, x_U, dom_lb, thresholds, lA,
     print('Left branch:', margin[0, :, worst_idx])
     print('Right branch:', margin[1, :, worst_idx])
     print('Selected index:', index[worst_idx])
-    if last_split_idx is not None:
-        print('Last selected index:', last_split_idx[worst_idx])
     print('Objective', objective[:, worst_idx])
     print('x_L', x_L[worst_idx])
     print('x_U', x_U[worst_idx])

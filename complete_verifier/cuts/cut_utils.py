@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -19,7 +19,7 @@ import struct
 import psutil
 import torch
 from psutil import NoSuchProcess
-
+from collections import defaultdict
 import numpy as np
 
 def read_cut(cut_file):
@@ -293,6 +293,12 @@ def fetch_cut_from_cplex(net, sync_to_net=True):
     """
     start_time = time.time()
     ######## parse cplex cuts files ###########
+    if (
+        net.mip_building_proc is not None
+        and net.mip_building_proc.exitcode is not None
+        and net.mip_building_proc.exitcode != 0
+    ):
+        raise RuntimeError("MIP building process is not terminated correctly, please check the process. Return code", net.mip_building_proc.exitcode)
     read_from = 'cplex_processes' if getattr(net, 'cplex_processes', None) is not None else 'processes'
     process_dict = getattr(net, read_from, None)
     if process_dict is None:
@@ -545,3 +551,44 @@ def cplex_update_general_beta(net, selected_domains):
             sd["general_betas"] = net.cutter.beta_init * torch.ones_like(net.net.cut_module.general_beta[net.net.final_name][:, :, 0:1, :])
             # need to attach the latest timestamp
             sd["cut_timestamp"] = net.net.cut_timestamp
+
+def biccos_update_general_beta(net, selected_domains):
+    for sd in selected_domains["split_history"]:
+        if ("general_betas" in sd and net.net.cut_module.general_beta is not None) or \
+                ("general_betas" not in sd and getattr(net.net, "cut_module", None) is not None and net.net.cut_module.general_beta is not None):
+            # copy initial general beta from the latest cut module
+            # ensure that for each domain the stack batch = 1
+            # refers to ensuring the tensor's shape accommodates a batch of data 
+            # with each element being processed independently yet 
+            # identically shaped like the original general_beta
+            sd["general_betas"] = net.cutter.beta_init * torch.ones_like(net.net.cut_module.general_beta[net.net.final_name][:, :, 0:1, :])
+
+def cut_analysis(cuts, max_length=20, cluster_size=3) -> None:
+    clusters = defaultdict(int)
+    total_length = 0
+
+    for cut in cuts:
+        length = sum(len(cut[key]) for key in ['arelu_coeffs', 'pre_coeffs', 'x_coeffs', 'relu_coeffs'])
+        total_length += length
+
+        # Determine the cluster for this length
+        if length >= max_length:
+            clusters[max_length] += 1
+        else:
+            cluster_index = length // cluster_size
+            clusters[cluster_index] += 1
+
+    total_cuts = len(cuts)
+    print(f'Total number of valid cuts: {total_cuts}.')
+
+    for cluster_index in range((max_length // cluster_size) + 1):
+        if cluster_index * cluster_size < max_length:
+            lower_bound = cluster_index * cluster_size
+            upper_bound = lower_bound + cluster_size - 1
+            count = clusters[cluster_index]
+            if count == 0:
+                continue
+            print(f'#cuts {lower_bound + 1}-{upper_bound + 1}: {count}')
+
+    # Print the count of cuts with length greater than or equal to max_length
+    print(f'#cuts >= {max_length}: {clusters[max_length]}')

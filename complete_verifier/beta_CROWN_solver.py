@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -21,12 +21,12 @@ import arguments
 import warnings
 
 from auto_LiRPA import BoundedModule, BoundedTensor
+from auto_LiRPA.bound_ops import BoundRelu
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.utils import (
         stop_criterion_placeholder, stop_criterion_all, reduction_str2func)
 
 from attack import attack_after_crown
-from attack.attack_pgd import save_cex, process_vnn_lib_attack
 from input_split.input_split_on_relu_domains import input_branching_decisions
 from utils import Timer
 from load_model import Customized
@@ -37,7 +37,7 @@ from heuristics.nonlinear import precompute_A
 
 class LiRPANet:
     def __init__(self, model_ori, in_size, c=None, device=None,
-                 cplex_processes=None):
+                 cplex_processes=None, mip_building_proc=None):
         """
         convert pytorch model to auto_LiRPA module
         """
@@ -61,14 +61,13 @@ class LiRPANet:
                 'crown_batch_size': solver_args['crown']['batch_size'],
                 'max_crown_size': solver_args['crown']['max_crown_size'],
                 'forward_refinement': solver_args['forward']['refine'],
-                'dynamic_forward': solver_args['forward']['dynamic'],
                 'forward_max_dim': solver_args['forward']['max_dim'],
                 'use_full_conv_alpha': solver_args['alpha-crown']['full_conv_alpha'],
                 'disable_optimization': solver_args['alpha-crown']['disable_optimization'],
                 'fixed_reducemax_index': True,
                 'matmul': {'share_alphas': solver_args['alpha-crown']['matmul_share_alphas']},
                 'tanh': {'loose_threshold': bab_args['branching']['nonlinear_split']['loose_tanh_threshold']},
-                'relu': solver_args['crown']['relu_option'],
+                'activation_bound_option': solver_args['crown']['activation_bound_option'],
                 'buffers': {'has_batchdim': general_args['buffer_has_batchdim']},
                 'optimize_bound_args': {
                     'apply_output_constraints_to': solver_args['invprop']['apply_output_constraints_to'],
@@ -80,21 +79,24 @@ class LiRPANet:
                 },
                 "optimize_graph": {
                     "optimizer": eval(model_args['optimize_graph']) if model_args['optimize_graph'] else None,
-                }
+                },
+                "compare_crown_with_ibp": solver_args['crown']['compare_crown_with_ibp'],
             },
             device=self.device
         )
-        self.net = eval(general_args['graph_optimizer'])(self.net)
+        eval(general_args['graph_optimizer'])(self.net)
         self.root = self.net[self.net.root_names[0]]
 
         self.net.eval()
         self.return_A = False
         self.needed_A_dict = None
         self.cutter = None # class for generating and optimizing cuts
+        self.biccos = None # class for BICCOS
         self.timer = Timer()
 
         # for fetching cplex in parallel
-        self.mip_building_proc = self.processes = None
+        self.mip_building_proc = mip_building_proc
+        self.processes = None
         self.cplex_processes = cplex_processes
         self.pool = self.pool_result = self.pool_termination_flag = None # For multi-process.
 
@@ -108,6 +110,8 @@ class LiRPANet:
             lambda x: len(x.strip()) > 0,
             bab_args['optimized_interm'].split(',')))
 
+        self.nonlinear_split = bab_args['branching']['method'] == 'nonlinear'
+
         if arguments.Config['model']['with_jacobian']:
             print('Not checking the conversion correctness for this model with JacobianOP')
         else:
@@ -118,7 +122,6 @@ class LiRPANet:
             except AssertionError:
                 print('torch allclose failed: norm '
                     f'{torch.norm(model_ori(dummy) - self.net(dummy))}')
-
         model_ori.load_state_dict(model_ori_state_dict, strict=False)
 
     @property
@@ -150,12 +153,16 @@ class LiRPANet:
 
         lower_bounds, upper_bounds = {}, {}
         if init:
-            self._get_split_nodes()
+            self.get_split_nodes()
             for layer in self.net.layers_requiring_bounds + self.net.split_nodes:
+                if layer.lower is None and layer.upper is None:
+                    continue
                 lower_bounds[layer.name] = layer.lower.detach()
                 upper_bounds[layer.name] = layer.upper.detach()
         elif self.interm_transfer:
             for layer in self.net.layers_requiring_bounds:
+                if layer.lower is None and layer.upper is None:
+                    continue
                 lower_bounds[layer.name] = self._transfer(
                     layer.lower.detach(), device)
                 upper_bounds[layer.name] = self._transfer(
@@ -174,7 +181,7 @@ class LiRPANet:
             mask = []
             for idx in node.requires_input_bounds:
                 input_node = node.inputs[idx]
-                if not input_node.perturbed:
+                if not input_node.perturbed or input_node.lower is None and node.upper is None:
                     mask.append(None)
                 else:
                     mask.append(node.get_split_mask(
@@ -200,6 +207,16 @@ class LiRPANet:
                 lA = lA.transpose(0, 1) if transpose else lA.squeeze(0)
             lAs[node.name] = self._transfer(lA, device)
         return lAs
+
+    def get_lbias(self, device=None):
+        lbiases= {}
+        nodes = list(self.net.get_splittable_activations())
+        for node in nodes:
+            lbias = getattr(node, 'lbias', None)
+            if lbias is None:
+                continue
+            lbiases[node.name] = self._transfer(lbias, device)
+        return lbiases
 
     def get_candidate_parallel(self, lb, ub, device=None):
         """Get the intermediate bounds in the current model."""
@@ -249,6 +266,7 @@ class LiRPANet:
             alpha = beta = False
         else:
             alpha = True
+
         iteration = beta_args['iteration']
         get_upper_bound = bab_args['get_upper_bound']
         enable_opt_interm_bounds = beta_args['enable_opt_interm_bounds']
@@ -264,9 +282,9 @@ class LiRPANet:
         if beta and not vanilla_crown:
             splits_per_example = self.set_beta(d, bias=beta_bias)
             self.net.cut_used = (
-                arguments.Config['bab']['cut']['enabled']
-                and arguments.Config['bab']['cut']['bab_cut']
-                and getattr(self.net, 'cut_module', None) is not None)
+                    arguments.Config['bab']['cut']['enabled']
+                    and arguments.Config['bab']['cut']['bab_cut']
+                    and getattr(self.net, 'cut_module', None) is not None)
             # even we need to use cut, maybe the cut is not fetched yet
             if self.net.cut_used:
                 iteration = self.set_cut_params(
@@ -324,12 +342,14 @@ class LiRPANet:
             method = 'CROWN'
         else:
             method = 'CROWN-optimized'
+
         tmp_ret = self.net.compute_bounds(
             x=(new_x,), C=c, method=method,
             interm_bounds=interm_bounds, reference_bounds=reference_bounds,
             return_A=return_A, needed_A_dict=self.needed_A_dict,
             cutter=self.cutter, bound_upper=False,
             decision_thresh=decision_thresh)
+
         self.timer.add('bound')
 
         if return_A:
@@ -400,7 +420,12 @@ class LiRPANet:
             'input_split_idx': input_split_idx,
         }
 
-    def _get_split_nodes(self, verbose=False):
+    def get_split_nodes(self, verbose=False):
+        if arguments.Config['bab']['branching']['nonlinear_split']['relu_only']:
+            for node in self.net.nodes():
+                if node.splittable and not isinstance(node, BoundRelu):
+                    node.splittable = False
+                    node.force_not_splittable = True
         self.net.get_split_nodes()
         self.split_activations = self.net.split_activations
         if verbose:
@@ -411,11 +436,15 @@ class LiRPANet:
             for node in self.net.nodes():
                 if node.perturbed and len(node.requires_input_bounds):
                     print('  ', node)
+        if not self.nonlinear_split:
+            for node in self.net.nodes():
+                if node.splittable and not isinstance(node, BoundRelu):
+                    self.nonlinear_split = True
 
     def build(self, input_domain, x,
               stop_criterion_func=stop_criterion_placeholder(),
               bounding_method=None, decision_thresh=None, vnnlib_ori=None,
-              interm_bounds=None):
+              interm_bounds=None, return_A=False):
         # TODO merge with build_with_refined_bounds()
         solver_args = arguments.Config['solver']
         bab_args = arguments.Config['bab']
@@ -423,8 +452,6 @@ class LiRPANet:
         share_alphas = solver_args['alpha-crown']['share_alphas']
         bounding_method = bounding_method or solver_args['bound_prop_method']
         branching_input_and_activation = branching_args['branching_input_and_activation']
-        fast_A = (branching_args['method'] == 'nonlinear'
-                  and branching_args['nonlinear_split']['method'] == 'shortcut')
 
         self.x = x
         self.input_domain = input_domain
@@ -433,7 +460,7 @@ class LiRPANet:
             'verbosity': 1,
         })
         self.set_crown_bound_opts('alpha')
-        self._get_split_nodes(verbose=True)
+        self.get_split_nodes(verbose=True)
 
         # expand x to align with C's batch size for multi target verification
         batch = self.c.size()[0]
@@ -443,10 +470,10 @@ class LiRPANet:
             x_expand = x
 
         result = {key: None for key in [
-            'mask', 'lA', 'lower_bounds', 'upper_bounds',
+            'mask', 'lA', 'lbias', 'lower_bounds', 'upper_bounds',
             'alphas', 'history', 'input_split_idx', 'attack_images']}
 
-        self._set_A_options()
+        self._set_A_options(return_A=return_A)
         prune_after_crown = None
         if bounding_method == 'alpha-crown':
             # first get CROWN bounds
@@ -468,27 +495,18 @@ class LiRPANet:
 
             if arguments.Config['attack']['pgd_order'] == 'middle' and vnnlib_ori is not None:
                 # Run adversarial attack on those specs that cannot be verified by CROWN.
-                verified_success, attack_images = attack_after_crown(
+                verified_success, attack_images = attack_after_crown( # Adversarial images are generated here.
                     lb, vnnlib_ori[0], self.model_ori, x, decision_thresh)
-                if verified_success:  # Adversarial images are generated here.
-                    print('PGD attack succeeded.')
-                    if arguments.Config["general"]["save_adv_example"]:
-                        try:
-                            attack_output = self.model_ori(attack_images.view(-1, *attack_images.shape[1:]))
-                            list_target_label_arrays, data_min_repeat, data_max_repeat = process_vnn_lib_attack(vnnlib_ori, x)
-                            save_cex(attack_images, attack_output, x, vnnlib_ori, arguments.Config["attack"]["cex_path"], data_max_repeat, data_min_repeat)
-                        except Exception as e:
-                            print(str(e))
-                            print('save adv example failed')
+                if verified_success:
+                    print("pgd attack succeed in attack_after_crown")
                     result.update({'attack_images': attack_images})
                     return lb, result
 
-            c_to_use = self.c
             if solver_args['prune_after_crown']:
                 prune_after_crown = PruneAfterCROWN(
                     self.net, self.c, lb,
                     decision_thresh=decision_thresh)
-                c_to_use = prune_after_crown.c
+                self.c = prune_after_crown.c
                 # This should be the only supported case for incomplete verifier.
                 assert stop_criterion_func.__qualname__.split('.')[0] == 'stop_criterion_all'
                 pruned_stop_criterion_func = stop_criterion_all(prune_after_crown.decision_thresh)
@@ -497,7 +515,7 @@ class LiRPANet:
                 })
 
             ret = self.net.compute_bounds(
-                x=(x_expand,), C=c_to_use, method='CROWN-Optimized',
+                x=(x_expand,), C=self.c, method='CROWN-Optimized',
                 return_A=self.return_A, needed_A_dict=self.needed_A_dict,
                 bound_upper=False, aux_reference_bounds=aux_reference_bounds,
                 cutter=self.cutter, interm_bounds=interm_bounds)
@@ -539,12 +557,24 @@ class LiRPANet:
 
         print(f'initial {bounding_method} bounds:', lb)
 
+        negative_indices = torch.nonzero(lb[0] < 0, as_tuple=False)
+        negative_count = negative_indices.shape[0]
+        if bab_args['cut']['biccos']['enabled'] and not bab_args['cut']['cplex_cuts']:
+            if negative_count == 1:
+                print('Only one property for bab verification.')
+                backing_up_max_domains = arguments.Config['bab']['backing_up_max_domain']
+                arguments.Config['bab']['initial_max_domains'] = backing_up_max_domains
+            else:
+                print('Warning: Multiple properties need to be verified by BaB with cuts.',
+                      'Set initial_max_domains to 1 due to the limitation of GCP-CROWN solver')
+                arguments.Config['bab']['initial_max_domains'] = 1
+
         # save initial alpha-crown for tests
         if arguments.Config['general']['save_output'] and bounding_method == 'alpha-crown':
             arguments.Globals['out']['init_alpha_crown'] = lb.cpu()
 
         global_lb = lb.min().item()
-        print('Worst class: (+ rhs)', global_lb)
+        print('Number of class (without rhs):', negative_count, '; Worst class: (+ rhs)', global_lb)
 
         # DEBUG: check loose bounds
         if os.environ.get('ABCROWN_VIEW_INTERM', False):
@@ -558,10 +588,11 @@ class LiRPANet:
         history = self.empty_history()
         mask = self.get_mask()
         lA = self.get_lA()
+        lbias = self.get_lbias()
         if prune_after_crown:
             lA = prune_after_crown.recover_lA_and_alpha(lA, alpha)
 
-        if fast_A and global_lb < 0 and self.return_A:
+        if self.nonlinear_split and global_lb < 0 and self.return_A:
             precompute_A(self.net, A, x_expand,
                          interm_bounds={k: (lb[k], ub[k]) for k in lb})
         if bab_args['cut']['enabled']:
@@ -572,9 +603,9 @@ class LiRPANet:
             self.A_saved = A
 
         result.update({
-            'mask': mask, 'lA': lA, 'lower_bounds': lb, 'upper_bounds': ub,
+            'mask': mask, 'lA': lA, 'lbias': lbias,'lower_bounds': lb, 'upper_bounds': ub,
             'alphas': alpha, 'history': history,
-            'input_split_idx': input_split_idx,
+            'input_split_idx': input_split_idx
         })
         return lb[self.final_name], result
 
@@ -590,7 +621,6 @@ class LiRPANet:
         branch_args = bab_args['branching']
         share_alphas = solver_args['alpha-crown']['share_alphas']
         target_batch_size = solver_args['multi_class']['label_batch_size']
-        loss_reduction_func = arguments.Config['general']['loss_reduction_func']
         branching_input_and_activation = branch_args['branching_input_and_activation']
         vanilla_crown = bab_args['vanilla_crown']
 
@@ -611,7 +641,6 @@ class LiRPANet:
                 if k != self.final_name:
                     refined_upper_bounds[k] = self.expand_batch(v, batch)
 
-        loss_reduction_func = reduction_str2func(loss_reduction_func)
         self.refined_lower_bounds = refined_lower_bounds
         self.refined_upper_bounds = refined_upper_bounds
 
@@ -781,19 +810,18 @@ class LiRPANet:
             domain_updater = DomainUpdaterSimple(*args)
         else:
             domain_updater = DomainUpdater(*args)
+
         domain_updater.set_branched_bounds(d, split, mode)
 
-    def _set_A_options(self, bab=False):
+    def _set_A_options(self, bab=False, return_A=False):
         branching_args = arguments.Config['bab']['branching']
         input_and_act = branching_args['branching_input_and_activation']
-        fast_A = (branching_args['nonlinear_split']['method'] == 'shortcut'
-                and branching_args['method'] == 'nonlinear')
         get_upper_bound = bab and arguments.Config['bab']['get_upper_bound']
         if get_upper_bound or input_and_act:
             self.needed_A_dict = defaultdict(set)
             self.needed_A_dict[self.net.output_name[0]].add(
                 self.net.input_name[0])
-        if fast_A:
+        if self.nonlinear_split or return_A:
             self.needed_A_dict = defaultdict(set)
             for node in self.net.nodes():
                 if node != self.net.final_name:
@@ -803,13 +831,21 @@ class LiRPANet:
             self.return_A = True
 
     def empty_history(self):
-        return {layer.name: ([], [], []) for layer in self.net.split_nodes}
+        '''
+        history: a tuple of tensors
+            history[0]: relu_idx
+            history[1]: relu_status
+            history[2]: relu_bias
+            history[3]: relu_score
+            history[4]: depths
+        '''
+        return {layer.name: ([], [], [], [], []) for layer in self.net.split_nodes}
 
-    def _transfer(self, tensor, device=None, half=False):
+    def _transfer(self, tensor, device=None, half=False, non_blocking=False):
         if half:
             tensor = tensor.half()
         if device:
-            tensor = tensor.to(device)
+            tensor = tensor.to(device, non_blocking=non_blocking)
         return tensor
 
     def set_crown_bound_opts(self, crown_name):
@@ -832,7 +868,8 @@ class LiRPANet:
                 'init_alpha': False, 'fix_interm_bounds': True,
                 'use_shared_alpha': crown_args['share_alphas'],
                 'early_stop_patience': solver_args['early_stop_patience'],
-                'pruning_in_iteration': False
+                'pruning_in_iteration': False,
+                'max_time': crown_args['max_time'] * bab_args['timeout'],
             })
         elif crown_name == 'beta':
             opt_bound_args.update({
@@ -882,4 +919,5 @@ class LiRPANet:
         enable_cuts, create_cutter, set_cuts, create_mip_building_proc,
         set_cut_params, set_cut_new_split_history,
         disable_cut_for_branching, set_dependencies)
+    from cuts.infered_cuts import biccos_verification
     from prune import prune_reference_alphas, prune_lA

@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -13,10 +13,12 @@
 ##                                                                     ##
 #########################################################################
 """Various kinds of specifications for verification."""
+from numpy import ndarray
 
 import arguments
 import torch
 import numpy as np
+from typing import Union
 
 from beta_CROWN_solver import LiRPANet
 
@@ -64,7 +66,7 @@ class SpecificationTarget(Specification):
 
 
 class SpecificationRunnerup(Specification):
-    def construct_vnnlib(self, dataset, X, x_range, example_idx_list):
+    def construct_vnnlib(self, dataset, x_range, example_idx_list):
         vnnlib = []
         for i in range(len(example_idx_list)):
             label = dataset['labels'][example_idx_list[i]].view(1, 1)
@@ -219,8 +221,6 @@ def trim_batch(model, init_global_lb, init_global_ub, reference_alphas_cp,
     if rhs.numel() > 1:
         if optimize_disjuncts_separately:
             raise NotImplementedError("Output constraints for disjunctions are not supported for rhs.numel() > 1")
-        assert init_global_lb.numel() == rhs.numel()
-        rhs = rhs[:, start_idx: start_idx + c.shape[0]]
     # trim reference slope by batch size of initial_max_domains accordingly
     if reference_alphas is not None:
         for m, spec_dict in reference_alphas.items():
@@ -371,14 +371,44 @@ def sort_targets(batched_vnnlib, init_global_lb, init_global_ub,
     return batched_vnnlib, init_global_lb, init_global_ub, lA, attack_images
 
 
-def add_rhs_offset(vnnlib, rhs_offset):
-    print('Add an offset to RHS for debugging:', rhs_offset)
-    vnnlib = [
-        (
-            v[0],
-            [(v[1][i][0], v[1][i][1] + rhs_offset)
-            for i in range(len(v[1]))]
-        )
-        for v in vnnlib
-    ]
-    return vnnlib
+def add_rhs_offset(
+        vnnlib: list,
+        rhs_offset: Union[np.ndarray, int, float] = None
+) -> list:
+    """
+    Updates the second operand's offset value where rhs_offset is either a scalar that may be
+    broadcast to ALL clauses, or rhs_offset is an array of offset values applied to each clause.
+    @param vnnlib:      The vnnlib file formatted as a list object. Structure can be found in the
+                        read_vnnlib.md.
+    @param rhs_offset:  Scalar, array, or None. If array, it modifies the offsets in the clauses 
+                        of the vnnlib file accordingly. If scalar, it is broadcast to all clauses.
+    @return:            The modified vnnlib object
+    """
+    # If rhs_offset is None, return the original vnnlib
+    if rhs_offset is None:
+        return vnnlib
+
+    # For debugging, add a print statement if sanity check is enabled
+    if arguments.Config['debug']['sanity_check'] in ['Full', "Full+Graph"]:
+        print('Add an offset to RHS for debugging:', rhs_offset)
+
+    # Determine if rhs_offset is a scalar or array
+    is_scalar = isinstance(rhs_offset, (int, float))
+    
+    updated_vnnlib = []
+    k = 0  # Index counter if rhs_offset is an array
+
+    for v in vnnlib:
+        result = []
+        for i in range(len(v[1])):
+            if is_scalar:
+                # If scalar, broadcast the same rhs_offset to all clauses
+                item = (v[1][i][0], v[1][i][1] + rhs_offset + 1e-3)
+            else:
+                # If rhs_offset is an array, apply the offset to each clause
+                item = (v[1][i][0], v[1][i][1] + rhs_offset[k:k + len(v[1][i][1])] + 1e-3)
+                k += len(v[1][i][1])
+            result.append(item)
+        updated_vnnlib.append((v[0], result))
+    
+    return updated_vnnlib

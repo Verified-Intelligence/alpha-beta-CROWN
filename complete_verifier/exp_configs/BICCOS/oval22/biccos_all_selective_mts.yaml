@@ -1,0 +1,29 @@
+general:
+  csv_name: instances.csv
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/oval21
+specification:
+  norm: .inf
+solver:
+  batch_size: 4096
+  start_save_best: -1
+  beta-crown:
+    lr_beta: 0.01
+bab:
+  interm_transfer: false
+  tree_traversal: breadth_first
+  cut:
+    enabled: true
+    bab_cut: true
+    lr_beta: 0.01
+    number_cuts: 500
+    biccos:
+      enabled: true
+      auto_param: false
+      multi_tree_branching:
+        enabled: true
+        restore_best_tree: true
+  branching:
+    candidates: 10
+    reduceop: max
+attack:
+  pgd_order: middle

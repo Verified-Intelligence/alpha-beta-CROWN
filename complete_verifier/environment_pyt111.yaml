@@ -122,7 +122,7 @@ dependencies:
   - zstd=1.5.5=hc292b87_0
   - pip:
       - flatbuffers==23.5.26
-      - git+https://github.com/KaidiXu/onnx2pytorch@fe7281b9b6c8c28f61e72b8f3b0e3181067c7399#egg=onnx2pytorch
+      - git+https://github.com/Verified-Intelligence/onnx2pytorch@fe7281b9b6c8c28f61e72b8f3b0e3181067c7399#egg=onnx2pytorch
       - onnxoptimizer==0.3.13
       - onnxruntime==1.15.1
       - onnxsim==0.4.33

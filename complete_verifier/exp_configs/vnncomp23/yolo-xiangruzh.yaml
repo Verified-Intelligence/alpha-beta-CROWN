@@ -3,8 +3,6 @@ general:
   csv_name: instances.csv
 attack:
   pgd_order: skip
-bab:
-  pruning_in_iteration: true
 solver:
   batch_size: 128  # Number of subdomains to compute in parallel in BaB. As large as possible. Decrease if you run out of memory during BaB.
   alpha-crown:

@@ -53,11 +53,12 @@ Guide on Algorithm Selection
 -------------------
 
 α,β-CROWN verifier includes a wide range of algorithms, especially
-bound-propagation-based algorithms.  We prefer ReLU branching in most cases,
+bound-propagation-based algorithms.
+We prefer ReLU branching or branching on intermediate nonlinearities in most cases,
 but input space branching works better when the input dimension is very low
 (e.g., < 20).
 
-If your model is a CNN/ResNet and task is image classification, using beta-CROWN with ReLU branching
+If your model is a CNN/ResNet with ReLU activations and task is image classification, using beta-CROWN with ReLU branching
 is the best option. Relatively large models such as a 20-layer ResNet can be supported. Example
 configuration files include:
 
@@ -65,12 +66,18 @@ configuration files include:
 * TinyImageNet (VNN-COMP 2022): [19-layer](/complete_verifier/exp_configs/vnncomp22/tinyimagenet_2022.yaml)
 * CIFAR10 ResNets (VNN-COMP 2021): [4-block](/complete_verifier/exp_configs/cifar_resnet_4b.yaml), [2-block](/complete_verifier/exp_configs/cifar_resnet_2b.yaml)
 
+If your model has relatively high input dimension and non-ReLU nonlinearities
+(e.g., activation functions such as Sigmoid/Tanh/GeLU/Sin, nonlinear dynamics or constraints), you may use [GenBaB](https://arxiv.org/pdf/2405.21063) with branch-and-bound on general intermediate nonlinearities. Examples include:
+* Vision Transformers: [`vit` in VNN-COMP 2023](/complete_verifier/exp_configs/vnncomp23/vit.yaml)
+* ML for AC Optimal Power Flow: [`ml4acopf` in VNN-COMP 2023](/complete_verifier/exp_configs/vnncomp23/ml4acopf.yaml)
+
 If your model has low input dimension on the perturbed variables (e.g., tasks in control, RL), branching
 the input space is often the best solution. Example configuration files include:
 
 * ACASXu (open-loop controller): [`acasxu` in VNN-COMP 2021](/complete_verifier/exp_configs/vnncomp21/acasxu_new.yaml)
 * Reinforcement learning: [`cartpole` in VNN-COMP 2022](/complete_verifier/exp_configs/vnncomp22/cartpole.yaml), [`dubins-rejoin`](/complete_verifier/exp_configs/vnncomp22/dubins-rejoin.yaml), [`lunarlander`](/complete_verifier/exp_configs/vnncomp22/lunarlander.yaml)
 * [NN in computer systems](http://download.huan-zhang.com/events/wfvml2022/papers/25_CameraReady_wfvml2022.pdf): [learned database index](/complete_verifier/exp_configs/vnncomp22/nn4sys_2022_lindex.yaml), [query cardinality prediction](/complete_verifier/exp_configs/vnncomp22/nn4sys_2022_128d.yaml)
+* Lyapunov-stable neural control (closed-loop controllers): [2D quadrotor with state feedback](https://github.com/Verified-Intelligence/Lyapunov_Stable_NN_Controllers/blob/main/verification/quadrotor2d_state_feedback_lyapunov_in_levelset.yaml) or [`lsnc` in VNN-COMP 2024](/complete_verifier/exp_configs/vnncomp24/lsnc.yaml)
 * Low dimensional [bias-field perturbation](https://www.bmvc2021-virtualconference.com/assets/papers/1291.pdf) on CIFAR-10: [CIFAR-10 biasfield](/complete_verifier/exp_configs/vnncomp22/cifar_biasfield.yaml)
 
 If your model is relatively small (a few layers of CNN/MLP) and ReLU branching is used, you can use

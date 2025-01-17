@@ -1,33 +1,30 @@
 general:
-  conv_mode: matrix
-  sparse_alpha: false
-  sparse_interm: false
   root_path: ../../vnncomp2023_benchmarks/benchmarks/ml4acopf
   csv_name: instances.csv
+  sparse_alpha: false
+  sparse_interm: false
+  verify_onnxruntime_output: True
 model:
   onnx_optimization_flags: ["remove_matmul_inplace"]
 attack:
-  pgd_order: before
   pgd_restarts: 100
   attack_tolerance: 0.0001
 solver:
-  batch_size: 512
+  batch_size: 128
   min_batch_size_ratio: 0.0
+  early_stop_patience: 200
   alpha-crown:
-    lr_alpha: 0.5
+    lr_alpha: 0.2
     lr_decay: 0.99
-    iteration: 40
-    disable_optimization: ['sin', 'cos']
+    iteration: 200
   beta-crown:
     lr_alpha: 0.5
-    iteration: 10
+    lr_beta: 0.5
+    iteration: 50
 bab:
-  pruning_in_iteration: False
-  sort_domain_interval: 1
+  pruning_in_iteration: false
   branching:
-    method: nonlinear
-    candidates: 3
+    candidates: 200
     nonlinear_split:
-      num_branches: 2
-      method: shortcut
       filter: true
+      filter_beta: true

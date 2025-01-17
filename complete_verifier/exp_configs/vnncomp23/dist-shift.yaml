@@ -5,8 +5,6 @@ general:
   enable_incomplete_verification: False
 model:
   onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
-data:
-  num_outputs: 10
 solver:
   min_batch_size_ratio: 1.0
   batch_size: 192

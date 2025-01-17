@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -81,7 +81,7 @@ def input_split_on_relu_domains(domains, wrapped_net, batch_size):
     # First we need to run branching heuristic for input split.
     time_branching = time.time()
     split_depth = get_split_depth(x_Ls)
-    new_x_Ls, new_x_Us, new_cs, new_rhs, split_depth, last_split_idx = input_split_parallel(
+    new_x_Ls, new_x_Us, new_cs, new_rhs, split_depth = input_split_parallel(
         x_Ls, x_Us, wrapped_net.x.shape, cs, rhs, split_depth=split_depth,
         i_idx=split_idx)
     n_repeat = 2 ** split_depth
@@ -163,7 +163,7 @@ def input_split_on_relu_domains(domains, wrapped_net, batch_size):
                 False, dup_cs,
                 n_repeat*batch_size, x_Ls=new_x_Ls, x_Us=new_x_Us,
                 input_split_idx=new_split_idx,
-                ignore_sides=True, last_split_idx=last_split_idx)  # No left/right side domains.
+                ignore_sides=True)  # No left/right side domains.
     if sort_domain_iter > 0 and iter_idx % sort_domain_iter == 0:
         domains.sort()
     global_lb = check_worst_domain(domains)

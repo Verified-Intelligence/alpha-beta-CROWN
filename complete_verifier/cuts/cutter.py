@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -22,8 +22,9 @@ class Cutter:
     def __init__(self, solver, A=None, x=None, number_cuts=50, fix_intermediate_bounds=False, device='cuda'):
         self.solver = solver
         self.update_net(solver.net)
-        # FIXME a['/input.1'] may not always be the input name
-        self.A = [a['/input.1'] for a in A.values()] if A is not None else None
+        input_name = str(list(solver.net.input_name)[0])
+        assert len([input_name]) == 1
+        self.A = [a[input_name] for a in A.values()] if A is not None else None
         self.x = x
         self.number_cuts = number_cuts
         self.fix_intermediate_bounds = fix_intermediate_bounds

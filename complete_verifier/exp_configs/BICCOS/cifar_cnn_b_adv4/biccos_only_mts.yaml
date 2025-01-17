@@ -1,0 +1,32 @@
+model:
+  name: cnn_4layer_b4
+  path: models/sdp/cifar_cnn_b_adv4.model
+data:
+  dataset: CIFAR_SDP
+specification:
+  norm: .inf
+  epsilon: 0.00784313725
+solver:
+  batch_size: 256
+  auto_enlarge_batch_size: true
+  beta-crown:
+    iteration: 20
+bab:
+  timeout: 200
+  tree_traversal: breadth_first
+  cut:
+    enabled: true
+    bab_cut: true
+    number_cuts: 500
+    biccos:
+      enabled: true
+      auto_param: false
+      constraint_strengthening: false
+      multi_tree_branching:
+        enabled: true
+        restore_best_tree: true
+  branching:
+    reduceop: max
+attack:
+  pgd_order: middle
+  pgd_restarts: 50

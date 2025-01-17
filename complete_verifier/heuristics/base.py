@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -19,7 +19,6 @@ import torch
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from beta_CROWN_solver import LiRPANet
-
 
 class NeuronBranchingHeuristic():
     """Base class for branching heuristics."""
@@ -91,6 +90,7 @@ class NeuronBranchingHeuristic():
             score += split_masks[idx] * 1e-10
         topk_neuron_layers, topk_neuron_indices = self.find_topk_scores(
             layer_scores, split_masks, split_depth)
+
         # TODO need to return the branching point
         return self.format_decisions(topk_neuron_layers, topk_neuron_indices)
 
@@ -212,8 +212,7 @@ class RandomNeuronBranching(NeuronBranchingHeuristic):
         scores = {}
         for idx, lb in self.layer_iterator(domains['lower_bounds']):
             # Random score 0 - 1.
-            scores[idx] = (domains['mask'][self.net.split_indices[idx]]
-                           * torch.rand_like(lb)).flatten(1)
+            scores[idx] = domains['mask'][idx] * torch.rand_like(lb).flatten(1)
         return scores
 
 

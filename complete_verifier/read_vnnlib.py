@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -157,8 +157,8 @@ def read_vnnlib(vnnlib_filename, regression=False):
     If regression=True, the specification is a regression problem rather than classification.
 
     Currently we support vnnlib loader with cache:
-        1. For the first time loading, it will parse the entire file and generate a cache file with md5 code of original file into *.compiled.
-        2. For the later loading, it will check *.compiled and see if the stored md5 matches the original one. If not, regeneration is needed for vnnlib changing cases. Otherwise return the cache file.
+        1. For the first time loading, it will parse the entire file and generate a cache file with sha256 code of original file into *.compiled.
+        2. For the later loading, it will check *.compiled and see if the stored sha256 matches the original one. If not, regeneration is needed for vnnlib changing cases. Otherwise return the cache file.
     '''
 
     if arguments.Config["debug"]["rescale_vnnlib_ptb"] is not None:
@@ -176,22 +176,22 @@ def read_vnnlib(vnnlib_filename, regression=False):
         compiled_vnnlib_suffix = ".compiled"
         compiled_vnnlib_filename = vnnlib_filename + compiled_vnnlib_suffix
         with open(vnnlib_filename, "rb") as file:
-            curfile_md5 = hashlib.md5(file.read()).hexdigest()
+            curfile_sha256 = hashlib.sha256(file.read()).hexdigest()
         if (os.path.exists(compiled_vnnlib_filename)):
             read_error = False
             try:
                 with open(compiled_vnnlib_filename, "rb") as extf:
-                    final_rv, old_file_md5 = pickle.load(extf)
+                    final_rv, old_file_sha256 = pickle.load(extf)
             except (pickle.PickleError, ValueError, EOFError):
                 print("Cannot read compiled vnnlib file. Regenerating...")
                 read_error = True
-
+            
             if (read_error == False):
-                if (curfile_md5 == old_file_md5):
+                if (curfile_sha256 == old_file_sha256):
                     print(f"Precompiled vnnlib file found at {compiled_vnnlib_filename}")
                     return final_rv
                 else:
-                    print(f"{compiled_vnnlib_suffix} file md5: {old_file_md5} does not match the current vnnlib md5: {curfile_md5}. Regenerating...")
+                    print(f"{compiled_vnnlib_suffix} file sha256: {curfile_sha256} does not match the current vnnlib sha256: {old_file_sha256}. Regenerating...")
 
     # example: "(declare-const X_0 Real)"
     regex_declare = re.compile(r"^\(declare-const (X|Y)_(\S+) Real\)$")
@@ -340,5 +340,5 @@ def read_vnnlib(vnnlib_filename, regression=False):
 
     if not rescale_perturbation:
         with open(compiled_vnnlib_filename, "wb") as extf:
-            pickle.dump((final_rv, curfile_md5), extf, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump((final_rv, curfile_sha256), extf, protocol=pickle.HIGHEST_PROTOCOL)
     return final_rv

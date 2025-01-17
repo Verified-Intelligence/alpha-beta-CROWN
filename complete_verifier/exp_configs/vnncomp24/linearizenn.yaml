@@ -1,0 +1,17 @@
+# Configuration file for running the linearizeNN benchmark
+general:
+  root_path: ../../vnncomp2024_benchmarks/benchmarks/linearizenn
+  csv_name: instances.csv
+solver:
+  batch_size: 65536  # Number of parallel domains to compute on GPU.
+  bound_prop_method: crown
+bab:
+  branching:
+    method: naive  # Split on input space.
+    input_split:
+      enable: True
+      # enable_clip_domains: True
+      # reorder_bab: True
+attack:
+  pgd_order: after
+  pgd_restarts: 10000

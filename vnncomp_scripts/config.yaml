@@ -1,5 +1,5 @@
 name: alpha-beta-CROWN
-ami: ami-0d70546e43a941d70 
+ami: ami-0aff18ec83b712f05 
 scripts_dir: vnncomp_scripts
 manual_installation_step: True
 run_installation_script_as_root: False

@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -213,12 +213,17 @@ class Stats:
         self.implied_cuts = {'statistics': [], 'average_branched_neurons': []}
 
 
-def get_reduce_op(op):
+def get_reduce_op(op, with_dim=True):
     """Convert reduce op in str to the actual function."""
     if op is None:
         return op
-    elif op in ['min', 'max', 'mean']:
+    elif op in ['min', 'max']:
         return getattr(torch, op)
+    elif op == 'mean':
+        if with_dim:
+            return torch.mean
+        else:
+            return lambda a, b: (a + b) / 2
     else:
         raise ValueError(op)
 
@@ -232,9 +237,10 @@ def fast_hist_copy(hists):
         if isinstance(hist[0], torch.Tensor):
             ret[k] = hist
         elif isinstance(hist[0], list):
-            ret[k] = tuple(hist[i].copy() for i in range(3))
+            ret[k] = tuple([item.clone() if isinstance(item, torch.Tensor)
+                            else item.copy() for item in hist[:5]])
         else:
-            ret[k] = tuple(copy.deepcopy(hist[i]) for i in range(3))
+            ret[k] = tuple(copy.deepcopy(hist[i]) for i in range(5))
     return ret
 
 
@@ -350,13 +356,18 @@ def get_batch_size_from_masks(mask):
     return len(next(iter(mask.values())))
 
 
-def get_unstable_neurons(updated_mask):
+def get_unstable_neurons(updated_mask, net):
     tot_ambi_nodes = 0
     # only pick the first copy from possible multiple x
     updated_mask = {k: [item[0:1] if item is not None else None
                         for item in mask]
                     for k, mask in updated_mask.items()}
     for k, masks in updated_mask.items():
+        if type(net.net[k]).__name__ == 'BoundRelu':
+            # Initialize the ReLU indicators from the updated masks.
+            # The set_gcp_relu_indicators() method updates the gcp_unstable_relu_indicators
+            # for the specified ReLU layer, thereby restoring its unstable ReLUs information.
+            net.net.set_gcp_relu_indicators(k, torch.stack(masks))
         for i, mask in enumerate(masks):
             if mask is None: # Not perturbed
                 continue
@@ -384,4 +395,15 @@ def print_model(model):
         for node in model.nodes():
             if node.perturbed and node.requires_input_bounds:
                 print('  ', node)
-        import pdb; pdb.set_trace()
+        breakpoint()
+
+
+def check_auto_enlarge_batch_size(auto_batch_size):
+    ret = auto_batch_size.update()
+    if ret is not None:
+        current_vram = ret['current_vram']
+        total_vram = ret['total_vram']
+        print('current_vram/total_varm: '
+            f'{current_vram/1e9:.1f}GB/{total_vram/1e9:.1f}GB, '
+            f'batch_size increase to {auto_batch_size.batch_size}')
+    return auto_batch_size.batch_size

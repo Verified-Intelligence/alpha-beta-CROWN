@@ -1,0 +1,31 @@
+general:
+  csv_name: instances.csv
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/cifar100_tinyimagenet_resnet
+model:
+  onnx_optimization_flags: merge_bn
+data:
+  start: 10
+  end: 34
+  num_outputs: 100
+specification:
+  norm: .inf
+solver:
+  batch_size: 1024
+  alpha-crown:
+    lr_alpha: 0.25
+    iteration: 20
+  beta-crown:
+    lr_alpha: 0.05
+    lr_beta: 0.1
+    iteration: 5
+bab:
+  interm_transfer: false
+  cut:
+    bab_cut: true
+    number_cuts: 500
+  branching:
+    candidates: 7
+    reduceop: max
+attack:
+  pgd_order: middle
+  pgd_restarts: 10

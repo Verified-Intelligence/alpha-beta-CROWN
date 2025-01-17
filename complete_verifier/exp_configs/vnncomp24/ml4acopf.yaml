@@ -1,0 +1,33 @@
+general:
+  conv_mode: matrix
+  root_path: ../../vnncomp2024_benchmarks/benchmarks/ml4acopf_2024
+  csv_name: instances.csv
+  graph_optimizer: Customized("custom_graph_optimizer", "merge_relu_lookup_table")
+  verify_onnxruntime_output: True
+model:
+  onnx_optimization_flags: ["remove_matmul_inplace"]
+attack:
+  pgd_order: before
+  pgd_restarts: 50
+  attack_tolerance: 0.0001
+solver:
+  batch_size: 8
+  auto_enlarge_batch_size: true
+  min_batch_size_ratio: 0.0
+  early_stop_patience: 200
+  alpha-crown:
+    lr_alpha: 0.2
+    lr_decay: 0.99
+    iteration: 200
+  beta-crown:
+    lr_alpha: 0.5
+    lr_beta: 0.5
+    iteration: 50
+bab:
+  pruning_in_iteration: false
+  branching:
+    candidates: 100
+    reduceop: max
+    nonlinear_split:
+      filter: true
+      filter_beta: true

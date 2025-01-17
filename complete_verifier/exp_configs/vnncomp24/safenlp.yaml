@@ -1,0 +1,8 @@
+# Configuration file for running the safeNLP benchmark (all properties).
+general:
+  root_path: ../../vnncomp2024_benchmarks/benchmarks/safenlp
+  csv_name: instances.csv
+  complete_verifier: mip
+attack:
+  pgd_order: after
+  pgd_restarts: 10000

@@ -1,0 +1,29 @@
+general:
+  root_path: ../../vnncomp2024_benchmarks/benchmarks/yolo_2023
+  csv_name: instances.csv
+  # This benchmark takes a lot of memory with shared alpha, so we focus on optimizing the "easiest" domain.
+  # Tested on instance 301, 422.
+  loss_reduction_func: max
+attack:
+  pgd_order: skip
+bab:
+  pruning_in_iteration: true
+solver:
+  batch_size: 128  # Number of subdomains to compute in parallel in BaB. As large as possible. Decrease if you run out of memory during BaB.
+  alpha-crown:
+    share_alphas: true  # Enabled to save memory during initial alpha-CROWN. Not used during BaB.
+    full_conv_alpha: false  # Disabled to save memory during initial alpha-CROWN. Not used during BaB.
+    lr_alpha: 0.3
+    lr_decay: 0.98  # exponential decay.
+    iteration: 50  # If large, need to make sure decay is not too small.
+  invprop:
+    # Use INVPROP to refine the intermediate layer before the last ReLU layer.
+    # The node name was extracted by PyTorch 2.3.1.
+    # In PyTorch 1.11 the name was ["/input-32"] (a better way to representing internal nodes should be developed later).
+    # Some older commits may use "/input.48" (note the "." instead of "-".
+    apply_output_constraints_to: ["/input-48"]
+  beta-crown:
+    lr_alpha: 0.05
+    lr_beta: 0.1
+    lr_decay: 0.98
+    iteration: 10

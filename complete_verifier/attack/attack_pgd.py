@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -25,10 +25,11 @@ import os
 import subprocess
 from load_model import Customized
 import sys
-
+from load_model import inference_onnx
 
 torch._C._jit_set_profiling_executor(False)
 torch._C._jit_set_profiling_mode(False)
+
 
 class Normalization(nn.Module):
     def __init__(self, mean, std, model):
@@ -40,6 +41,7 @@ class Normalization(nn.Module):
     def forward(self, x):
         return self.model((x - self.mean)/self.std)
 
+
 def clamp(X, lower_limit=None, upper_limit=None):
     if lower_limit is None and upper_limit is None:
         return X
@@ -49,53 +51,57 @@ def clamp(X, lower_limit=None, upper_limit=None):
         return torch.min(X, upper_limit)
     return torch.max(torch.min(X, upper_limit), lower_limit)
 
+def check_and_save_cex(adv_example, adv_output, vnnlib, res_path, expected_verified_status):
+    """
+    adv_example: [batch_size, *input_shape]
+    adv_output: [batch_size, *input_shape]
+    expected_verified_status: <"unsafe-pgd", "unsafe-bab", "unsafe", ...> 
+    """
+    print('\nChecking and Saving Counterexample in check_and_save_cex')
+    assert adv_example.size(0) == 1, f'The batch_size of adv_example should be 1, but get {adv_example.size(0)}.'
+    assert adv_output.dim() == 2, f'The adv_output should be in the shape of (batch_size, logits), but get {adv_output.shape}.'
+    assert vnnlib is not None, f'Cached vnnlib should be used to enable check specs conditions.'
+    # take only one in batch
+    adv_output = adv_output[0:1].detach()
+    verified_status = expected_verified_status
+    verified_success = True
 
-
-def save_cex(adv_example, adv_output, x, vnnlib, res_path, data_max, data_min):
-    list_target_label_arrays, _, _ = process_vnn_lib_attack(vnnlib, x)
-    C_mat, rhs_mat, cond_mat, same_number_const = build_conditions(x, list_target_label_arrays)
-
-    # [num_example, num_restarts, num_spec, output_dim] ->
-    # [num_example, num_restarts, num_or_spec, num_and_spec, output_dim]
-    C_mat = C_mat.view(C_mat.shape[0], 1, len(cond_mat[0]), -1, C_mat.shape[-1])
-    rhs_mat = rhs_mat.view(rhs_mat.shape[0], len(cond_mat[0]), -1)
-    adv_example = adv_example[:,0:1]
-    adv_output = adv_output[0:1]
-    # adv_example and adv_output are duplicate num_or_spec times due to the duplicated data_max and data_min
-    #[num_example, num_or_spec, num_and_spec]
-
-    attack_margin = torch.matmul(C_mat, adv_output.unsqueeze(1).unsqueeze(-1)).squeeze(-1) - rhs_mat
-    data_max = data_max.view(data_max.shape[0], 1, len(cond_mat[0]), -1, *x.shape[1:])
-    data_min = data_min.view(data_min.shape[0], 1, len(cond_mat[0]), -1, *x.shape[1:])
-
-    violated = (attack_margin < 0).all(-1)
-    # [num_example, 1, num_or_spec]
-    max_valid = (adv_example <= data_max).view(*data_max.shape[:4], -1)
-    min_valid = (adv_example >= data_min).view(*data_max.shape[:4], -1)
-    # [num_example, 1, num_or_spec, num_and_spec, -1]
-
-    max_valid = max_valid.all(-1).all(-1)
-    min_valid = min_valid.all(-1).all(-1)
-    # [num_example, 1, num_or_spec]
-
-    violate_index = (violated & max_valid & min_valid).nonzero()
-    # [num_examples, num_restarts, num_or_spec]
-
-    eval(arguments.Config["attack"]["adv_saver"])(adv_example, adv_output, res_path)
-
-    if arguments.Config["general"]["eval_adv_example"]:
-        onnx_path = arguments.Config["model"]["onnx_path"]
-        vnnlib_path = arguments.Config["specification"]["vnnlib_path"]
+    if arguments.Config['general']['save_adv_example']:
+        if eval(arguments.Config['attack']['adv_verifier'])(adv_example, adv_output, vnnlib, 
+                                                            arguments.Config['general']['verify_onnxruntime_output']):
+            try:
+                print('Saving counterexample to', os.path.abspath(res_path))
+                eval(arguments.Config['attack']['adv_saver'])(adv_example, adv_output, res_path) 
+                verified_status = expected_verified_status
+                verified_success = True
+            except Exception as e:
+                print(str(e))
+                print('save adv example failed')
+                verified_status = 'unknown'
+                verified_success = False
+        else:
+            verified_status = 'unknown'
+            verified_success = False
+                
+    if arguments.Config['general']['eval_adv_example']:
+        onnx_path = arguments.Config['model']['onnx_path']
+        vnnlib_path = arguments.Config['specification']['vnnlib_path']
 
         onnx_path = os.path.join(os.getcwd(), onnx_path)
         vnnlib_path = os.path.join(os.getcwd(), vnnlib_path)
-        script_path = os.path.join('/'.join(__file__.split('/')[:-1]), '../', 'check_counterexample.py')
+        current_dir = os.path.dirname(__file__)
+        script_path = os.path.join(current_dir, '../', 'check_counterexample.py')
 
-        # print(onnx_path, vnnlib_path, script_path)
         try:
             subprocess.run([sys.executable, script_path, onnx_path, vnnlib_path, res_path], check=True)
         except subprocess.CalledProcessError:
             print('Unexpected error in checking adv example')
+            
+    if arguments.Config['general']['show_adv_example']:
+        print('Adv example:')
+        print(adv_example[0, 0])
+    print()
+    return verified_status, verified_success
 
 
 def default_adv_saver(adv_example, adv_output, res_path):
@@ -105,7 +111,8 @@ def default_adv_saver(adv_example, adv_output, res_path):
         # f.write("; Counterexample with prediction: {}\n".format(attack_label))
         # f.write("\n")
 
-        input_dim = np.prod(adv_example[0].shape)
+        # for some cases the onnx input shape has no batch dim. (cctsdb_yolo)
+        input_dim = len(adv_example) if adv_example.ndim == 1 else np.prod(adv_example[0].shape)
         # for i in range(input_dim):
         #     f.write("(declare-const X_{} Real)\n".format(i))
         #
@@ -249,23 +256,17 @@ def attack(model_ori, x, vnnlib, verified_status, verified_success,
         # attack_ret, attack_images, attack_margins = auto_attack(model_ori, x, data_min=data_min, data_max=data_max, vnnlib=vnnlib)
 
     if attack_ret:
-        # Attack success.
-        if arguments.Config["general"]["save_adv_example"]:
-            try:
-                attack_output = model_ori(attack_images.view(-1, *x.shape[1:]))
-                save_cex(attack_images, attack_output, x, vnnlib,
-                        arguments.Config["attack"]["cex_path"],
-                        data_max_repeat, data_min_repeat)
-            except Exception as e:
-                print(str(e))
-                print('save adv example failed')
-        if arguments.Config["general"]["show_adv_example"]:
-            print('Adv example:')
-            print(attack_images[0, 0])
-        verified_status = "unsafe-pgd"
-        verified_success = True
+        # Still need to compare adv example on pytorch and onnxruntime after attack and before saving
+        # attack_images is duplicate num_spec times due to the duplicated data_max and data_min
+        # attack_images has shape (batch, spec, c, h, w).
+        attack_output = model_ori(attack_images.view(-1, *x.shape[1:]))
+        verified_status, verified_success = check_and_save_cex(attack_images[:, 0:1].squeeze(1), # squeeze spec
+                                                               attack_output, vnnlib,
+                                                               arguments.Config["attack"]["cex_path"], "unsafe-pgd")
+            
+    print("verified_status", verified_status)
+    print("verified_success", verified_success)
 
-    # attack_images has shape (batch, spec, c, h, w).
     return verified_status, verified_success, attack_images, attack_margins, all_adv_candidates
 
 
@@ -317,16 +318,16 @@ def default_pgd_loss(origin_out, output, C_mat, rhs_mat, cond_mat, same_number_c
 
 def test_conditions(input, output, C_mat, rhs_mat, cond_mat, same_number_const, data_max, data_min, return_success_idx=False):
     '''
-    Whether the output satisfies the specification conditions.
+    Whether the output satisfies the specifiction conditions.
     If the output satisfies the specification for adversarial examples, this function returns True, otherwise False.
 
-    input: [num_exampele, num_restarts, num_or_spec, *input_shape]
+    input: [num_example, num_restarts, num_or_spec, *input_shape]
     output: [num_example, num_restarts, num_or_spec, num_output]
     C_mat: [num_example, num_restarts, num_spec, num_output] or [num_example, num_spec, num_output]
     rhs_mat: [num_example, num_spec]
     cond_mat: [[]] * num_examples
     same_number_const (bool): if same_number_const is True, it means that there are same number of and specifications in every or specification group.
-    data_max & data_min: [num_example, num_spec, *input_shape]
+    data_max & data_min: [num_example, 1, num_spec, *input_shape]
     '''
     if same_number_const:
         C_mat = C_mat.view(C_mat.shape[0], 1, len(cond_mat[0]), -1, C_mat.shape[-1])
@@ -491,6 +492,7 @@ def default_adv_example_finalizer(model_ori, x, best_deltas, data_max, data_min,
 
     return attack_image, attack_output, attack_margin
 
+
 def OSI_init_C(model, X, alpha, output_dim, iter_steps=50, lower_limit=0.0, upper_limit=1.0):
     # the general version of OSI initialization.
     input_shape = X.shape
@@ -526,7 +528,6 @@ def OSI_init_C(model, X, alpha, output_dim, iter_steps=50, lower_limit=0.0, uppe
     assert (X_init >= lower_limit).all()
 
     return X_init
-
 
 
 def OSI_init(model, X, y, eps, alpha, num_classes, iter_steps=50, lower_limit=0.0, upper_limit=1.0, extra_dim=None):
@@ -583,6 +584,7 @@ def OSI_init(model, X, y, eps, alpha, num_classes, iter_steps=50, lower_limit=0.
 
     return X_init
 
+
 def pgd_attack_with_general_specs(model, X, data_min, data_max, C_mat, rhs_mat,
                                   cond_mat, same_number_const, alpha,
                                   use_adam=True, normalize=lambda x: x,
@@ -618,6 +620,10 @@ def pgd_attack_with_general_specs(model, X, data_min, data_max, C_mat, rhs_mat,
 
     lr_decay=arguments.Config["attack"]["pgd_lr_decay"]
     early_stop=arguments.Config["attack"]["pgd_early_stop"]
+    restart_when_stuck = arguments.Config["attack"]["pgd_restart_when_stuck"]
+
+    if restart_when_stuck:
+        total_replaced_deltas = 0
 
     if only_replicate_restarts:
         input_shape = (X.shape[0], *X.shape[2:])
@@ -678,7 +684,7 @@ def pgd_attack_with_general_specs(model, X, data_min, data_max, C_mat, rhs_mat,
 
     early_stopped = False
 
-    for _ in range(attack_iters):
+    for iteration in range(attack_iters):
         inputs = normalize(X + delta)
         output = model(inputs.view(-1, *input_shape[1:])).view(
             input_shape[0], *extra_dim, num_classes)
@@ -749,6 +755,8 @@ def pgd_attack_with_general_specs(model, X, data_min, data_max, C_mat, rhs_mat,
                 early_stopped = True
                 break
 
+        if restart_when_stuck:
+            old_delta = delta.clone().detach()
         if use_adam:
             opt.step(clipping=True, lower_limit=delta_lower_limit,
                      upper_limit=delta_upper_limit, sign=1)
@@ -758,6 +766,18 @@ def pgd_attack_with_general_specs(model, X, data_min, data_max, C_mat, rhs_mat,
             d = delta + alpha * torch.sign(delta.grad)
             d = torch.max(torch.min(d, delta_upper_limit), delta_lower_limit)
             delta = d.detach().requires_grad_()
+
+        if restart_when_stuck:
+            unchanged = ((delta - old_delta).abs().sum(list(range(2, delta.ndim)), keepdim=True) == 0).to(delta.dtype)
+            total_replaced_deltas += int(unchanged.sum().item())
+            new_init = (torch.empty_like(X).uniform_() * (delta_upper_limit - delta_lower_limit) + delta_lower_limit)
+            delta.data.copy_(delta * (1 - unchanged) + new_init * unchanged)
+
+    if restart_when_stuck:
+        total_num_deltas = X.size(0) * delta.size(1) * (iteration + 1)
+        replaced_percentage = total_replaced_deltas / total_num_deltas * 100
+        print(f'Attack batch size: {X.size(0)}, restarts: {delta.size(1)}, iterations: {iteration + 1} '
+              f'replaced deltas {total_replaced_deltas} ({replaced_percentage}%)')
 
     if not early_stopped and 'Customized' in arguments.Config["attack"]["early_stop_condition"]:
         test_input = X[:, 0, 0, :] + best_delta
@@ -1254,6 +1274,7 @@ def attack_with_general_specs(model, x, data_min, data_max,
         print("Clean prediction incorrect, attack skipped.")
         # Obtain attack margin.
         attack_image, _, attack_margin = eval(arguments.Config["attack"]["adv_example_finalizer"])(model, x, torch.zeros_like(x), data_max, data_min, C_mat, rhs_mat, cond_mat)
+        print("clean attack image", attack_image, attack_image.shape)
         return True, attack_image.detach(), attack_margin.detach(), None
 
     data_min = data_min.to(device)
@@ -1615,3 +1636,105 @@ def attack_after_crown(lb, vnnlib, model_ori, x, decision_thresh):
 
     return verified_success, attack_images
 
+def default_adv_verifier(attack_image, attack_output, vnnlib=None, check_output=False):
+    """ 
+    Do two kinds of check on counterexample:
+    
+    1.check if the inference outptus are the same on both PyTorch and ONNXRuntime 
+      (enabled when check_output is True)
+    2.check if the output satisfied spec conditions (enabled when inputting vnnlib)
+    
+    Args:
+        attack_output: [1, *intput_shape]
+        attack_image: [1, *input_shape]
+    """
+    flatten_output = attack_output.view(-1)
+    onnx_attack_image = attack_image.cpu().numpy()
+
+    rel_tol = 1e-3
+    abs_tol = 1e-4
+    if check_output and not is_onnx_equal_to_pytorch_output(arguments.Config['model']['onnx_path'],
+                                                            onnx_attack_image, 
+                                                            flatten_output.detach().cpu().numpy(), rel_tol): 
+        return False
+
+    if vnnlib is not None and not is_specification_vio(vnnlib, attack_image.view(-1), flatten_output, abs_tol):
+        return False
+
+    return True
+
+
+def is_onnx_equal_to_pytorch_output(onnx_path, onnx_attack_image, pytorch_y, rel_tol):
+    """
+    Compare the output of ONNX Runtime and PyTorch for given inputs.
+    
+    Args:
+        onnx_path (str): Path to the ONNX model.
+        onnx_attack_image (numpy.ndarray): Input image for ONNX model.
+        pytorch_y (numpy.ndarray): Expected output from PyTorch model.
+        rel_tol (float): Relative tolerance for comparison.
+    
+    Returns:
+        bool: True if the outputs are similar within the given tolerance, False otherwise.
+    """
+    print('Checking if onnxruntime output is equal to pytorch')
+    onnx_output = inference_onnx(onnx_path, onnx_attack_image)
+    onnxruntime_y = onnx_output.flatten("C")
+    
+    try:
+        diff = np.linalg.norm(onnxruntime_y - pytorch_y, ord=np.inf)
+        norm = np.linalg.norm(pytorch_y, ord=np.inf)
+        if norm < 1e-6:  # don't divide by zero
+            rel_error = 0
+        else:
+            rel_error = diff / norm
+    except ValueError as e:
+        diff = 9999
+        rel_error = 9999
+
+    print(f'L-inf norm difference between onnx execution and pytorch output: {diff} (rel error: {rel_error});' f'(rel_limit: {rel_tol})')
+    if rel_error > rel_tol:
+        print('WARNING: Failed in the comparison between ONNX Runtime and PyTorch results.')
+        return False
+    print('Succeed in ONNX Runtime comparison check.')
+    return True
+
+
+def is_specification_vio(box_spec_list, x_list, expected_y, tol):
+    """Check that the spec file was obeyed"""
+    rv = False
+    
+    for i, box_spec in enumerate(box_spec_list):
+        input_box, spec_list = box_spec
+        assert len(input_box) == len(x_list), f"input box len: {len(input_box)}, x_in len: {len(x_list)}"
+
+        input_box_tensor = torch.tensor(input_box, dtype=x_list.dtype, device=x_list.device)
+        lb_tensor, ub_tensor = input_box_tensor[:, 0], input_box_tensor[:, 1]
+        
+        # Check if x_list is inside the input box using tensor operations
+        inside_input_box = torch.all((x_list >= lb_tensor - tol) & (x_list <= ub_tensor + tol))
+
+        if inside_input_box:
+            # Check spec
+            violated = False
+                
+            for j, (prop_mat, prop_rhs) in enumerate(spec_list):
+                prop_mat_tensor = torch.tensor(prop_mat, dtype=expected_y.dtype, device=expected_y.device)
+                prop_rhs_tensor = torch.tensor(prop_rhs, dtype=expected_y.dtype, device=expected_y.device)
+                
+                vec = torch.matmul(prop_mat_tensor, expected_y)
+                sat = torch.all(vec <= prop_rhs_tensor + tol)
+
+                if sat:
+                    violated = True
+                    break
+
+            if violated:
+                rv = True
+                break
+    
+    if rv:
+        print('Succeed in specification conditions check.')
+    else:
+        print('WARNING: Failed in specs conditions check.')
+    return rv

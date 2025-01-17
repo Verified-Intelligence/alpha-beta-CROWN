@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 import onnx2pytorch
 import arguments
-from attack.attack_pgd import process_vnn_lib_attack, save_cex
+from attack.attack_pgd import check_and_save_cex
 from read_vnnlib import read_vnnlib
 
 
@@ -209,25 +209,17 @@ def yolo_CCTSDB_verify(model_ori, vnnlib, onnx_path, test_mode=False):
         return ("safe", finalout) if test_mode else "safe"
     else:
         if not test_mode:
-            save_adv_example_yolo(vnnlib, box, mat, rhs, img, targets, combinations, finalout)
-        return ("unsafe", finalout) if test_mode else "unsafe"
+            verified_status, verified_success = save_adv_example_yolo(vnnlib, box, mat, rhs, img, targets, combinations, finalout)
+        return (verified_status, finalout) if test_mode else verified_status
 
 
 def save_adv_example_yolo(vnnlib, box, mat, rhs, img, targets, combinations, finalout):
     adv_indices = ((mat * finalout) <= rhs).squeeze(dim=0).nonzero()
     # we pick the worst-case adv example
     adv_idx = adv_indices[(rhs - (mat * finalout)).squeeze(dim=0)[adv_indices].topk(1).indices[0]].squeeze(dim=0)
-    attack_images = torch.cat([img.flatten(start_dim=1), combinations[adv_idx], targets[0].unsqueeze(dim=0)], dim=1)
-    clean_x = box[:, 0].unsqueeze(dim=0)  # since we only use the shape of the original image, so we randomly picked one.
+    attack_images = torch.cat([img.flatten(1), combinations[adv_idx], targets[0].unsqueeze(0)], dim=1)
     attack_output = finalout[adv_idx].unsqueeze(dim=0)
-    list_target_label_arrays, data_min_repeat, data_max_repeat = process_vnn_lib_attack(vnnlib, clean_x)
-    if arguments.Config["general"]["save_adv_example"]:
-        try:
-            save_cex(attack_images.unsqueeze(dim=0), attack_output, clean_x, vnnlib,
-                     arguments.Config["attack"]["cex_path"], data_max_repeat, data_min_repeat)
-        except Exception as e:
-            print(str(e))
-            print('save adv example failed')
+    return check_and_save_cex(attack_images, attack_output, vnnlib, arguments.Config["attack"]["cex_path"], "unsafe")
 
 
 def yolo_CCTSDB_verify_onnx(model_ori, vnnlib, onnx_path):

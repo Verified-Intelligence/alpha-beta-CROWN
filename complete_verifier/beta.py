@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -13,7 +13,6 @@
 ##                                                                     ##
 #########################################################################
 import arguments
-
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from beta_CROWN_solver import LiRPANet
@@ -49,11 +48,17 @@ def set_beta(self: 'LiRPANet', d, bias=True):
 
 def reset_beta(self: 'LiRPANet', batch, max_splits_per_layer, betas=None,
                bias=False):
+    beta_crown_args = arguments.Config["solver"]["beta-crown"]
+    enable_opt_interm_bounds = beta_crown_args['enable_opt_interm_bounds']
     for layer_name in max_splits_per_layer:
         layer = self.net[layer_name]
-        start_nodes = []
-        for act in self.split_activations[layer_name]:
-            start_nodes.extend(list(act[0].alpha.keys()))
+        if enable_opt_interm_bounds:
+            start_nodes = []
+            for act in self.split_activations[layer_name]:
+                start_nodes.extend(list(act[0].alpha.keys()))
+            start_nodes = list(set(start_nodes))
+        else:
+            start_nodes = None
         shape = (batch, max_splits_per_layer[layer_name])
         if betas is not None and betas[0] is not None and layer_name in betas[0]:
             betas_ = [(betas[bi][layer_name] if betas[bi] is not None else None)
@@ -61,7 +66,7 @@ def reset_beta(self: 'LiRPANet', batch, max_splits_per_layer, betas=None,
         else:
             betas_ = [None for _ in range(batch)]
         self.net.reset_beta(layer, shape, betas_, bias=bias,
-                            start_nodes=list(set(start_nodes)))
+                            start_nodes=start_nodes)
 
 
 def get_beta(self: 'LiRPANet', splits_per_example, device=None):
@@ -69,16 +74,25 @@ def get_beta(self: 'LiRPANet', splits_per_example, device=None):
     beta_crown_args = arguments.Config["solver"]["beta-crown"]
     enable_opt_interm_bounds = beta_crown_args['enable_opt_interm_bounds']
     ret = []
+    betas_cpu = {}
+    # Setting non_blocking to False ensures that data is fully transferred from the GPU to the CPU before proceeding. 
+    for k in splits_per_example[0]:
+        if not enable_opt_interm_bounds:
+            betas_cpu[k] = self._transfer(
+                self.net[k].sparse_betas[0].val, device, non_blocking=False)
+        else:
+            betas_cpu[k] = []
+            for sparse_beta in self.net[k].sparse_betas.values():
+                betas_cpu[k].append(self._transfer(
+                    sparse_beta.val, device, non_blocking=False))
     for i in range(len(splits_per_example)):
         betas = {}
         for k in splits_per_example[i]:
             if not enable_opt_interm_bounds:
-                betas[k] = self._transfer(
-                    self.net[k].sparse_betas[0].val[i, :splits_per_example[i][k]], device)
+                betas[k] = betas_cpu[k][i, :splits_per_example[i][k]]
             else:
                 betas[k] = []
-                for sparse_beta in self.net[k].sparse_betas.values():
-                    betas[k].append(self._transfer(
-                        sparse_beta.val[i, :splits_per_example[i][k]], device))
+                for item in betas_cpu[k]:
+                    betas[k].append(item[i, :splits_per_example[i][k]])
         ret.append(betas)
     return ret

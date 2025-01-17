@@ -3,13 +3,13 @@ general:
   root_path: ../../vnncomp2023_benchmarks/benchmarks/traffic_signs_recognition
   csv_name: instances.csv
   graph_optimizer: Customized("custom_graph_optimizer", "merge_sign")
+  verify_onnxruntime_output: True
 model:
   onnx_loader: Customized("custom_model_loader", "customized_Gtrsb_loader")
   onnx_optimization_flags: fix_gtrsb
   onnx_vnnlib_joint_optimization_flags: ["peel_off_last_softmax_layer"]
-  check_optmized: True
+  check_optimized: True
 attack:
-  pgd_order: before
   pgd_restarts: 50
   pgd_batch_size: 50
   attack_func: Customized("custom_attacker", "use_LiRPANet")
@@ -17,6 +17,7 @@ attack:
   early_stop_condition: Customized("custom_early_stop_condition", "customized_gtrsb_condition")
   pgd_loss: Customized("custom_pgd_loss", "customized_gtrsb_loss")
   adv_example_finalizer: Customized("custom_adv_example_finalizer", "customized_gtrsb_adv_example_finalizer")
+  adv_verifier: Customized("custom_adv_verifier", "customized_gtrsb_adv_verifier")
 solver:
   batch_size: 128
   alpha-crown:
@@ -33,3 +34,5 @@ bab:
   branching:
     candidates: 5
     reduceop: max
+    nonlinear_split:
+      disable: true

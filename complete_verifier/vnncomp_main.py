@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -24,6 +24,7 @@ parser.add_argument("VNNLIB_FILE", type=str, default=None, help='VNNLIB_FILE')
 parser.add_argument("RESULTS_FILE", type=str, default=None, help='RESULTS_FILE')
 parser.add_argument("TIMEOUT", type=float, default=180, help='timeout for one property')
 parser.add_argument("--DEBUG", action='store_true', help='whether to run in debug mode (checking saved adv example)')
+parser.add_argument("--PREPARE", action='store_true', help='whether in preparation phase')
 parser.add_argument("--NOPGD", action='store_true', help='do not use pdg attack')
 parser.add_argument("--TRY_CROWN", action='store_true', help='overwrite bound-prop-method to CROWN to save memory')
 
@@ -94,9 +95,6 @@ elif args.CATEGORY == "cifar100_tinyimagenet_resnet":
 
 elif args.CATEGORY == "cifar_biasfield":
     cmd += "exp_configs/vnncomp22/cifar_biasfield.yaml"
-
-# elif args.CATEGORY == "collins_rul_cnn":
-#     cmd += "exp_configs/vnncomp22/collins-rul-cnn.yaml"
 
 elif args.CATEGORY == "oval21":
     cmd += "exp_configs/vnncomp22/oval22.yaml"
@@ -171,6 +169,71 @@ elif args.CATEGORY == "vit":
 elif args.CATEGORY == "yolo":
     cmd += "exp_configs/vnncomp23/yolo-xiangruzh.yaml"
 
+# vnncomp 2024
+
+elif args.CATEGORY == "acasxu_2023":
+    cmd += "exp_configs/vnncomp23/acasxu.yaml"
+
+elif args.CATEGORY == "cctsdb_yolo_2023":
+    cmd += "exp_configs/vnncomp23/cctsdb_yolo.yaml"
+
+elif args.CATEGORY == "cgan_2023":
+    cmd += "exp_configs/vnncomp23/cgan.yaml"
+
+elif args.CATEGORY == "cifar100":
+    cmd += "exp_configs/vnncomp24/cifar100.yaml"
+
+elif args.CATEGORY == 'collins_aerospace_benchmark':
+    cmd += "exp_configs/vnncomp23/collins_yolo_robustness.yaml"
+
+elif args.CATEGORY == "collins_rul_cnn_2023":
+    cmd += "exp_configs/vnncomp23/collins-rul-cnn.yaml"
+
+elif args.CATEGORY == 'cora':
+    cmd += "exp_configs/vnncomp24/cora.yaml"
+
+elif args.CATEGORY == "dist_shift_2023":
+    cmd += "exp_configs/vnncomp23/dist-shift.yaml"
+
+elif args.CATEGORY == "linearizenn":
+    cmd += "exp_configs/vnncomp24/linearizenn.yaml"
+
+elif args.CATEGORY == "lsnc":
+    cmd += "exp_configs/vnncomp24/lsnc.yaml"
+
+elif args.CATEGORY == "metaroom_2023":
+    cmd += "exp_configs/vnncomp23/metaroom.yaml"
+
+elif args.CATEGORY == "ml4acopf_2023":
+    cmd += "exp_configs/vnncomp23/ml4acopf.yaml"
+
+elif args.CATEGORY == 'ml4acopf_2024':
+    cmd += "exp_configs/vnncomp24/ml4acopf.yaml"
+
+elif args.CATEGORY == "nn4sys_2023":
+    cmd += "exp_configs/vnncomp23/nn4sys.yaml"
+
+elif args.CATEGORY.startswith("safenlp"):
+    cmd += "exp_configs/vnncomp24/safenlp.yaml"
+
+elif args.CATEGORY == "tinyimagenet":
+    cmd += "exp_configs/vnncomp24/tinyimagenet.yaml"
+
+elif args.CATEGORY == "tllverifybench_2023":
+    cmd += "exp_configs/vnncomp23/tllVerifyBench.yaml"
+
+elif args.CATEGORY == "traffic_signs_recognition_2023":
+    cmd += "exp_configs/vnncomp23/gtrsb.yaml"
+
+elif args.CATEGORY == "vggnet16_2023":
+    cmd += "exp_configs/vnncomp23/vggnet16.yaml"
+
+elif args.CATEGORY == "vit_2023":
+    cmd += "exp_configs/vnncomp23/vit.yaml"
+
+elif args.CATEGORY == "yolo_2023":
+    cmd += "exp_configs/vnncomp24/yolo-xiangruzh.yaml"
+
 elif args.CATEGORY == "test":
     pass
 
@@ -181,7 +244,7 @@ else:
 if os.path.split(args.VNNLIB_FILE)[-1] in ['test_' + f + '.vnnlib' for f in ['nano', 'tiny', 'small']]:
     cmd = f"{python_path} {library_path}/abcrown.py --config {library_path}/exp_configs/vnncomp21/test.yaml"
 elif 'test_prop' in args.VNNLIB_FILE:
-    cmd = f"{python_path} {library_path}/abcrown.py --config {library_path}/exp_configs/vnncomp22/acasxu.yaml"
+    cmd = f"{python_path} {library_path}/abcrown.py --config {library_path}/exp_configs/vnncomp23/acasxu.yaml"
 
 
 cmd += " --precompile_jit"
@@ -205,6 +268,9 @@ if args.DEBUG:
 # do not use pdg attack during verification
 if args.NOPGD:
     cmd += " --pgd_order=skip"
+
+if args.PREPARE:
+    cmd += " --prepare_only"
 
 print("\n------------------------- COMMAND ------------------------------")
 print(cmd)

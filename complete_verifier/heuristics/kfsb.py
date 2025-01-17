@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -52,7 +52,7 @@ class KfsbBranching(BabsrBranching):
         # Mask is 1 for unstable neurons. Otherwise it's 0.
         mask = orig_mask
         batch = get_batch_size_from_masks(mask)
-        reduce_op = get_reduce_op(branching_reduceop)
+        reduce_op = get_reduce_op(branching_reduceop, with_dim=False)
         topk = min(branching_candidates,
                    int(sum([i.sum() for i in mask.values()]).item()))
         # FIXME: it seems cs and should always be not None because they are used below.
@@ -110,6 +110,7 @@ class KfsbBranching(BabsrBranching):
                             device=all_score.device, requires_grad=False)
         set_alpha = True  # We only set the alpha once.
 
+        reduce_op = get_reduce_op(branching_reduceop, with_dim=True)
         for k in range(topk):
             # top-k candidates from the alpha scores.
             decision_index = score_idx_indices[:, k]
@@ -167,14 +168,21 @@ class KfsbBranching(BabsrBranching):
             mask_score = (score_idx.values[:,
                           k] <= 1e-4).float()  # build mask indicates invalid scores (stable neurons), batch wise, 1: invalid
             if method == 'kfsb-intercept-only':
-                k_ret[k] = reduce_op((k_ret_lbs.view(-1) - mask_score.repeat(2) * 999999).reshape(2, -1), dim=0).values
+                reduced_score = reduce_op((k_ret_lbs.view(-1) - mask_score.repeat(2) * 999999).reshape(2, -1), dim=0)
             elif method == 'kfsb':
                 mask_itb = (itb_idx.values[:, k] >= -1e-4).float()
                 # We first make the invalid lower bounds worse than normal lower bounds by minus 999999.
                 # Then we consider the best lower bound across two splits (in the first dimension after reshape) by using min(0) or max(0).
-                k_ret[k] = reduce_op(
-                    (k_ret_lbs.view(-1) - torch.cat([mask_score, mask_itb]).repeat(2) * 999999).reshape(2, -1),
-                    dim=0).values
+                reduced_score = reduce_op(
+                    (k_ret_lbs.view(-1)
+                     - torch.cat([mask_score, mask_itb]).repeat(2) * 999999
+                    ).reshape(2, -1), dim=0)
+            else:
+                raise NotImplementedError(method)
+            if isinstance(reduced_score, torch.Tensor):
+                k_ret[k] = reduced_score
+            else:
+                k_ret[k] = reduced_score.values
 
         if method == 'kfsb':
             for v in sps.values():

@@ -15,6 +15,6 @@ wget http://d.huan-zhang.com/storage/models/cifar_model_dm_large_bn_full_8px.pth
 
 These models were originally from the
 [CROWN-IBP](https://github.com/huanzhang12/CROWN-IBP),
-[auto\_LiRPA](https://github.com/KaidiXu/auto_LiRPA) and [IBP with short
+[auto\_LiRPA](https://github.com/Verified-Intelligence/auto_LiRPA) and [IBP with short
 warmup](https://github.com/shizhouxing/Fast-Certified-Robust-Training)
 repository and renamed here.

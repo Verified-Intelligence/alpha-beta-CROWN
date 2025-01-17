@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -189,16 +189,19 @@ class FsbBranching(BabsrBranching):
                         mask[final_decision_][b][final_decision[b][-1][1]] = 0
         else:
             # all layers are split or has no improvement
-            for b in range(split_depth * batch):
-                # using a random choice
-                mask_item = {k: m[b] for k, m in mask.items()}
-                for preferred_layer in reversed(self.net.split_nodes):  # from last layer to first layer
-                    if len(mask_item[preferred_layer].nonzero(as_tuple=False)) != 0:
-                        final_decision[b].append(
-                            [preferred_layer, mask_item[preferred_layer].nonzero(as_tuple=False)[0].item()])
-                        final_decision_ = self.net.split_nodes[final_decision[b][-1][0]].name
-                        mask[final_decision_][b][final_decision[b][-1][1]] = 0
-                        break
+            for l in range(split_depth):
+                for b in range(batch):
+                    mask_item = {k: m[b] for k, m in mask.items()}
+                    len_final_decision = len(final_decision[b])
+                    for preferred_layer in range(len(self.net.split_nodes)-1, -1, -1): # from last layer to first layer
+                        preferred_layer_ = self.net.split_nodes[preferred_layer].name
+
+                        if len(mask_item[preferred_layer_].nonzero(as_tuple=False)) != 0:
+                            final_decision[b].append(
+                                [preferred_layer, mask_item[preferred_layer_].nonzero(as_tuple=False)[0].item()])
+                            final_decision_ = self.net.split_nodes[final_decision[b][-1][0]].name
+                            mask[final_decision_][b][final_decision[b][-1][1]] = 0
+                            break
 
         split_depth = min([len(d) for d in final_decision])
         final_decision = [[batch[i] for batch in final_decision] for i in

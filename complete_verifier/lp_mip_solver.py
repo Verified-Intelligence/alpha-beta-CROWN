@@ -1,10 +1,10 @@
 #########################################################################
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
-##   Copyright (C) 2021-2024 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com>                ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu>                 ##
-##                     Kaidi Xu <kx46@drexel.edu>                      ##
+##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
+##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
+##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
 ##    See CONTRIBUTORS for all author contacts and affiliations.       ##
 ##                                                                     ##
@@ -20,7 +20,9 @@ import multiprocessing
 import multiprocessing.pool
 import sys
 import os
+import shutil
 import subprocess
+import signal
 
 import numpy as np
 
@@ -31,7 +33,9 @@ import arguments
 
 from auto_LiRPA.perturbations import *
 from auto_LiRPA.utils import stop_criterion_min, reduction_str2func
-from auto_LiRPA.bound_ops import BoundLinear, BoundConv, BoundBatchNormalization, BoundAdd
+from auto_LiRPA.bound_ops import (
+    BoundLinear, BoundConv, BoundBatchNormalization, BoundAdd,
+    BoundRelu, BoundInput)
 from auto_LiRPA.beta_crown import SparseBeta
 
 import beta_CROWN_solver
@@ -49,9 +53,9 @@ from typing import TYPE_CHECKING, Callable, List
 if TYPE_CHECKING:
     from .beta_CROWN_solver import LiRPANet
 
+from attack.attack_pgd import check_and_save_cex
 
 CPLEX_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cuts/CPLEX_cuts")
-
 
 def handle_gurobi_error(message):
     print(f'Gurobi error: {message}')
@@ -66,13 +70,43 @@ mip_refine_timeout = 230
 mip_solve_time_start = None
 
 
-def mip(model, ret_incomplete, labels_to_verify=None, mip_skip_unsafe=False):
+
+def check_enable_refinement(ret_incomplete_verification):
+    model = ret_incomplete_verification['model'].net
+    lower_bounds = ret_incomplete_verification['lower_bounds']
+    upper_bounds = ret_incomplete_verification['upper_bounds']
+    print('Checking if MIP refinement should be enabled')
+    unstable = 0
+    for node in model.nodes():
+        if not node.perturbed:
+            continue
+        if isinstance(node, BoundConv):
+            print(f'{node} is not supported in MIP refinement.')
+            return 'bab'
+        if len(node.requires_input_bounds) > 0:
+            if not isinstance(node, BoundRelu):
+                print(f'{node} is not supported in MIP refinement.')
+                return 'bab'
+            key = node.inputs[0].name
+            unstable_ = ((lower_bounds[key] < 0) & (upper_bounds[key] > 0)).sum()
+            print(f'Unstable ReLU neurons for {node}: {unstable_}')
+            unstable += unstable_
+    enable = unstable >= arguments.Config['solver']['mip']['unstable_neuron_threshold']
+    if not enable:
+        print('MIP refinement is disabled.')
+        return 'bab'
+    else:
+        print('MIP refinement is enabled.')
+        return 'bab-refine'
+
+      
+def mip(model, ret_incomplete, labels_to_verify=None, mip_skip_unsafe=False, vnnlib=None, pgd_attack_example=None, verifier=None):
     ret = {key: None for key in [
         'global_lb', 'lower_bounds', 'upper_bounds', 'refined_betas']}
 
-    if arguments.Config["general"]["complete_verifier"] == "mip":
-        mip_global_lb, mip_global_ub, mip_status = model.build_the_model_mip(
-            labels_to_verify=labels_to_verify, save_adv=True, mip_skip_unsafe=mip_skip_unsafe)
+    if verifier == "mip":
+        mip_global_lb, mip_global_ub, mip_status, adv_example = model.build_the_model_mip(
+            labels_to_verify=labels_to_verify, save_adv=arguments.Config["general"]["save_adv_example"], mip_skip_unsafe=mip_skip_unsafe, pgd_attack_example=pgd_attack_example)
         if mip_global_lb.ndim == 1:
             mip_global_lb = mip_global_lb.unsqueeze(-1)  # Missing batch dimension.
         if mip_global_ub.ndim == 1:
@@ -95,21 +129,36 @@ def mip(model, ret_incomplete, labels_to_verify=None, mip_skip_unsafe=False):
                     return "unknown-mip", ret
                 else:
                     print("verified unsafe-mip with init mip!")
-                    return "unsafe-mip", ret
+                    verified_status = 'unsafe-mip'
+                    # Save counterexample if the pgd_order is not skip.
+                    if adv_example is not None:
+                        # The vnnlib should be provided when save_adv is enableds
+                        assert vnnlib is not None
+                        # Reshape the counterexample for model. The shape of mip_adv is [batch_size, input_shape], here batch size should always be 1.
+                        mip_adv = torch.tensor(adv_example).reshape(1, *model.x.shape).to(model.device)
+                        attack_output = model.model_ori(mip_adv.view(-1, *model.x.shape[1:]))
+                        verified_status, _ = check_and_save_cex(mip_adv, attack_output, vnnlib,
+                                                                arguments.Config["attack"]["cex_path"], "unsafe-mip")
+                    return verified_status, ret
             # Lower bound < 0 and upper bound > 0, must be a timeout.
             assert mip_status[pidx] == 9 or mip_status[pidx] == -1, "should only be timeout for label pidx"
             verified_status = "unknown-mip"
         print(f"verified {verified_status} with init mip!")
         return verified_status, ret
-    elif arguments.Config["general"]["complete_verifier"] == "bab-refine":
+    elif verifier == "bab-refine":
         print("Start solving intermediate bounds with MIP...")
+        score = FSB_score(model, ret_incomplete)
         refined_lower_bounds, refined_upper_bounds, refined_betas = model.build_the_model_mip_refine(
-            ret_incomplete['lower_bounds'], ret_incomplete['upper_bounds'], stop_criterion_func=stop_criterion_min(1e-4))
-        
-        # shape of the last layer should be (batch, 1) for verified-acc
-        shape = ret_incomplete['lower_bounds'][model.final_name].shape
-        refined_lower_bounds[model.final_name] = refined_lower_bounds[model.final_name].reshape(shape)
-        refined_upper_bounds[model.final_name] = refined_upper_bounds[model.final_name].reshape(shape)
+            ret_incomplete['lower_bounds'], ret_incomplete['upper_bounds'],
+            score=score, stop_criterion_func=stop_criterion_min(1e-4))
+
+        # To ensure compatibility with verified-acc, we need to reshape the final layer bound to [batch, 1].
+        # Previously, the final layer bound was in the shape [1, batch].
+        # Additionally, `ret_incomplete['lower_bounds'][model.final_name].shape` can be [pruned_batch, 1].
+        # Therefore, we only need to transpose the final layer bound to achieve the desired shape.
+        assert refined_lower_bounds[model.final_name].shape[0] == 1
+        refined_lower_bounds[model.final_name] = refined_lower_bounds[model.final_name].T
+        refined_upper_bounds[model.final_name] = refined_upper_bounds[model.final_name].T
         lower_bounds, upper_bounds, = refined_lower_bounds, refined_upper_bounds
         refined_global_lb = lower_bounds[model.final_name]
         print("refined global lb:", refined_global_lb, "min:", refined_global_lb.min())
@@ -240,11 +289,11 @@ def mip_solver(
             vub, status_ub, status_ub_r = out_ub, -1, -1
     else:
         # ub is tighter, solve ub first.
-        vub, refined, status_ub, status_ub_r = solve_ub(model, v, out_ub, eps=eps, init=init_lb)
+        vub, refined, status_ub, status_ub_r = solve_ub(model, v, out_ub, eps=eps, init=init_ub)
         neuron_refined = neuron_refined or refined
         if vub > 0:
             # Still unstable. Solve lb.
-            vlb, refined, status_lb, status_lb_r = solve_lb(model, v, out_lb, eps=eps, init=init_ub)
+            vlb, refined, status_lb, status_lb_r = solve_lb(model, v, out_lb, eps=eps, init=init_lb)
             neuron_refined = neuron_refined or refined
         else:
             # ub < 0, neuron is stable, we skip solving ub.
@@ -569,8 +618,6 @@ def build_solver_model(
         m.pool.kill()
         m.pool = None
         m.pool_termination_flag = None
-    # input_domain = input_domain if input_domain is not None else m.input_domain
-    # input_domain = input_domain.cpu().numpy()
     m.net.solver_model_type = model_type
     m.net.solver_pkg = arguments.Config["solver"]["mip"]["mip_solver"]
 
@@ -607,7 +654,6 @@ def build_solver_model(
             print(f'Setting {cut}{suffix} to {val}')
             m.net.solver_model.setParam(f'{cut}{suffix}', val)
     print(f"mip_multi_proc: {mip_multi_proc}, mip_threads: {mip_threads}, total threads used: {mip_multi_proc*mip_threads}")
-    build_mip_time = time.time()
 
     # build model in auto_LiRPA
     out_vars = m.net.build_solver_module(
@@ -777,53 +823,76 @@ def update_model_bounds(solver_model, lower_bounds, upper_bounds,
     solver_model.update()
     return solver_model
 
-def all_node_split_LP(m, lower_bounds, upper_bounds, rhs):
-    m.all_node_model = copy_model(m.net.solver_model, basis=False)
 
-    pre_relu_layer_names = [relu_layer.inputs[0].name for relu_layer in m.net.relus]
-    relu_layer_names = [relu_layer.name for relu_layer in m.net.relus]
-    m.all_node_model = update_model_bounds(m.all_node_model, lower_bounds, upper_bounds,\
-                pre_relu_layer_names, relu_layer_names, m.net.solver_model_type)
-    print('Finished building Gurobi LP model for all node split. Start solving the LP!')
-    lp_status = "unsafe"
+def all_node_split_LP(arg):  
+    pre_relu_layer_names, relu_layer_names, orig_out_vars, lower_bounds, upper_bounds, rhs, dix = arg
+    global input_name
+    # Suppress logs from Gurobi
+    old_stdout = sys.stdout
+    devnull = open(os.devnull, 'w')
+    sys.stdout = devnull
+    with grb.Env() as env:
+        global termination_flag_lp
+        global multiprocess_lp_model
+        env.setParam('LogToConsole', 0)
+        env.start()
+        sys.stdout = old_stdout
+        devnull.close()
+        if termination_flag_lp.value == 1:
+            # Stop if a counterexample is already found
+            return 'unknown', dix, float('inf'), None  
+        
+        all_node_model = copy_model(multiprocess_lp_model, basis=False, env=env)
+        all_node_model = update_model_bounds(all_node_model, lower_bounds, upper_bounds,\
+                    pre_relu_layer_names, relu_layer_names, 'lp')
 
-    assert lower_bounds[-1].size(0) == 1,  "only bounds with batch size 1"
-    guro_start = time.time()
-    # Assert that this is as expected a network with a single output
-    orig_out_vars = m.net.final_node().solver_vars
-    # assert len(orig_out_vars) == 1, "Network doesn't have scalar output"
-    glbs = lower_bounds[-1].squeeze(0).clone()
-    # import pdb; pdb.set_trace()
-    assert len(orig_out_vars) == len(rhs), "out shape not matching!"
-    for out_idx in range(len(orig_out_vars)):
-        # objVar = m.all_node_model.getVarByName(orig_out_vars[0].VarName)
-        objVar = m.all_node_model.getVarByName(orig_out_vars[out_idx].VarName)
+        counterexample = None
+        assert lower_bounds[-1].size(0) == 1,  "only bounds with batch size 1"
+        assert len(orig_out_vars) == len(rhs), "out shape not matching!"
+
+        # Add constraints to the output variable to limit its value
+        for out_idx in range(len(orig_out_vars)):
+            objVar = all_node_model.getVarByName(orig_out_vars[out_idx])
+            all_node_model.addConstr(objVar <= rhs[out_idx])
+
+        # Perform LP only once since all constraints are enforced. Here we only optimize towards minimizing the first output,
+        # but all outputs should satisfy all constraints as long as we find a counterexample.
+        out_idx = 0
+        objVar = all_node_model.getVarByName(orig_out_vars[out_idx])
         decision_threshold = rhs[out_idx]
 
-        m.all_node_model.setObjective(objVar, grb.GRB.MINIMIZE)
-        m.all_node_model.update()
-        m.all_node_model.optimize()
+        all_node_model.setObjective(objVar, grb.GRB.MINIMIZE)
+        all_node_model.update()
+        try:
+            all_node_model.optimize()
+        except grb.GurobiError as e:
+            handle_gurobi_error(e.message)
 
-        # assert m.model_cut.status == 2, f"model not optimized with status {m.model_cut.status}"
-        if m.all_node_model.status == 2:
+        # The optimization will either yield a result or fail to satisfy the constraints
+        # with lock:
+        if all_node_model.status == 2:
             glb = objVar.X
-        elif m.all_node_model.status == 3:
-            print("gurobi all node split lp model infeasible!")
-            glb = float('inf')
         else:
-            print(f"Warning: model status {m.all_node_model.status}!")
             glb = float('inf')
-        print(f"# all node split glb [{objVar.VarName}], status {m.all_node_model.status}: {glbs[0]} -> {glb} vs rhs {decision_threshold}")
 
-        guro_end = time.time()
-        print('Gurobi solved the LP with time', guro_end - guro_start)
-        glbs[out_idx] = glb
         if glb > decision_threshold:
             lp_status = "safe"
-            break
-    del m.all_node_model
-    print(f"#### all node split glb:", glbs)
-    return lp_status, glbs
+        else:
+            lp_status = 'unsafe'
+            # Ensure that we only have one counterexample, avoid conflict when testing
+            if termination_flag_lp.value == 1:
+                del all_node_model
+                return 'unknown', dix, float('inf'), None
+            def extract_value(input_name):
+                if isinstance(input_name, list):
+                    return [extract_value(sub_input_name) for sub_input_name in input_name]
+                else:
+                    return all_node_model.getVarByName(input_name).X
+            counterexample = extract_value(input_name)
+            print(f'Verified to be unsafe with input counterexample {counterexample}')
+            termination_flag_lp.value = 1
+        del all_node_model
+        return lp_status, dix, float(glb), counterexample
 
 
 def update_the_model_cut(m, cut, pre_lbs=None, pre_ubs=None, split=None, verbose=False):
@@ -1003,6 +1072,13 @@ def _build_the_model_mip_mps_save(args):
     now_model.update()
     now_model.write(f'{fname}.mps')
 
+
+# This handler ensures that the pool is correctly shut down on program termination, to avoid warnings regarding unclosed file pointers
+def _signal_handler(signum, frame):
+    print(f"Process {os.getpid()} received signal {signum}. Terminate pool {save_mps_pool}")
+    save_mps_pool.terminate()
+    exit(0)
+
 @torch.no_grad()
 def construct_mip_with_model(unwrapped_model, x, input_shape, c, intermediate_bounds,
         save_mps=False, process_dict=None):
@@ -1016,10 +1092,11 @@ def construct_mip_with_model(unwrapped_model, x, input_shape, c, intermediate_bo
     model = beta_CROWN_solver.LiRPANet(unwrapped_model, in_size=input_shape, c=c, device='cpu')
     build_the_model_mip(model, labels_to_verify=None, save_mps=save_mps, process_dict=process_dict, x=x, intermediate_bounds=intermediate_bounds)
 
-
+# Global pointer to the process pool used to save the mps
+# Must be accessable by the _signal_handler function
+save_mps_pool = None
 # updated function using general computation graph to build lp model
-# @torch.no_grad()
-def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=None, save_adv=False, x=None, intermediate_bounds=None, mip_skip_unsafe=False):
+def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=None, save_adv=False, x=None, intermediate_bounds=None, mip_skip_unsafe=False, pgd_attack_example=None):
     """
     Using the built gurobi model to solve mip formulation in parallel
     lower_bounds, upper_bounds: intermediate relu bounds from beta-crown
@@ -1028,6 +1105,12 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
         to support async sharing with the main thread
     Output: gurobi mip model solving lb and status
     """
+    global save_mps_pool
+
+    if (arguments.Config['bab']['cut']['cplex_cuts']
+            and arguments.Config['bab']['cut']['cuts_path'] != CPLEX_FOLDER):
+        os.makedirs(arguments.Config['bab']['cut']['cuts_path'], exist_ok=True)
+        shutil.copy(os.path.join(CPLEX_FOLDER, "get_cuts"), os.path.join(arguments.Config['bab']['cut']['cuts_path'], "get_cuts"))
 
     def gen_timestamp():
         return str(int(time.time() * 100.0) % 100000000)
@@ -1037,9 +1120,11 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
     mip_threads = arguments.Config["solver"]["mip"]["solver_threads"]
     solver_pkg = arguments.Config["solver"]["mip"]["mip_solver"]
     adv_warmup = arguments.Config["solver"]["mip"]["adv_warmup"]
+    pgd_order = arguments.Config["attack"]["pgd_order"]
 
+    model_type = "lp_integer" if arguments.Config["solver"]["mip"]["lp_solver"] else "mip"
     build_solver_model(m, timeout, mip_multi_proc=mip_multi_proc,
-                    mip_threads=mip_threads, model_type="mip", x=x, intermediate_bounds=intermediate_bounds)
+                    mip_threads=mip_threads, model_type=model_type, x=x, intermediate_bounds=intermediate_bounds)
 
     out_vars = m.net[m.net.final_name].solver_vars
     lb = m.net.final_node().lower[0].tolist()
@@ -1065,6 +1150,20 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
                 candidates.append(out_vars[pidx].name)
             candidate_neuron_ids.append(pidx)
             candidate_c_rows.append(m.c[:, pidx: pidx+1])
+
+    if arguments.Config["solver"]["mip"]["parallel_solvers"] is None:
+        number_cpus = multiprocessing.cpu_count()
+        # calculate the max number of mip_multi_proc needed based on the number of subproblems
+        if len(candidate_neuron_ids) > number_cpus:
+            mip_multi_proc = number_cpus
+            mip_threads = 1
+        else:
+            mip_multi_proc = max(1, len(candidate_neuron_ids))
+            mip_threads = number_cpus // mip_multi_proc
+        m.net.solver_model.setParam('Threads', mip_threads)
+
+        print("Number of cpus:", number_cpus, " Number of subproblems:", len(candidate_neuron_ids))
+        print("Reassign each subproblems with number of thread:", mip_threads)
 
     # Solve the worst label first.
     # candidates, candidate_neuron_ids = zip(*sorted(zip(candidates, candidate_neuron_ids), key=lambda x: lb[x[1]]))
@@ -1093,23 +1192,20 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
         build_the_model_mip_proto_gurobi_model.update()
         for cidx, candidate in enumerate(candidates):
             pidx = candidate_neuron_ids[cidx]
-            model_filename = os.path.join(CPLEX_FOLDER, f"cplexmip_lay{m.net.final_node().name.replace('/', '-')}_starttime={arguments.Globals['starting_timestamp']}_idx={arguments.Globals['example_idx']}_spec={pidx}")
+            model_filename = os.path.join(arguments.Config['bab']['cut']['cuts_path'], f"cplexmip_lay{m.net.final_node().name.replace('/', '-')}_starttime={arguments.Globals['starting_timestamp']}_idx={arguments.Globals['example_idx']}_spec={pidx}")
             model_filename_stamped = model_filename + '_' + gen_timestamp()
             model_filename_stamped_dict[pidx] = model_filename_stamped
             model_c_row_dict[pidx] = candidate_c_rows[cidx]
             mps_pool_context.append((candidate, model_filename_stamped))
 
         save_mps_pool = multiprocessing.pool.Pool()
+        signal.signal(signal.SIGTERM, _signal_handler)
         save_mps_pool.map(_build_the_model_mip_mps_save, mps_pool_context)
         save_mps_pool.close()
         save_mps_pool.join()
         print('parallel mps save finish')
 
         for pidx in model_filename_stamped_dict:
-            # t1 = multiprocessing.Process(target=f"./{CPLEX_FOLDER}/get_cuts", args=[f"{model_filename}.mps", f"{CPLEX_FOLDER}/{model_filename}"])
-            # t1 = multiprocessing.Process(target=run_get_cuts_subprocess, args=[CPLEX_FOLDER, model_filename])
-            # t1.start()
-            # processes[candidate_neuron_ids[cidx]] = t1
             model_filename_stamped = model_filename_stamped_dict[pidx]
             model_c_row = model_c_row_dict[pidx].detach().cpu()
             try:
@@ -1126,10 +1222,6 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
                 raise e
 
         ###### run in a sequential way now, need to change to asynchronized manner later ######
-        # for t1 in processes:
-        #     t1.join()
-
-        # subprocess.run([f"./{CPLEX_FOLDER}/get_cuts", f"{model_filename}.mps", f"{CPLEX_FOLDER}/{model_filename}"])
         del m.net.solver_model
         # exit()
         return None, None, None, processes
@@ -1145,16 +1237,19 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
         input_shape = np.array(m.net.input_vars).shape
         input_names = [input_var.VarName for input_var in np.array(m.net.input_vars).reshape(-1).tolist()]
 
-    if adv_warmup:
-        adv, max_values, min_values = _intermediate_PGD_attack(m, "final", restarts=3, attack_iters=50, alpha=None)
-        # convert 9 labels with m.c to 10 labels
-        min_values, max_values = min_values.tolist(), max_values.tolist()
-        layer_size = m.c.shape[1]
-        adv = adv.cpu().tolist()
+    # If pgd_order is skip, no adversarial examples are available, we skip the adv_warmup in this case.
+    if adv_warmup and pgd_order != 'skip':
+        # Provide PGD attack adversarial candidate to MIP solver as initial feasible solutions.
+        assert pgd_attack_example is not None
+        adv, min_values = pgd_attack_example
+        # Reshape adv to be [output_shape, input_shape].
+        adv = adv.view(adv.shape[1], -1).cpu().tolist()
         adv_list = []
         for neuron_idx in candidate_neuron_ids:
-            adv_list.append((adv[neuron_idx + layer_size], adv[neuron_idx])) # (low adv, max adv)
-            assert min_values[neuron_idx] >= lb[neuron_idx]
+            # The MIP process can solve a minimization and/or a maximization problem.
+            # Here we use the minimization (lower bound) problem only, so we only provide the feasible solution for the minimization.
+            adv_list.append((adv[neuron_idx], None))
+            assert min_values.flatten()[neuron_idx] >= lb[neuron_idx]
         candidates = [(name, adv, input_names, mip_skip_unsafe) for name, adv in zip(candidates, adv_list)]
     else:
         candidates = [(name, None, input_names, mip_skip_unsafe) for name in candidates]
@@ -1174,12 +1269,10 @@ def build_the_model_mip(m, labels_to_verify=None, save_mps=False, process_dict=N
         status[pidx] = s
         if adv_new is not None: mip_adv = adv_new
     lb, ub = torch.tensor(lb), torch.tensor(ub)
-    if save_adv and adv_new is not None:
-        mip_adv = np.array(adv_new).reshape(input_shape).tolist()
-    return lb, ub, status
+    return lb, ub, status, mip_adv
 
 def run_get_cuts_subprocess(model_filename):
-    # remove legacy file to avoid collision
+    # remove legancy file to avoid collision
     cut_file_path = f"{model_filename}.cuts"
     idx_file_path = f"{model_filename}.indx"
     log_file_path = f"{model_filename}.log"
@@ -1187,8 +1280,6 @@ def run_get_cuts_subprocess(model_filename):
         os.remove(cut_file_path)
     if os.path.exists(idx_file_path):
         os.remove(idx_file_path)
-    # subprocess.run([f"./{CPLEX_FOLDER}/get_cuts", f"{model_filename}.mps", f"{CPLEX_FOLDER}/{model_filename}"])
-    # return
     try:
         # only int file descriptor can be serialized across processes
         logfile = open(log_file_path, "w")
@@ -1196,7 +1287,7 @@ def run_get_cuts_subprocess(model_filename):
         print('Cannot open log file for cuts solver.')
         print(e)
         logfile = None
-    return subprocess.Popen([f"{CPLEX_FOLDER}/get_cuts", f"{model_filename}.mps", f"{model_filename}"],
+    return subprocess.Popen([f"{arguments.Config['bab']['cut']['cuts_path']}/get_cuts", f"{model_filename}.mps", f"{model_filename}"],
             stderr=subprocess.STDOUT, stdout=logfile), logfile.fileno()  # Also returns the logfile handle so it can be closed later.
 
 
@@ -1220,11 +1311,11 @@ def check_optimization_success(model, introduced_constrs_all=None):
         raise NotImplementedError
 
 
-def copy_model(model, basis=True, use_basis_warm_start=True, remove_constr_list=[]):
+def copy_model(model, basis=True, use_basis_warm_start=True, remove_constr_list=[], env=None):
     """
     deep copy a gurobi model together with variable historical results
     """
-    model_split = model.copy()
+    model_split = model.copy() if env==None else model.copy(env=env)
 
     # print(model_split.printStats())
     for rc in remove_constr_list:
@@ -1509,6 +1600,8 @@ def clamp(X, lower_limit, upper_limit):
 
 def _intermediate_PGD_attack(m, relu_idx, restarts=3, attack_iters=50, alpha=None):
     lb, ub = m.x.ptb.x_L, m.x.ptb.x_U
+    # make sure lb is not larger than ub
+    lb = torch.min(lb, ub)
     X = m.x.detach().clone()
 
     m.net(X) # one clean forward to initialize all forward_value
@@ -1540,8 +1633,6 @@ def _intermediate_PGD_attack(m, relu_idx, restarts=3, attack_iters=50, alpha=Non
         delta = delta * (ub - lb) + lb
         delta = (delta - X).detach()
         delta.requires_grad = True
-        assert ((delta + X) > ub).sum() == 0
-        assert ((delta + X) < lb).sum() == 0
         for _ in range(attack_iters):
             m.net(X + delta)
             if relu_idx != "final":
@@ -1578,7 +1669,8 @@ def _intermediate_PGD_attack(m, relu_idx, restarts=3, attack_iters=50, alpha=Non
     return X + best_delta, max_values, min_values
 
 def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
-            stop_criterion_func=stop_criterion_min(1e-4), topk_filter=1.):
+            stop_criterion_func=stop_criterion_min(1e-4), score=None, FSB_sort=True,
+            topk_filter=1.):
     """
     Before the first branching, we build the model and create a mask matrix
     Output: relu_mask, current intermediate upper and lower bounds, a list of
@@ -1599,7 +1691,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
 
     x = m.x
     input_domain = m.input_domain
-    
+
     # Load the parameters.
     lr_init_alpha = arguments.Config["solver"]["alpha-crown"]["lr_alpha"]
     lr_decay = arguments.Config["solver"]["beta-crown"]["lr_decay"]
@@ -1609,7 +1701,12 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
     mip_multi_proc = arguments.Config["solver"]["mip"]["parallel_solvers"]
     mip_threads = arguments.Config["solver"]["mip"]["solver_threads"]
     mip_perneuron_refine_timeout = arguments.Config["solver"]["mip"]["refine_neuron_timeout"]
+    mip_perneuron_refine_timeout_increasement = arguments.Config["solver"]["mip"]["refine_neuron_timeout_increasement"]
+    timeout_neuron_threshold = arguments.Config["solver"]["mip"]["timeout_neuron_percentage"]
+    remaining_timeout_threshold = arguments.Config["solver"]["mip"]["remaining_timeout_threshold"]
     adv_warmup = arguments.Config["solver"]["mip"]["adv_warmup"]
+    sliding_window = arguments.Config["solver"]["mip"]["sliding_window"]
+    remove_neurons_from_A = arguments.Config["solver"]["mip"]["remove_unstable_neurons"]
 
     # The refine degree depends on the timeout.
     global mip_refine_timeout
@@ -1631,7 +1728,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
     # Initialize the model.
     solver_model_vars = {}
     solver_vars = m.net.build_solver_module((x,), final_node_name = list(m.net.nodes())[0].name, interm_bounds = reference_bounds)
-    solver_model_vars[0] = solver_vars
+    solver_model_vars[-1] = solver_vars
     m.net.solver_model.setParam('OutputFlag', bool(os.environ.get('ALPHA_BETA_CROWN_MIP_DEBUG', False)))
     m.net.solver_model.setParam("FeasibilityTol", 2e-5)
 
@@ -1669,31 +1766,59 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
     unstable_to_stable = [[] for _ in m.net.relus]
     last_relu_layer_refined = False
     need_refine = True
-    need_reset_init = False
-    init_relu = -1
+    init_relu = 0
     device = m.net.device
-    # The fraction of timeout neurons for changing the start layer.
-    reset_start_layer_threshold = arguments.Config['solver']['forward']['reset_threshold']
+    # This variable is to record whether an early stop action happened in the compute_bounds function. 
+    early_stop = True
+    unstable_neuron_filter = torch.tensor([])
+    A_dict_ = {}
+    # Set up the sliding window size.
+    if sliding_window > 0:
+        window_size = sliding_window
+        print(f'using sliding window in mip solver and the window size is: {window_size}')
+    else:
+        window_size = None
 
     # Here the refinement will start from the first layer until the time is up.
     for relu_idx, layer in enumerate(m.net.relus[:]):
         print('refine the bounds for layer ', layer.name)
-
+        # Change the constraints when sliding window is enabled.
+        if window_size and relu_idx >= window_size:
+            init_relu += 1
+            print(f'initial constraints: {len(m.net.solver_model.getConstrs())}')
+            layer_name = solver_model_vars[init_relu][1]
+            # Remove the initial constraints.
+            for constr in m.net.solver_model.getConstrs():
+                if layer_name in constr.ConstrName:
+                    m.net.solver_model.remove(constr)
+            m.net.solver_model.update()
+            print(f'updated constraints: {len(m.net.solver_model.getConstrs())}')
+            # If the window makes the bounds much looser, adding extra constraints may help the tighten the bound.
+            if arguments.Config["solver"]["mip"]["extra_constraint"] and not early_stop:
+                vars = np.array(solver_model_vars[init_relu][0])
+                input_vars = np.array(solver_model_vars[-1]).reshape(-1)
+                target_length = vars.shape[0]
+                input_length = input_vars.shape[0]
+                lA = A_dict_[init_relu]['lA'].reshape(target_length, input_length)
+                lbias = A_dict_[init_relu]['lbias'].reshape(target_length)
+                uA = A_dict_[init_relu]['uA'].reshape(target_length, input_length)
+                ubias = A_dict_[init_relu]['ubias'].reshape(target_length)
+                # Add extra constraints between current start layer and the input based on alpha-crown.
+                for i in range(target_length):
+                    m.net.solver_model.addConstr(vars[i] >= grb.LinExpr(lA[i], input_vars)+lbias[i])
+                    m.net.solver_model.addConstr(vars[i] <= grb.LinExpr(uA[i], input_vars)+ubias[i])
+                m.net.solver_model.update()
+            print(f'extra constraints from input: {len(m.net.solver_model.getConstrs())}')
         # As for the initial condition of the layers, the bounds are set to infinity.
         reference_bounds[layer.inputs[0].name] = [torch.full_like(reference_bounds[layer.inputs[0].name][0], -np.inf),
                                                 torch.full_like(reference_bounds[layer.inputs[0].name][1], np.inf)]
-            
         solver_vars = m.net.build_solver_module(x=(x,0), final_node_name = layer.inputs[0].name, interm_bounds = reference_bounds, set_input=False)
-        solver_model_vars[relu_idx+1] = solver_vars
-        # Reset the start point so that solver can finish within the timeout.
-        if need_reset_init: 
-            init_relu += 1
-            for var in solver_model_vars[init_relu]:
-                m.net.solver_model.remove(var)
-            need_reset_init = False
-            m.net.solver_model.update()
-        if relu_idx >= 1:    
+        solver_model_vars[relu_idx] = (solver_vars, layer.name)
+
+        if relu_idx >= 1:
+            print(f'timeout for this layer is {mip_perneuron_refine_timeout}')
             # Select the unstable neurons for Mip solver.
+            removed_neurons = 0
             candidates_with_bounds = []
             candidates = []
             candidates_idx = []
@@ -1701,25 +1826,38 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                 for neuron_idx,v in enumerate(solver_vars):
                     out_lb = lower_bounds[layer.inputs[0].name][0, neuron_idx]
                     out_ub = upper_bounds[layer.inputs[0].name][0, neuron_idx]
+                    # Since the neurons that has positive coefficients in alpha-crown won't affect the
+                    # final lower bounds. So we don't have to refine them. But they may affect the bounds 
+                    # of other intermediate layer bounds. Start on the third linear layer.
+                    if remove_neurons_from_A and unstable_neuron_filter.numel() != 0 and unstable_neuron_filter[neuron_idx] == 0:
+                        if out_lb * out_ub < 0:
+                            removed_neurons += 1
+                        continue
                     # For those stable neurons, skip for updates.
                     if out_lb * out_ub < 0:
                         product = out_lb * out_ub
-                        candidates_with_bounds.append(((v.VarName, None, out_lb.cpu(), out_ub.cpu()), neuron_idx,product))
+                        candidates_with_bounds.append(((v.VarName, None, out_lb.cpu().tolist(), out_ub.cpu().tolist()), neuron_idx, product))
 
                 candidates = [item[0] for item in candidates_with_bounds]
-                candidates_idx = [item[1] for item in candidates_with_bounds]  
+                candidates_idx = [item[1] for item in candidates_with_bounds]
+                unstable_neuron_filter = torch.tensor([])
+                print(f'Removed {removed_neurons} unstable neurons in MIP based on the coefficient matrix.')
 
-                if topk_filter != 1.:
-                    candidates = candidates[:int(len(candidates)*topk_filter)]
-                    candidates_idx = candidates_idx[:int(len(candidates_idx)*topk_filter)]
-                print("sorted candidates", candidates, "filter:", topk_filter)
+                if score is not None and FSB_sort:
+                    s = score[relu_idx].view(-1)[candidates_idx]
+                    _, indices = s.sort(descending=True)
+                    candidates = np.array(candidates)[indices.cpu().numpy()].tolist()
+                    candidates_idx = np.array(candidates_idx)[indices.cpu().numpy()].tolist()
+                    if topk_filter != 1.:
+                        candidates = candidates[:int(len(candidates)*topk_filter)]
+                        candidates_idx = candidates_idx[:int(len(candidates_idx)*topk_filter)]
             elif type(layer.inputs[0]) == BoundConv:
                 for chan in range(len(solver_vars)):
                     for row in range(len(solver_vars[chan])):
                         for col in range(len(solver_vars[chan][row])):
                             candidates.append((solver_vars[chan][row][col].VarName, None, None, None))
                             candidates_idx.append([chan, row, col])
-            # Multiprocess. 
+            # Multiprocess.
             multiprocess_mip_model = m.net.solver_model
             refine_time = time.time()
             if relu_idx == 1:
@@ -1734,8 +1872,6 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                     candidates = [(name, adv, out_lb, out_ub) for (name, _, out_lb, out_ub), adv in zip(candidates, adv_list)]
                 with multiprocessing.Pool(mip_multi_proc) as pool:
                     solver_result = pool.starmap_async(mip_solver, candidates, chunksize=1)
-                    solver_result = solver_result.get()
-
                     if relu_idx + 1 < len(m.net.relus) and adv_warmup:
                         # Create adv list for next relu layer if still have next relu layer.
                         adv, max_values, min_values = _intermediate_PGD_attack(m, relu_idx + 1, restarts=3, attack_iters=50, alpha=None)
@@ -1747,8 +1883,20 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                         for relu_layer in m.net.relus:
                             relu_layer.sparse_betas = {}
                             for key in relu_layer.alpha.keys():
-                                relu_layer.sparse_betas[key] = SparseBeta((1, 0), device=device) 
-            else:   
+                                relu_layer.sparse_betas[key] = SparseBeta((1, 0), device=device)
+                    # Find the A_dict for the linear layer correspond to the input.
+                    if window_size:
+                        lb_refined, ub_refined, A_dict = m.net.compute_bounds(x=(x,),
+                                C=m.c, method='CROWN-optimized', return_A=True, needed_A_dict={layer.inputs[0].name:[list(m.net.nodes())[0].name]},
+                                reference_bounds=reference_bounds, bound_upper=True)
+                        print("alpha-CROWN with intermediate bounds by MIP:", lb_refined, ub_refined)
+                        # Store the linear cofficient from alpha-crown for extra constraints in sliding window.
+                        # If the compute_bounds stops early, it means no improvment and the A_dict will be empty.
+                        if A_dict:
+                            A_dict_[relu_idx] = A_dict[layer.inputs[0].name][list(m.net.nodes())[0].name]
+                            early_stop = False
+                    solver_result = solver_result.get()
+            else:
                 with multiprocessing.Pool(mip_multi_proc) as pool:
                     if adv_warmup:
                         adv_list = []
@@ -1756,7 +1904,6 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                         for neuron_idx in candidates_idx:
                             adv_list.append((adv[neuron_idx + layer_size].cpu().tolist(), adv[neuron_idx].cpu().tolist())) # (low adv, max adv)
                         candidates = [(name, adv, out_lb, out_ub) for (name, _, out_lb, out_ub), adv in zip(candidates, adv_list)]
-
                         solver_result = pool.starmap_async(mip_solver, candidates, chunksize=1)
 
                         if relu_idx + 1 < len(m.net.relus):
@@ -1784,33 +1931,45 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                                 refined_relu_layer.sparse_betas[key] = SparseBeta((1, max_splits_per_layer), device=device)
                             for neuron_idx, (stable_neuron_idx, sign) in enumerate(unstable_to_stable[relu_idx-1]):
                                 for key in refined_relu_layer.sparse_betas.keys():
-                                    # Assign split constraint into all intermediate betas
+                                    # Assign split constraint into all intermdiate betas
                                     refined_relu_layer.sparse_betas[key].loc[0, neuron_idx] = stable_neuron_idx
                                     refined_relu_layer.sparse_betas[key].sign[0, neuron_idx] = sign
                         print("relu layer:", relu_idx-1, "has unstable to stable neurons:", unstable_to_stable[relu_idx-1])
-                        # When use the convolutional layer, beta should be forbidden by setting beta to false.
-                        m.net.set_bound_opts({'optimize_bound_args': {'enable_beta_crown': arguments.Config['solver']['beta-crown']['beta'], 
+                        # When use the convolutional layer, beta should be forbiddened by setting beta to false.
+                        m.net.set_bound_opts({'optimize_bound_args': {'enable_beta_crown': arguments.Config['solver']['beta-crown']['beta'],
                             "verbose": True}, 'enable_opt_interm_bounds': arguments.Config['solver']['beta-crown']['enable_opt_interm_bounds']})
-                        
-                        lb_refined, ub_refined = m.net.compute_bounds(x=(x,),
-                            C=m.c, method='CROWN-optimized', return_A=False,
-                            reference_bounds=reference_bounds, bound_upper=False)
+                        # For the last layer, we find the neuron that has negative sign in alpha-crown coefficient.
+                        A_dict_candidate = {m.net.final_node().name:layer.inputs[0].name}
+                        if window_size:
+                            A_dict_candidate[layer.inputs[0].name] = [list(m.net.nodes())[0].name]
+                        lb_refined, ub_refined, A_dict = m.net.compute_bounds(x=(x,),
+                            C=m.c, method='CROWN-optimized', return_A=True, needed_A_dict=A_dict_candidate,
+                            reference_bounds=reference_bounds, bound_upper=True)
+                        # If the compute_bounds stops early, it means no improvment and the A_dict will be empty.
+                        if A_dict:
+                            # Due to the early stop, the A_dict may be empty
+                            if window_size and layer.inputs[0].name in A_dict:
+                                A_dict_[relu_idx] = A_dict[layer.inputs[0].name][list(m.net.nodes())[0].name]
+                                early_stop = False
+                            # Find those neurons that have all positive cofficient with respect to output lower bounds.
+                            if remove_neurons_from_A and m.net.final_node().name in A_dict:
+                                unstable_neuron_filter = A_dict[m.net.final_node().name][layer.inputs[0].name]['lA'].squeeze(0)
+                                unstable_neuron_filter = torch.sum(unstable_neuron_filter<=0, dim=0)
                         print("alpha-CROWN with intermediate bounds by MIP:", lb_refined, ub_refined)
-                        
                         # Early stop if no refine needed for this relu.
                         if lb_refined.min().item()>=0:
                             print(f"min of alpha-CROWN bounds {lb_refined.min().item()}>=0, verified!")
                             pool.terminate()
                             need_refine = False
                             break
-                        last_relu_layer_refined = False    
+                        last_relu_layer_refined = False
 
                     solver_result = solver_result.get()
 
             refined_num = 0
             timeout_num = 0
             # Update bounds.
-            for idx, (lb,ub,refined,timeout_check) in zip(candidates_idx,solver_result):
+            for idx, (lb, ub, refined, timeout_check) in zip(candidates_idx, solver_result):
                 if type(layer.inputs[0]) == BoundLinear:
                     if refined:
                         vlb = max(lb, lower_bounds[layer.inputs[0].name][0, idx])
@@ -1827,7 +1986,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                     v.LB, v.UB = lower_bounds[layer.inputs[0].name][0, idx], upper_bounds[layer.inputs[0].name][0, idx]
                     if timeout_check:
                         timeout_num += 1
-                # For the convolutional layer, all the neurons will be refined.        
+                # For the convolutional layer, all the neurons will be refined.
                 elif type(layer.inputs[0]) == BoundConv:
                     if refined:
                         refined_num += 1
@@ -1835,7 +1994,7 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
                         v.LB = lb
                         v.UB = ub
                     if timeout_check:
-                        timeout_num += 1    
+                        timeout_num += 1
             m.net.solver_model.update()
             refine_time = time.time() - refine_time
             print(f"MIP improved {refined_num} nodes out of {len(solver_result)} unstable nodes for layer {layer.name}, time {refine_time:.4f}")
@@ -1845,21 +2004,19 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
             else:
                 need_refine = False
                 last_relu_layer_refined = False
-            # Change the start layer if timeout neurons beyond the threshold, 
-            # setting threshold above 1 means no reset. 
-            if len(solver_result) * reset_start_layer_threshold < timeout_num:
-                need_reset_init = True 
-        # Set up Relu constraints for the Mip solver.
-        # Stop refine if timeout.
-        if (time.time() - mip_refine_time_start >= mip_refine_timeout) or (not need_refine):
-            break         
-        # Update the bounds for current relu layer and its previous layer.
+            # If too many timeout or remaining time is sufficient, just increase the time for next layer.
+            if (timeout_num > len(solver_result) * timeout_neuron_threshold or
+                mip_refine_timeout - time.time() - mip_refine_time_start > remaining_timeout_threshold * mip_perneuron_refine_timeout * (len(m.net.relus[:])-relu_idx)):
+                mip_perneuron_refine_timeout += mip_perneuron_refine_timeout_increasement
+            # Stop refine if timeout.
+            if (time.time() - mip_refine_time_start >= mip_refine_timeout) or (not need_refine):
+                break
+            # Update the bounds for current relu layer and its previous layer.
         for i, _ in enumerate(m.net.relus):
             reference_bounds[m.net.relus[i].inputs[0].name] = [lower_bounds[m.net.relus[i].inputs[0].name], upper_bounds[m.net.relus[i].inputs[0].name]]
-            reference_bounds[m.net.relus[i].name] = [lower_bounds[m.net.relus[i].inputs[0].name], upper_bounds[m.net.relus[i].inputs[0].name]]
+        # Set up Relu constraints for the Mip solver.
         solver_vars = m.net.build_solver_module(x=(x,), final_node_name = layer.name, interm_bounds=reference_bounds, set_input=False)
-        solver_model_vars[relu_idx+1] = solver_model_vars[relu_idx+1].extend(solver_vars)
-        print("maximum relu layer improved by MIP so far", relu_idx)  
+        print("maximum relu layer improved by MIP so far", relu_idx)
 
     print(f'MIP finished with {time.time() - refine_start_time}s')
 
@@ -1872,13 +2029,13 @@ def build_the_model_mip_refine(m, lower_bounds, upper_bounds,
             nd = m.net.relus[i].inputs[0].name
             print(i, nd, lower_bounds[nd].shape)
             reference_bounds[nd] = [lower_bounds[nd], upper_bounds[nd]]
- 
+
         lb_refined, ub_refined = m.net.compute_bounds(x=(x,), C=m.c,
             method='CROWN-optimized', reference_bounds=reference_bounds, bound_upper=False)
         print("alpha-CROWN with intermediate bounds improved by MIP:", lb_refined, ub_refined)
 
     # Creating history: batch, relu layers, [[loc neuron_idx],[coeff 1 if>=0 else -1]]
-    splits = [[[], [], []] for _ in m.net.relus]
+    splits = [[[], [], [], [], []] for _ in m.net.relus]
     # Creating history betas: batch, relu layers, [beta tensor for this layer]
     retb = []
 
@@ -1916,7 +2073,27 @@ def check_lp_cut(self, pre_lbs, pre_ubs, lower_bounds, split, history):
     beta_crown_lbs = [i[-1] for i in lower_bounds]
     refine_time = time.time()
 
-def batch_verification_all_node_split_LP(net, d, ret, split):
+def batch_verification_all_node_split_LP(net, d, ret, split, stats):
+    global termination_flag_lp
+    global multiprocess_lp_model
+    global input_name
+
+    # Here we directly use the settings from mip
+    mip_multi_proc = arguments.Config["solver"]["mip"]["parallel_solvers"]
+
+    termination_flag_lp = multiprocessing.Value('i', 0)
+    multiprocess_lp_model = net.net.solver_model
+    pre_relu_layer_names = net.pre_relu_layer_names
+    relu_layer_names = net.relu_layer_names
+    input_name = net.input_name
+    orig = net.net.final_node().solver_vars
+    orig_out_vars = [orig[out_idx].VarName for out_idx in range(len(orig))]
+    
+
+    if mip_multi_proc is None:
+        mip_multi_proc = multiprocessing.cpu_count()
+        print("preset mip_multi_proc as default setting:", mip_multi_proc)
+
     depths = d['depths']
     rhs = d['thresholds']
     dom_lb_all = ret['lower_bounds']
@@ -1927,16 +2104,28 @@ def batch_verification_all_node_split_LP(net, d, ret, split):
     dom_lb = dom_lb_all[net.final_name]
     dom_lb_all = [dom_lb_all[layer.name] for layer in net.split_nodes] + [dom_lb_all[net.final_name]]
     dom_ub_all = [dom_ub_all[layer.name] for layer in net.split_nodes] + [dom_ub_all[net.final_name]]
+    # Add unverified cases to the global waiting list
+    all_node_model_para_list = []
     for domain_idx in range(len(depths)):
-        # get tot_ambi_nodes
         dlb = [dlbs[domain_idx: domain_idx + 1] for dlbs in dom_lb_all]
         dub = [dubs[domain_idx: domain_idx + 1] for dubs in dom_ub_all]
-        decision_threshold = rhs.to(dom_lb[0].device, non_blocking=True)[domain_idx if domain_idx < (len(dom_lb)//2) else domain_idx - (len(dom_lb)//2)]
-        if depths[domain_idx] + 1 == net.tot_ambi_nodes and torch.all(dlb[-1] <= decision_threshold):
-            lp_status, dlb = net.all_node_split_LP(dlb, dub, decision_threshold)
-            print(f"using lp to solve all split node domain {domain_idx}/{len(dom_lb)}, results {dom_lb[domain_idx]} -> {dlb}, {lp_status}")
-            if lp_status == "unsafe":
-                return dlb
-            dom_lb_all[-1][domain_idx] = dlb
-            dom_lb[domain_idx] = dlb
-    return None
+        decision_threshold = rhs.to(dom_lb[0].device)[domain_idx if domain_idx < (len(dom_lb)//2) else domain_idx - (len(dom_lb)//2)]
+        if depths[domain_idx] == net.tot_ambi_nodes and torch.any(dlb[-1] <= decision_threshold):
+            all_node_model_para_list.append((pre_relu_layer_names, relu_layer_names, orig_out_vars, dlb, dub, decision_threshold, domain_idx))
+
+    # Return False if all safe, return True when there exists a counterexample
+    if len(all_node_model_para_list) == 0:
+        return False
+
+    # Use map to enable multiprocessing
+    with multiprocessing.Pool(mip_multi_proc) as pool:
+        solver_result = pool.map(all_node_split_LP, all_node_model_para_list)
+
+    # Save the counterexample in stats if unsafe, otherwise adjust bounds to exclude safe cases
+    for (lp_status, domain_idx, dlb, counterexample) in solver_result:
+        if lp_status == "unsafe":
+            stats.counterexample = torch.tensor([counterexample])
+            return True
+        dom_lb_all[-1][domain_idx] = torch.tensor([dlb])
+        dom_lb[domain_idx] = torch.tensor([dlb])
+    return False

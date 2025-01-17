@@ -5,7 +5,7 @@ general:
   csv_name: instances.csv
   enable_incomplete_verification: False
   loss_reduction_func: max
-  conv_mode: matrix
+    # conv_mode: matrix
 specification:
   robustness_type: all-positive
 data:

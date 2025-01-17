@@ -56,13 +56,6 @@ sudo apt install build-essential  # A modern g++ (>=8.0) is required to compile 
 make -C complete_verifier/cuts/CPLEX_cuts/
 ```
 
-### Installing DNNV
-
-The DNNV package is needed for converting the VGG models in VNN-COMP 2022 and VNN-COMP 2023.
-```bash
-pip install -U --no-deps git+https://github.com/dlshriver/DNNV.git@4d4b124bd739b4ddc8c68fed1af3f85b90386155#egg=dnnv
-```
-
 ## Prepare VNN-COMP benchmarks
 
 Clone the VNN-COMP benchmarks and scripts:
@@ -76,6 +69,10 @@ git clone https://github.com/ChristopherBrix/vnncomp2022_benchmarks.git
 git clone https://github.com/ChristopherBrix/vnncomp2023_benchmarks.git
 # Unzip and download necessary files
 (cd vnncomp2023_benchmarks; ./setup.sh)
+
+git clone https://github.com/ChristopherBrix/vnncomp2024_benchmarks.git
+# Unzip and download necessary files
+(cd vnncomp2024_benchmarks; ./setup.sh)
 ```
 
 Then, change directory to the folder for the year you want to use. For example,
@@ -117,6 +114,9 @@ We can also run multiple benchmarks at one time:
 
 # For VNN-COMP 2023
 ./run_all_categories.sh v1 ${HOME}/alpha-beta-CROWN/vnncomp_scripts $(pwd) all_results.csv ./counterexamples "acasxu cgan collins_yolo_robustness metaroom nn4sys tllverifybench vggnet16 yolo cctsdb_yolo collins_rul_cnn dist_shift ml4acopf test traffic_signs_recognition vit" all 2>&1 | tee stdout.log
+
+# For VNN-COMP 2024
+./run_all_categories.sh v1 ${HOME}/alpha-beta-CROWN/vnncomp_scripts $(pwd) all_results.csv ./counterexamples "acasxu_2023 cifar100 cora lsnc ml4acopf_2024 traffic_signs_recognition_2023 yolo_2023 cctsdb_yolo_2023 collins_aerospace_benchmark dist_shift_2023 metaroom_2023 nn4sys_2023 tinyimagenet vggnet16_2023 cgan_2023 collins_rul_cnn_2023 linearizenn ml4acopf_2023 safenlp tllverifybench_2023 vit_2023" all 2>&1 | tee stdout.log
 ```
 
 ## Run VNN-COMP benchmarks by config files
@@ -136,7 +136,7 @@ with less running time compare to those with the `./run_all_categories.sh` scrip
 (in the competitions, the overhead was measured and excluded from scoring).
 
 All the config files are stored at `exp_configs/vnncomp21`, `exp_configs/vnncomp22`,
-`exp_configs/vnncomp23` for the three years of VNN-COMP respectively.
+`exp_configs/vnncomp23` and `exp_configs/vnncomp24` for the four years of VNN-COMP respectively.
 
 ## Original code used in the competitions
 
@@ -144,6 +144,7 @@ The original code used in the competitions can be found at:
 - [VNN-COMP 2021](https://github.com/Verified-Intelligence/alpha-beta-CROWN/tree/vnncomp2021)
 - [VNN-COMP 2022](https://github.com/huanzhang12/alpha-beta-CROWN_vnncomp22)
 - [VNN-COMP 2023](https://github.com/Verified-Intelligence/alpha-beta-CROWN_vnncomp23)
+- [VNN-COMP 2024](https://github.com/Verified-Intelligence/alpha-beta-CROWN_vnncomp2024)
 
 However, it is always recommended using the latest master version to
 run the benchmarks, especially when compared to a newly developed verifier.
