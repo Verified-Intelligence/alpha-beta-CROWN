@@ -122,8 +122,7 @@ Then, you can run:
 pip install -r complete_verifier/requirements.txt
 ```
 
-Unless you use MIP-based verification algorithms or the GCP-CROWN verifier,
-a Gurobi license is *not needed* (in most use cases).
+Unless you use MIP-based verification algorithms, a Gurobi license is *not needed* (in most use cases).
 If you want to use MIP-based verification algorithms (which are feasible only for small models), you need to
 install a Gurobi license with the `grbgetkey` command.  If you don't have
 access to a license, by default, the above installation procedure includes a
@@ -320,4 +319,3 @@ Past developers:
 The team acknowledges the financial and advisory support from Prof. Zico Kolter (zkolter@cs.cmu.edu), Prof. Cho-Jui Hsieh (chohsieh@cs.ucla.edu), Prof. Suman Jana (suman@cs.columbia.edu), Prof. Bo Li (lbo@illinois.edu), and Prof. Xue Lin (xue.lin@northeastern.edu).
 
 Our library is released under the BSD 3-Clause license. A copy of the license is included [here](LICENSE).
-
