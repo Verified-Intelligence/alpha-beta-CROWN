@@ -1,9 +1,8 @@
-# This is an example configuration file that contains most useful parameter settings.
 model:
   name: resnet2b  # This model is defined in model_defs.py. Add your own model definitions there.
   path: models/cifar10_resnet/resnet2b.pth  # Path to PyTorch checkpoint.
 data:
-  dataset: CIFAR  # Dataset name. This is just the standard CIFAR-10 test set defined in the "load_verification_dataset()" function in utils.py
+  dataset: CIFAR  # Dataset name. This is just the standard CIFAR-10 test set defined in the "load_verification_dataset()" function in loading.py
   mean: [0.4914, 0.4822, 0.4465]  # Mean for normalization.
   std: [0.2471, 0.2435, 0.2616]  # Std for normalization.
   start: 0  # First example to verify in dataset.

@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -24,7 +24,7 @@ from heuristics.base import NeuronBranchingHeuristic
 from heuristics.nonlinear.babsr import BaBSRNonlinearBranching
 from heuristics.nonlinear.utils import set_roots
 from heuristics.nonlinear.bp_opt import BranchingPointOpt
-from utils import get_reduce_op
+from utils import get_reduce_op, expand_batch
 from auto_LiRPA import BoundedTensor
 from auto_LiRPA.bound_ops import *
 from auto_LiRPA.utils import stop_criterion_batch_any, multi_spec_keep_func_all
@@ -282,12 +282,16 @@ class NonlinearBranching(NeuronBranchingHeuristic):
         # Specicial cases for now
         if len(start_nodes) == 1:
             start_node = start_nodes[0]
-            if isinstance(start_node, (BoundRelu, BoundSign, BoundSignMerge)):
+            if isinstance(start_node, (BoundRelu, BoundSign, BoundSignMerge, BoundMul)):
                 # For ReLU or LeakyReLU, always branch at 0.
                 mask_unstable = torch.logical_and(lb_ori < 0, ub_ori > 0)
                 points[mask_unstable, :] = 0
             elif isinstance(start_node, BoundMultiPiecewiseNonlinear):
-                offset = start_node.inputs[2].forward_value
+                offset = (
+                    start_node.inputs[2].forward_value
+                    if hasattr(start_node.inputs[2], 'forward_value')
+                    else start_node.inputs[2].forward()
+                )
                 mask = (lb_ori.unsqueeze(-1) < offset) & (ub_ori.unsqueeze(-1) > offset)
                 mask_cumsum = mask.cumsum(dim=-1)
                 index = (mask_cumsum[:, :, -1] + 1) // 2
@@ -319,10 +323,10 @@ class NonlinearBranching(NeuronBranchingHeuristic):
         dim_output, batch_size, num_neurons = bound_before.shape
         assert isinstance(self.roots[0], BoundInput)
         assert isinstance(self.roots[0].value, BoundedTensor)
-        x_new = self.net.expand_x(batch_size)
+        x_new = expand_batch(self.net.x, batch_size)
         set_roots(self.roots, x_new, A_before)
         # (batch_size, dim_output)
-        bound_from_A = self.model.concretize(
+        bound_from_A = self.model.backward_concretize(
             batch_size, dim_output,
             torch.zeros((batch_size, dim_output), device=bound_before.device))[0]
         # (batch_size, num_neurons, dim_output)
@@ -350,7 +354,7 @@ class NonlinearBranching(NeuronBranchingHeuristic):
             bound_after = bound_after.transpose(
                 1, 2).reshape(-1, batch_size).transpose(0, 1)
             # (batch_size, dim_output, num_neurons)
-            bound_after = self.model.concretize(
+            bound_after = self.model.backward_concretize(
                 bound_after.shape[0], bound_after.shape[1], bound_after)[0]
             # (batch_size, num_neurons, dim_output)
             bound_after = bound_after.reshape(
@@ -432,13 +436,15 @@ class NonlinearBranching(NeuronBranchingHeuristic):
 
                 A_saved = self.net.A_saved[node_pre.name][self.model.input_name[0]]
                 lA_next = maybe_convert_A(A_saved['lA'])
-                assert lA_next.shape[0] == 1
-                lA_next = lA_next.reshape(lA_next.shape[1], -1)
                 uA_next = maybe_convert_A(A_saved['uA'])
-                assert uA_next.shape[0] == 1
-                uA_next = uA_next.reshape(uA_next.shape[1], -1)
                 lbias = A_saved['lbias']
                 ubias = A_saved['ubias']
+                lA_next = lA_next[:1]
+                uA_next = uA_next[:1]
+                lbias = lbias[:1]
+                ubias = ubias[:1]
+                lA_next = lA_next.reshape(lA_next.shape[1], -1)
+                uA_next = uA_next.reshape(uA_next.shape[0], uA_next.shape[1], -1)
                 lbias = lbias.flatten() if lbias is not None else None
                 ubias = ubias.flatten() if ubias is not None else None
                 A_ = A[i][0]

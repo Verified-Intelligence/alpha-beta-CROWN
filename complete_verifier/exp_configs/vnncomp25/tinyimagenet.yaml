@@ -1,0 +1,25 @@
+general:
+  root_path: ../../vnncomp2025_benchmarks/benchmarks/tinyimagenet_2024
+  csv_name: instances.csv
+model:
+  onnx_optimization_flags: ["merge_bn"]
+attack:
+  pgd_order: middle
+  pgd_restarts: 10
+solver:
+  batch_size: 256
+  beta-crown:
+    lr_alpha: 0.1
+    lr_beta: 0.15
+    iteration: 8
+  alpha-crown:
+    lr_alpha: 0.25
+    iteration: 20
+bab:
+  branching:
+    method: kfsb
+    candidates: 7
+    reduceop: max
+  clip_n_verify:
+    clip_interm_domain:
+      enabled: True

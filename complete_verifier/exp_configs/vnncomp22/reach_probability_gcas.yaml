@@ -2,7 +2,6 @@
 general:
   root_path: ../../vnncomp2022_benchmarks/benchmarks/reach_prob_density/
   csv_name: instances.csv
-  enable_incomplete_verification: False
   conv_mode: matrix
 solver:
   batch_size: 8192  # Number of parallel domains to compute on GPU.

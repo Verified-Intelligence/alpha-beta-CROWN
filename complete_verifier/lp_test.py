@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -45,22 +45,20 @@ def compare_optimized_bounds_against_lp_bounds(
         # transpose c to share intermediate bounds
         c = c.transpose(0, 1)
     rhs = torch.tensor(np.array([item[1] for item in vnnlib[1]])).to(data).t()
-    model = LiRPANet(model_ori, in_size=data.shape, c=c)
+    model = LiRPANet(model_ori, in_size=data.shape)
     if isinstance(vnnlib[0], dict):
         ptb = PerturbationLpNorm(
             norm=vnnlib[0]['norm'],
-            eps=vnnlib[0]['eps'], eps_min = vnnlib[0].get('eps_min', 0),
+            eps=vnnlib[0]['eps'],
             x_L=data_lb, x_U=data_ub)
     else:
         # Perturbation value for non-Linf perturbations, None for all other cases.
         ptb = PerturbationLpNorm(norm=norm, x_L=data_lb, x_U=data_ub)
     x = BoundedTensor(data, ptb).to(data.device)
-    domain = torch.stack([data_lb.squeeze(0), data_ub.squeeze(0)], dim=-1)
     solver_args = arguments.Config['solver']
     share_alphas = solver_args['alpha-crown']['share_alphas']
 
     model.x = x
-    model.input_domain = domain
     model.net.set_bound_opts({
         'optimize_bound_args': {'stop_criterion_func': lambda x: False},
         'verbosity': 0,

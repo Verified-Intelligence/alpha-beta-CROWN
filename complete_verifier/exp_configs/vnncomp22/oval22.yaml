@@ -8,7 +8,6 @@ solver:
   beta-crown:
     lr_beta: 0.01
   start_save_best: -1
-  prune_after_crown: False
 bab:
   branching:
     reduceop: max

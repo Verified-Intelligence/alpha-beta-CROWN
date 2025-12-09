@@ -8,7 +8,6 @@ specification:
   norm: .inf
 solver:
   batch_size: 2000
-  auto_enlarge_batch_size: true
   beta-crown:
     lr_beta: 0.01
 bab:

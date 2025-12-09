@@ -8,7 +8,6 @@ specification:
   epsilon: 0.3
 solver:
   batch_size: 4096
-  auto_enlarge_batch_size: true
   beta-crown:
     iteration: 20
 bab:
@@ -20,7 +19,7 @@ bab:
     number_cuts: 500
     biccos:
       enabled: true
-      auto_param: false
+      auto_param: true
       multi_tree_branching:
         enabled: true
         restore_best_tree: true

@@ -10,6 +10,5 @@ bab:
   branching:
     reduceop: max
     candidates: 10
-  initial_max_domains: 10
 attack:
   pgd_order: middle

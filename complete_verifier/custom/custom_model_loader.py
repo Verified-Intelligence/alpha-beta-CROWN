@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -265,7 +265,7 @@ def customized_NN4SYS_loader(file_root, onnx_path, vnnlib_path):
     if not os.path.exists(path):
         convert_and_save_nn4sys(os.path.join(file_root, onnx_path))
     # load pre-converted model
-    model_ori = torch.load(path)
+    model_ori = torch.load(path, weights_only=False)
     print(f'Loaded from {path}')
     vnnlib = read_vnnlib(os.path.join(file_root, vnnlib_path), regression=True)
     return model_ori, shape, vnnlib

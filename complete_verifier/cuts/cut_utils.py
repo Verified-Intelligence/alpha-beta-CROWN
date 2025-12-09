@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -215,7 +215,6 @@ def parse_cplex_cuts(cut_bin, var_names, relu_layer_names, pre_relu_layer_names)
         assert cut_mbr[:4] == b"CUTS", "cut_bin should be cuts binary"
         num_rows, num_elements, row_begin_idx_offset, rhs_values_offset, row_indices_offset, row_values_offset = struct.unpack('6i', cut_mbr[4:28])
         print(f"cut {cut_bin}: total {num_rows} constraints, {num_elements} nonzero elements")
-        # import pdb; pdb.set_trace()
         ### header || row_begin_idx || rhs || nonzero var indices || nonzero values
         row_begin_idx = list(struct.unpack(f'{num_rows}Q', cut_mbr[row_begin_idx_offset:rhs_values_offset]))
         rhs = struct.unpack(f'{num_rows}d', cut_mbr[rhs_values_offset:row_indices_offset])
@@ -225,6 +224,7 @@ def parse_cplex_cuts(cut_bin, var_names, relu_layer_names, pre_relu_layer_names)
 
         cuts = []
         row_begin_idx.append(num_elements)
+        skip_num = 0
         for cut_idx in range(num_rows):
             skip = False
             row_begin_start = row_begin_idx[cut_idx]
@@ -234,13 +234,8 @@ def parse_cplex_cuts(cut_bin, var_names, relu_layer_names, pre_relu_layer_names)
                     "arelu_decision": [], "arelu_coeffs": [],
                     "pre_decision": [], "pre_coeffs": [],
                     "bias": [], "c": []}
-            # nonzero_vars = [var_names[indx] for indx in row_indices[row_begin_start:row_begin_end]]
-            # nonzero_values = row_values[row_begin_start:row_begin_end]
-            # print(nonzero_vars)
             for cut_var_idx in range(row_begin_start, row_begin_end):
-                # row_indices[row_begin_start:row_begin_end]
                 var_name = var_names[row_indices[cut_var_idx]]
-                # var_name = var_hash_map[row_indices[cut_var_idx]]
                 coeff = row_values[cut_var_idx]
                 if "inp_" in var_name:
                     neuron_idx = int(var_name.replace("inp_", ""))
@@ -267,15 +262,17 @@ def parse_cplex_cuts(cut_bin, var_names, relu_layer_names, pre_relu_layer_names)
                     cut["pre_decision"].append([relu_idx, int(neuron_idx)])
                     cut["pre_coeffs"].append(coeff)
                 else:
-                    print(f"Warning: var{var_name} not supported!")
-                    exit()
+                    skip = True
+                    break
 
             cut["bias"] = rhs[cut_idx]
             cut["c"] = -1
 
             if not skip:
                 cuts.append(cut)
-        # import pdb; pdb.set_trace()
+            else:
+                skip_num += 1
+        print(f'number of cuts add: {len(cuts)}, number of cuts skip: {skip_num}')
         return cuts, cut_timestamp
     except Exception as e:
         print('unable to get the cut from filepath: {} '
@@ -298,9 +295,11 @@ def fetch_cut_from_cplex(net, sync_to_net=True):
         and net.mip_building_proc.exitcode is not None
         and net.mip_building_proc.exitcode != 0
     ):
-        raise RuntimeError("MIP building process is not terminated correctly, please check the process. Return code", net.mip_building_proc.exitcode)
-    read_from = 'cplex_processes' if getattr(net, 'cplex_processes', None) is not None else 'processes'
-    process_dict = getattr(net, read_from, None)
+        print("********CRITICAL WARNING (DO NOT IGNORE!)********")
+        print(f"MIP building process is not terminated correctly. Cutting planes are not being used. Please STOP and check! Return code {net.mip_building_proc.exitcode}")
+        print("********CRITICAL WARNING (DO NOT IGNORE!)********")
+        return None, -1
+    process_dict = getattr(net, 'processes', None)
     if process_dict is None:
         print('Fetch cut process: mps construction process is still running')
     else:
@@ -331,91 +330,6 @@ def fetch_cut_from_cplex(net, sync_to_net=True):
                 return cuts, cut_timestamp
         print('Fetch cut process: mps for current label is not ready yet')
     return None, -1
-
-
-def read_cut_pt(cut_file, use_float64_in_last_iteration=False):
-    cut_raw = torch.load(cut_file)
-
-    biases = []
-    x_decision, x_coeffs = [], []
-    relu_decision, relu_coeffs = [], []
-    arelu_decision, arelu_coeffs = [], []
-    pre_decision, pre_coeffs = [], []
-    c = []
-    for layer, d in enumerate(cut_raw):
-        kact_cons = d['kact_cons']
-        for con in kact_cons:
-            # FIXME: many are duplicate
-            # TODO: prune variables with zero coefficient
-            k = con['k']
-            if use_float64_in_last_iteration:
-                con['cons'] = con['cons'].astype(np.float32)
-            exists = {}
-            for i in range(con['cons'].shape[0]):
-                if tuple(con['cons'][i]) in exists:
-                    # Duplicate
-                    continue
-                exists[tuple(con['cons'][i])] = True
-                coeffs = con['cons'][i]
-
-                pre_decision_ = []
-                pre_coeffs_ = []
-                for j in range(k):
-                    if con['cons'][i][1+j] != 0:
-                        pre_coeffs_.append(float(coeffs[1+j]))
-                        pre_decision_.append([layer, con['varsid'][j]])
-                pre_decision.append(pre_decision_)
-                pre_coeffs.append(pre_coeffs_)
-
-                relu_decision_ = []
-                relu_coeffs_ = []
-                for j in range(k):
-                    if con['cons'][i][1+k+j] != 0:
-                        relu_coeffs_.append(float(coeffs[1+k+j]))
-                        relu_decision_.append([layer, con['varsid'][j]])
-                relu_decision.append(relu_decision_)
-                relu_coeffs.append(relu_coeffs_)
-
-                # bias should be on the right-hand-side (ERAN's is on the left-hand-side)
-                biases.append(float(-coeffs[0]))
-                c.append(1)
-
-                if False and ((con['cons'][i][1:1+k] != 0).sum() == 1 and (con['cons'][i][1+k:1+k*2] != 0).sum() == 1
-                        and np.absolute(con['cons'][i][1:1+k]).argmax() ==  np.absolute(con['cons'][i][1+k:1+k*2]).argmax()):
-                    # Check: compute lower bounds using pre-activation bounds
-                    check_sum = 0
-                    for j in range(k):
-                        check_sum += min(
-                            (d['preact_l'][ con['varsid'][j] ] * con['cons'][i][1+j]
-                                + max(d['preact_l'][ con['varsid'][j] ], 0) * con['cons'][i][1+k+j]),
-                            (d['preact_u'][ con['varsid'][j] ] * con['cons'][i][1+j]
-                                + max(d['preact_u'][ con['varsid'][j] ], 0) * con['cons'][i][1+k+j])
-                        )
-                    check_sum += con['cons'][i][0]
-                    print('check', layer, check_sum)
-                    if check_sum < -1e-6:
-                        import pdb
-                        pdb.set_trace()
-
-                arelu_decision.append([])
-                arelu_coeffs.append([])
-                x_decision.append([])
-                x_coeffs.append([])
-
-    num_constr = len(pre_decision)
-
-    print(f'{num_constr} constraints read from ERAN')
-
-    cut = [{"x_decision": x_decision[i], "x_coeffs": x_coeffs[i],
-                "relu_decision": relu_decision[i], "relu_coeffs": relu_coeffs[i],
-                "arelu_decision": arelu_decision[i], "arelu_coeffs": arelu_coeffs[i],
-                "pre_decision": pre_decision[i], "pre_coeffs": pre_coeffs[i],
-                "bias": biases[i], "c": c[i]}
-            for i in range(num_constr)]
-
-    pre_bounds = [ (item['preact_l'], item['preact_u']) for item in cut_raw]
-
-    return cut, pre_bounds
 
 
 def close_cut_log(processes, pidx):
@@ -515,7 +429,7 @@ def clean_net_mps_process(net):
     :param net:
     :return:
     """
-    if net.cplex_processes is None and net.processes is not None:
+    if net.processes is not None:
         while net.mip_building_proc.is_alive():
             # if the building process is not terminated yet, we need to wait it to terminate so that
             # no new cut processes will be created

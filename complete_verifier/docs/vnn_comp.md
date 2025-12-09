@@ -31,28 +31,28 @@ echo "Please run \"export VNNCOMP_PYTHON_PATH=${VNNCOMP_PYTHON_PATH}\" before yo
 Gurobi should be automatically installed via the command above, and you need to
 activate it using the `grbgetkey` command. If you work in academia you can get an academic licenses
 from [here](http://www.gurobi.com/academia/for-universities).  A Gurobi license is required for
-`eran`, `mnistfc`, `marabou-cifar10` and `verivital` benchmarks; other
+`eran`, `mnistfc`, `marabou-cifar10`, `verivital`, `safenlp`, `malbeware`, and `sat_relu` benchmarks; other
 benchmarks do not depend on Gurobi.
 
 ### Installing CPLEX
 
-CPLEX is needed for the `oval21` benchmark. It is free for students and
+CPLEX is needed for the `oval21` and `oval22` benchmark. It is free for students and
 academics from
 [here](https://community.ibm.com/community/user/datascience/blogs/xavier-nodet1/2020/07/09/cplex-free-for-students).
 
 ```bash
-# Install IBM CPLEX >= 22.1.0
+# Install IBM CPLEX >= 22.1.1
 # Download from https://community.ibm.com/community/user/datascience/blogs/xavier-nodet1/2020/07/09/cplex-free-for-students
-chmod +x cplex_studio2210.linux_x86_64.bin  # Any version >= 22.1.0 should work. Change executable name here.
-# You can directly run the installer: ./cplex_studio2210.linux_x86_64.bin; the response.txt created below is for non-interactive installation.
+chmod +x cplex_studio2211.linux_x86_64.bin  # Any version >= 22.1.0 should work. Change executable name here.
+# You can directly run the installer: ./cplex_studio2211.linux_x86_64.bin; the response.txt created below is for non-interactive installation.
 cat > response.txt <<EOF
 INSTALLER_UI=silent
 LICENSE_ACCEPTED=true
 EOF
-sudo ./cplex_studio2210.linux_x86_64.bin -f response.txt
+sudo ./cplex_studio2211.linux_x86_64.bin -f response.txt
 # Build the C++ code for CPLEX interface. Assuming we are still inside the alpha-beta-CROWN folder.
 sudo apt install build-essential  # A modern g++ (>=8.0) is required to compile the code.
-# Change CPX_PATH in complete_verifier/cuts/CPLEX_cuts/Makefile if you installed CPlex to a non-default location, like inside your home folder.
+# Change CPX_PATH in complete_verifier/cuts/CPLEX_cuts/Makefile if you installed CPLEX to a non-default location, like inside your home folder.
 make -C complete_verifier/cuts/CPLEX_cuts/
 ```
 
@@ -60,19 +60,23 @@ make -C complete_verifier/cuts/CPLEX_cuts/
 
 Clone the VNN-COMP benchmarks and scripts:
 ```bash
-git clone https://github.com/stanleybak/vnncomp2021.git
+git clone https://github.com/VNN-COMP/vnncomp2021.git
 
-git clone https://github.com/ChristopherBrix/vnncomp2022_benchmarks.git
+git clone https://github.com/VNN-COMP/vnncomp2022_benchmarks.git
 # Unzip and download necessary files
 (cd vnncomp2022_benchmarks; ./setup.sh)
 
-git clone https://github.com/ChristopherBrix/vnncomp2023_benchmarks.git
+git clone https://github.com/VNN-COMP/vnncomp2023_benchmarks.git
 # Unzip and download necessary files
 (cd vnncomp2023_benchmarks; ./setup.sh)
 
-git clone https://github.com/ChristopherBrix/vnncomp2024_benchmarks.git
+git clone https://github.com/VNN-COMP/vnncomp2024_benchmarks.git
 # Unzip and download necessary files
 (cd vnncomp2024_benchmarks; ./setup.sh)
+
+git clone https://github.com/VNN-COMP/vnncomp2025_benchmarks.git
+# Unzip and download necessary files
+(cd vnncomp2025_benchmarks; ./setup.sh)
 ```
 
 Then, change directory to the folder for the year you want to use. For example,
@@ -117,6 +121,9 @@ We can also run multiple benchmarks at one time:
 
 # For VNN-COMP 2024
 ./run_all_categories.sh v1 ${HOME}/alpha-beta-CROWN/vnncomp_scripts $(pwd) all_results.csv ./counterexamples "acasxu_2023 cifar100 cora lsnc ml4acopf_2024 traffic_signs_recognition_2023 yolo_2023 cctsdb_yolo_2023 collins_aerospace_benchmark dist_shift_2023 metaroom_2023 nn4sys_2023 tinyimagenet vggnet16_2023 cgan_2023 collins_rul_cnn_2023 linearizenn ml4acopf_2023 safenlp tllverifybench_2023 vit_2023" all 2>&1 | tee stdout.log
+
+# For VNN-COMP 2025
+./run_all_categories.sh v1 ${HOME}/alpha-beta-CROWN/vnncomp_scripts $(pwd) all_results.csv ./counterexamples "acasxu_2023 cctsdb_yolo_2023 cersyve cgan_2023 cifar100_2024 collins_aerospace_benchmark collins_rul_cnn_2022 cora_2024 dist_shift_2023 linearizenn_2024 lsnc_relu malbeware metaroom_2023 ml4acopf_2024 nn4sys relusplitter safenlp_2024 sat_relu soundnessbench tinyimagenet_2024 tllverifybench_2023 traffic_signs_recognition_2023 vggnet16_2022 vit_2023 yolo_2023" all 2>&1 | tee stdout.log
 ```
 
 ## Run VNN-COMP benchmarks by config files
@@ -136,7 +143,7 @@ with less running time compare to those with the `./run_all_categories.sh` scrip
 (in the competitions, the overhead was measured and excluded from scoring).
 
 All the config files are stored at `exp_configs/vnncomp21`, `exp_configs/vnncomp22`,
-`exp_configs/vnncomp23` and `exp_configs/vnncomp24` for the four years of VNN-COMP respectively.
+`exp_configs/vnncomp23`, `exp_configs/vnncomp24`, and `exp_configs/vnncomp25` for the five years of VNN-COMP respectively.
 
 ## Original code used in the competitions
 
@@ -145,6 +152,7 @@ The original code used in the competitions can be found at:
 - [VNN-COMP 2022](https://github.com/huanzhang12/alpha-beta-CROWN_vnncomp22)
 - [VNN-COMP 2023](https://github.com/Verified-Intelligence/alpha-beta-CROWN_vnncomp23)
 - [VNN-COMP 2024](https://github.com/Verified-Intelligence/alpha-beta-CROWN_vnncomp2024)
+- [VNN-COMP 2025](https://github.com/Verified-Intelligence/alpha-beta-CROWN_vnncomp2025)
 
 However, it is always recommended using the latest master version to
 run the benchmarks, especially when compared to a newly developed verifier.

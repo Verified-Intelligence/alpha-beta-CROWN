@@ -4,6 +4,7 @@ model:
   # Use the simple_conv() model in "custom_model_data.py".
   name: Customized("custom_specs_model", "SimpleFeedForward", hidden_size=32)
   path: models/custom_specs/custom_specs.pth
+  input_shape: [-1, 2]
 specification:
   # Use specification from a single vnnlib.
   vnnlib_path: exp_configs/tutorial_examples/custom_specs.vnnlib
@@ -18,10 +19,7 @@ specification:
 solver:
   bound_prop_method: forward+backward
   batch_size: 32768  # Number of parallel domains to compute on GPU.
-  beta-crown:
-    iteration: 10  # Iterations for computing intermediate layer bounds.
 bab:
-  initial_max_domains: 100000  # Run multiple properties in parallel.
   branching:
     input_split:
       # Split on input space, not on relus.

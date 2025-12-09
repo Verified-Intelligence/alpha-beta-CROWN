@@ -2,7 +2,7 @@
 general:
   root_path: ../../vnncomp2023_benchmarks/benchmarks/nn4sys
   csv_name: instances.csv
-  enable_incomplete_verification: false
+  adhoc_tuning: Customized("custom_adhoc_tuning", "customized_nn4sys_tuning")
 model:
   onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"  # Fix batch dimension in this onnx.
   cache_onnx_conversion: True
@@ -11,14 +11,15 @@ solver:
   auto_enlarge_batch_size: true
   bound_prop_method: forward+crown
 bab:
-  initial_max_domains: 1000
   branching:
     method: sb
     input_split:
       enable: True
-      # enable_clip_domains: True
-      # reorder_bab: True
       adv_check: .inf
       sb_coeff_thresh: 0.1
+      reorder_bab: True
+  clip_n_verify:
+   clip_input_domain:
+     enabled: True
 attack:
   pgd_order: input_bab

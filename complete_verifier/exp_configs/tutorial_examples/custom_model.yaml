@@ -1,4 +1,3 @@
-# This is an example configuration file that contains most useful parameter settings.
 model:
   # Model is defined as simple_conv_model() in custom_model_data.py. The function simple_conv_model() will be called with arguments in_channel=3, out_dim=10.
   name: Customized("custom_model_data", "simple_conv_model", in_channel=3, out_dim=10)

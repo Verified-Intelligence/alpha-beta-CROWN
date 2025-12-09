@@ -1,0 +1,26 @@
+general:
+  root_path: ../../vnncomp2025_benchmarks/benchmarks/lsnc_relu
+  csv_name: instances.csv
+  save_adv_example: true
+attack:
+  pgd_order: before
+  pgd_restarts: 10000
+  pgd_alpha: 0.01
+  pgd_alpha_scale: True
+solver:
+  batch_size: 1000000
+  min_batch_size_ratio: 0.
+  bound_prop_method: crown
+bab:
+  branching:
+    method: sb  # Can be "naive" or "sb". "sb" is usually better.
+    input_split:
+      enable: True
+      sb_coeff_thresh: 1.e-2
+      sb_sum: True
+      touch_zero_score: 0.1
+      adv_check: -1
+      reorder_bab: True
+  clip_n_verify:
+    clip_input_domain:
+      enabled: True

@@ -1,0 +1,7 @@
+general:
+  root_path: ../../vnncomp2025_benchmarks/benchmarks/malbeware
+  csv_name: instances.csv
+  complete_verifier: mip
+attack:
+  pgd_order: after
+  pgd_restarts: 1000

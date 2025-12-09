@@ -12,9 +12,7 @@ solver:
   alpha-crown:
     lr_alpha: 0.25
     iteration: 100
-  prune_after_crown: True
 bab:
-  initial_max_domains: 100
   branching:
     reduceop: max
     candidates: 10

@@ -12,15 +12,17 @@ attack:
 solver:
   batch_size: 1
   auto_enlarge_batch_size: True
+  batched_crown_auto_enlarge_max_vram_ratio: 0.65
   bound_prop_method: crown
   crown:
     batch_size: 512
 bab:
-  initial_max_domains: 100
   branching:
     method: sb  # Split on input space.
     input_split:
       enable: True
-      # enable_clip_domains: True
-      # reorder_bab: True
       sb_coeff_thresh: 0.01
+      reorder_bab: True
+  clip_n_verify:
+    clip_input_domain:
+      enabled: True

@@ -1,10 +1,10 @@
-# Configuration file for running the vggnet16_2022 benchmark (all properties).
+# Configuration file for running the vggnet16_2023 benchmark (all properties).
 general:
   root_path: ../../vnncomp2023_benchmarks/benchmarks/vggnet16
   csv_name: instances.csv
-  enable_incomplete_verification: False
   loss_reduction_func: max
   graph_optimizer: Customized("custom_graph_optimizer", "maxpool_to_relu")
+  adhoc_tuning: Customized("custom_adhoc_tuning", "customized_vggnet16_tuning")
 model:
   cache_onnx_conversion: True
 solver:
@@ -12,8 +12,6 @@ solver:
   bound_prop_method: dynamic-forward+backward
   forward:
     max_dim: 100
-  beta-crown:
-    iteration: 10  # Iterations for computing intermediate layer bounds.
   crown:
     batch_size: 64
 bab:
@@ -23,4 +21,3 @@ bab:
       enable: True
 attack:
   pgd_order: input_bab
-  check_clean: True

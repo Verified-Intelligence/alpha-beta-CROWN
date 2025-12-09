@@ -2,7 +2,6 @@
 general:
   root_path: ../../vnncomp2022_benchmarks/benchmarks/cifar_biasfield
   csv_name: instances.csv
-  enable_incomplete_verification: False
 model:
   onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
 data:
@@ -10,15 +9,11 @@ data:
 solver:
   batch_size: 4  # Number of parallel domains to compute on GPU.
   bound_prop_method: crown
-  beta-crown:
-    iteration: 10  # Iterations for computing intermediate layer bounds.
 bab:
-  initial_max_domains: 10
   branching:
     method: sb
     input_split:
       enable: True
-      enhanced_bound_prop_method: alpha-crown
       sb_coeff_thresh: 2.0
 attack:
   pgd_order: after

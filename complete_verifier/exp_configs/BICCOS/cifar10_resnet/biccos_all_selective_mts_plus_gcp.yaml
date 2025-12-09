@@ -8,7 +8,6 @@ specification:
   norm: .inf
 solver:
   batch_size: 2000
-  auto_enlarge_batch_size: true
   beta-crown:
     lr_beta: 0.01
 bab:
@@ -21,7 +20,7 @@ bab:
     cplex_cuts: true
     biccos:
       enabled: true
-      auto_param: false
+      auto_param: true
       multi_tree_branching:
         enabled: true
         restore_best_tree: true

@@ -1,0 +1,11 @@
+general:
+  root_path: ../../vnncomp2025_benchmarks/benchmarks/sat_relu
+  csv_name: instances.csv
+  complete_verifier: mip
+  double_fp: True
+attack:
+  pgd_restarts: 1000
+  pgd_alpha: 10
+solver:
+  mip:
+    solver_threads: 0

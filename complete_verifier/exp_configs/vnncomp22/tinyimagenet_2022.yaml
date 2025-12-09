@@ -21,7 +21,6 @@ solver:
     lr_alpha: 0.25
     iteration: 20
 bab:
-  initial_max_domains: 10000
   branching:
     method: kfsb
     candidates: 7

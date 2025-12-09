@@ -1,0 +1,14 @@
+general:
+  root_path: ../../vnncomp2025_benchmarks/benchmarks/soundnessbench
+  csv_name: instances.csv
+  complete_verifier: auto
+  onnx_adv_example: True
+  double_fp: true
+  reset_seed_after_precompile: True
+specification:
+  shrink_eps: 1e-10
+attack:
+  pgd_restarts: 250
+  pgd_steps: 1000
+  pgd_alpha: 0.005
+  pgd_lr_decay: 0.997

@@ -8,7 +8,6 @@ specification:
   epsilon: 0.00784313725
 solver:
   batch_size: 256
-  auto_enlarge_batch_size: true
   beta-crown:
     iteration: 20
 bab:

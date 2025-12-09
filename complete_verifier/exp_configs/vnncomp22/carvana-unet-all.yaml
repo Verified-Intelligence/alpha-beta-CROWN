@@ -2,7 +2,6 @@
 general:
   root_path: ../../vnncomp2022_benchmarks/benchmarks/carvana_unet_2022
   csv_name: instances.csv
-  enable_incomplete_verification: False
   conv_mode: patches
 model:
   onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
@@ -22,7 +21,6 @@ solver:
   beta-crown:
     iteration: 10  # Iterations for computing intermediate layer bounds.
 bab:
-  initial_max_domains: 1
   decision_thresh: 1314
   branching:
     reduceop: max

@@ -2,7 +2,6 @@
 general:
   root_path: ../../vnncomp2023_benchmarks/benchmarks/collins_rul_cnn # https://github.com/ChristopherBrix/vnncomp2023_benchmarks/tree/main/benchmarks/collins_rul_cnn
   csv_name: instances.csv
-  enable_incomplete_verification: False
   conv_mode: matrix
 solver:
   batch_size: 100  # Number of parallel domains to compute on GPU.
@@ -12,8 +11,6 @@ bab:
     method: sb
     input_split:
       enable: True
-      # enable_clip_domains: True
-      # reorder_bab: True
 attack:
   pgd_order: before
   pgd_restarts: 100

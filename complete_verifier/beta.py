@@ -2,17 +2,19 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
 ##                                                                     ##
 #########################################################################
 import arguments
+from auto_LiRPA.utils import transfer
+
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from beta_CROWN_solver import LiRPANet
@@ -78,12 +80,12 @@ def get_beta(self: 'LiRPANet', splits_per_example, device=None):
     # Setting non_blocking to False ensures that data is fully transferred from the GPU to the CPU before proceeding. 
     for k in splits_per_example[0]:
         if not enable_opt_interm_bounds:
-            betas_cpu[k] = self._transfer(
+            betas_cpu[k] = transfer(
                 self.net[k].sparse_betas[0].val, device, non_blocking=False)
         else:
             betas_cpu[k] = []
             for sparse_beta in self.net[k].sparse_betas.values():
-                betas_cpu[k].append(self._transfer(
+                betas_cpu[k].append(transfer(
                     sparse_beta.val, device, non_blocking=False))
     for i in range(len(splits_per_example)):
         betas = {}

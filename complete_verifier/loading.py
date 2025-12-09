@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -37,7 +37,6 @@ def default_onnx_and_vnnlib_loader(file_root, onnx_path, vnnlib_path):
     return model_ori, shape, vnnlib
 
 
-# TODO (2/17/23): Move it `loading.py` after the cleanup.
 def load_verification_dataset():
     spec = arguments.Config['specification']
 
@@ -101,10 +100,11 @@ def load_verification_dataset():
             arguments.Config["data"]["std"] = arguments.Config["data"]["std"][0]
         else:
              arguments.Config["data"]["std"] = float(arguments.Config["data"]["std"])
-        # FIXME need to ensure all the values are equal in the tensor
         if isinstance(ret['eps'], torch.Tensor):
-            ret['eps'] = ret['eps'][0, 0, 0, 0]  # only support eps as a scalar for non-Linf norm
-
+            eps = ret['eps'].flatten()[0].item()
+            assert (ret['eps'] == eps).all(), (
+                "For non-Linf norm, we support only 1-d eps (all channels with the same perturbation).")
+            ret['eps'] = eps
     return ret
 
 
@@ -121,31 +121,6 @@ def load_model_and_vnnlib(file_root, csv_item):
         arguments.Config["model"]["onnx_loader"]
     )(file_root, onnx_path, vnnlib_path)
     return model_ori, shape, vnnlib, onnx_path
-
-
-def adhoc_tuning(data_min, data_max, model_ori):
-    if 'vgg' in arguments.Config['general']['root_path']:
-        perturbed = (data_max - data_min > 0).sum()
-        print('Number of perturbed inputs:', int(perturbed))
-        if perturbed > 10000:
-            print('WARNING: prioritizing attack due to too many perturbed pixels on VGG')
-            print('Setting arguments.Config["attack"]["pgd_order"] to "before"')
-            arguments.Config['attack']['pgd_order'] = 'before'
-        if perturbed > 100:
-            print('Setting bound_prop_method to crown')
-            arguments.Config['solver']['bound_prop_method'] = 'crown'
-
-    if 'nn4sys' in arguments.Config['general']['root_path']:
-        if data_max.shape == torch.Size([1, 1]):
-            print(f'Enlarging initial_max_domains for model with input shape {data_max.shape}')
-            arguments.Config['bab']['initial_max_domains'] = 100000
-
-    if 'vit' in arguments.Config['general']['root_path']:
-        num_matmul = len([item for item in model_ori.modules()
-                      if 'MatMul' in str(type(item))])
-        if num_matmul >= 6:
-            print('Sharing alpha due to model size')
-            arguments.Config['solver']['alpha-crown']['share_alphas'] = True
 
 
 def parse_run_mode():

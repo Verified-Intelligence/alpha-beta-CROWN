@@ -7,8 +7,6 @@ specification:
   norm: .inf
 solver:
   batch_size: 256
-  auto_enlarge_batch_size: true
-  prune_after_crown: true
   alpha-crown:
     lr_alpha: 0.25
     iteration: 20

@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -55,7 +55,7 @@ def input_branching_decisions(wrapped_net, global_lbs, lAs, x_Ls, x_Us, rhs):
     """
     split_idx = input_split_branching(
         net=wrapped_net, dom_lb=global_lbs,
-        dm_l_all=x_Ls, dm_u_all=x_Us,
+        x_L=x_Ls, x_U=x_Us,
         lA=lAs, thresholds=rhs, branching_method='sb', split_depth=3)
     return split_idx
 
@@ -80,7 +80,7 @@ def input_split_on_relu_domains(domains, wrapped_net, batch_size):
     # and update all intermediate layer bounds.
     # First we need to run branching heuristic for input split.
     time_branching = time.time()
-    split_depth = get_split_depth(x_Ls)
+    split_depth = get_split_depth(len(x_Ls))
     new_x_Ls, new_x_Us, new_cs, new_rhs, split_depth = input_split_parallel(
         x_Ls, x_Us, wrapped_net.x.shape, cs, rhs, split_depth=split_depth,
         i_idx=split_idx)

@@ -1,0 +1,21 @@
+general:
+  root_path: ../../vnncomp2025_benchmarks/benchmarks/cora_2024
+  csv_name: instances.csv
+solver:
+  auto_enlarge_batch_size: True
+  optimize_disjuncts_separately: True
+  batch_size: 10240
+  alpha-crown:
+    lr_alpha: 0.3
+    iteration: 20
+  beta-crown:
+    lr_beta: 0.1
+    lr_alpha: 0.03
+    iteration: 5
+bab:
+  interm_transfer: False
+  branching:
+    reduceop: max
+  clip_n_verify:
+    clip_interm_domain:
+      clip_in_alpha_crown: True

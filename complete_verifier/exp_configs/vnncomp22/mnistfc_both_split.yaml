@@ -14,7 +14,9 @@ solver:
   beta-crown:
     iteration: 20
     lr_beta: 0.03
-    enable_opt_interm_bounds: True
+    # Note: This flag is changed from True to False since its implementation needs to be checked.
+    # The performance should not be affected much by this change.
+    enable_opt_interm_bounds: False
   mip:
     parallel_solvers: 32
     solver_threads: 1

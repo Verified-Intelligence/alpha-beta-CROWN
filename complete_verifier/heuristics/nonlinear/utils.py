@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -27,10 +27,12 @@ def precompute_A(net, A, x, interm_bounds):
             for inp in node[0].inputs:
                 if inp.name not in net.root_names and inp.perturbed:
                     need_A.add(inp)
+    # Get the batch size from the lirpa net directly.
+    batch_size = net.batch_size
     for node in need_A:
         if node.name not in A:
             print(f'Missing A for {node}. Making an additional CROWN call.')
-            batch_size = node.output_shape[0]
+
             dim_output = int(np.prod(node.output_shape[1:]))
             C = torch.eye(dim_output, device=net.device).unsqueeze(0).expand(batch_size, -1, -1)
             ret = net.compute_bounds(

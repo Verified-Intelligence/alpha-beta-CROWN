@@ -1,0 +1,33 @@
+general:
+  root_path: ../../vnncomp2025_benchmarks/benchmarks/relusplitter
+  csv_name: instances.csv
+  complete_verifier: auto
+model:
+  onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
+solver:
+  batch_size: 4
+  min_batch_size_ratio: 1
+  auto_enlarge_batch_size: True
+  beta-crown:
+    lr_beta: 0.01
+  start_save_best: -1
+bab:
+  branching:
+    reduceop: max
+    candidates: 10
+    input_split:
+      sb_coeff_thresh: 2.0
+      reorder_bab: True
+  clip_n_verify:
+    clip_input_domain:
+      enabled: True
+    clip_interm_domain:
+      enabled: True
+  cut:
+    enabled: True
+    cplex_cuts: True
+    bab_cut: True
+    lr_beta: 0.01
+attack:
+  pgd_order: middle
+  attack_mode: diversed_PGD

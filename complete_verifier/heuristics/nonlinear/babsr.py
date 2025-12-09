@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -20,7 +20,7 @@ import torch
 from collections import deque
 from auto_LiRPA.backward_bound import get_degrees, add_constant_node, add_bound
 from auto_LiRPA.bound_ops import *
-
+from utils import expand_batch
 
 class BaBSRNonlinearBranching:
     def __init__(self, net, num_branches):
@@ -110,7 +110,7 @@ class BaBSRNonlinearBranching:
     def get_partial_bounds_batch(self, lb, ub, lAs, start_nodes):
         self.interm_bound_required = set()
         batch_size = next(iter(lb.values())).shape[0]
-        x = self.net.expand_x(batch_size, lb=lb, ub=ub)
+        x = expand_batch(self.net.x, batch_size, x_L=lb, x_U=ub)
         interm_bounds = {k: (lb[k], ub[k]) for k in lb}
         self.model.set_input(x, interm_bounds=interm_bounds)
         for node in self.model.nodes():

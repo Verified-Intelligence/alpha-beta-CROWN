@@ -1,20 +1,25 @@
-The α,β-CROWN verifier is currently being developed by a multi-institutional team:
+Team leaders:
+* Faculty: Huan Zhang (huan@huan-zhang.com), UIUC
+* Student: Xiangru Zhong (xiangru4@illinois.edu), UIUC
 
-**Team lead**:
-* Huan Zhang (huan@huan-zhang.com), UIUC
-
-**Current developers**:
-* Zhouxing Shi (zhouxingshichn@gmail.com), UCLA (Student Lead)
-* Xiangru Zhong (xiangruzh0915@gmail.com), UIUC
+Current developers (* indicates members of VNN-COMP 2025 team):
+* \*Duo Zhou (duozhou2@illinois.edu), UIUC
+* \*Keyi Shen (keyis2@illinois.edu), UIUC (graduated, now at Georgia Tech)
+* \*Hesun Chen (hesunc2@illinois.edu), UIUC
+* \*Haoyu Li (haoyuli5@illinois.edu), UIUC
+* \*Ruize Gao (ruizeg2@illinois.edu), UIUC
+* \*Hao Cheng (haoc539@illinois.edu), UIUC
+* Zhouxing Shi (zhouxingshichn@gmail.com), UCLA/UC Riverside
+* Lei Huang (leih5@illinois.edu), UIUC
+* Taobo Liao (taobol2@illinois.edu), UIUC
 * Jorge Chavez (jorgejc2@illinois.edu), UIUC
-* Duo Zhou (duozhou2@illinois.edu), UIUC
-* Christopher Brix (brix@cs.rwth-aachen.de), RWTH Aachen University
-* Keyi Shen (keyis2@illinois.edu), UIUC
-* Hongji Xu (hx84@duke.edu), Duke University (intern with Prof. Huan Zhang)
-* Kaidi Xu (kx46@drexel.edu), Drexel University
-* Hao Chen (haoc8@illinois.edu), UIUC
 
 Past developers:
+* Hongji Xu (hx84@duke.edu), Duke University (intern with Prof. Huan Zhang)
+* Christopher Brix (brix@cs.rwth-aachen.de), RWTH Aachen University
+* Hao Chen (haoc8@illinois.edu), UIUC
+* Keyu Lu (keyulu2@illinois.edu), UIUC
+* Kaidi Xu (kx46@drexel.edu), Drexel University
 * Sanil Chawla (schawla7@illinois.edu), UIUC
 * Linyi Li (linyi2@illinois.edu), UIUC
 * Zhuolin Yang (zhuolin5@illinois.edu), UIUC
@@ -24,4 +29,6 @@ Past developers:
 * Yihan Wang (yihanwang@ucla.edu), UCLA
 * Jinqi (Kathryn) Chen (jinqic@cs.cmu.edu), CMU
 
-The team acknowledges the financial and advisory support from Prof. Zico Kolter (zkolter@cs.cmu.edu), Prof. Cho-Jui Hsieh (chohsieh@cs.ucla.edu), Prof. Suman Jana (suman@cs.columbia.edu), Prof. Bo Li (lbo@illinois.edu), and Prof. Xue Lin (xue.lin@northeastern.edu).
+α,β-CROWN is currently supported in part by the National Science Foundation (NSF; award 2331967, 2525287), the AI2050 program at Schmidt Science, the Virtual Institute for Scientific Software (VISS) at Georgia Tech, the University Research Program at Toyota Research Institute (TRI), and a Mathworks research award.
+
+The team acknowledges the financial and advisory support from Prof. Zico Kolter (zkolter@cs.cmu.edu), Prof. Cho-Jui Hsieh (chohsieh@cs.ucla.edu), Prof. Suman Jana (suman@cs.columbia.edu), Prof. Bo Li (lbo@illinois.edu), and Prof. Xue Lin (xue.lin@northeastern.edu) during 2021 - 2023.

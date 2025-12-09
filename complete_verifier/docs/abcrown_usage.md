@@ -77,7 +77,7 @@ the input space is often the best solution. Example configuration files include:
 * ACASXu (open-loop controller): [`acasxu` in VNN-COMP 2021](/complete_verifier/exp_configs/vnncomp21/acasxu_new.yaml)
 * Reinforcement learning: [`cartpole` in VNN-COMP 2022](/complete_verifier/exp_configs/vnncomp22/cartpole.yaml), [`dubins-rejoin`](/complete_verifier/exp_configs/vnncomp22/dubins-rejoin.yaml), [`lunarlander`](/complete_verifier/exp_configs/vnncomp22/lunarlander.yaml)
 * [NN in computer systems](http://download.huan-zhang.com/events/wfvml2022/papers/25_CameraReady_wfvml2022.pdf): [learned database index](/complete_verifier/exp_configs/vnncomp22/nn4sys_2022_lindex.yaml), [query cardinality prediction](/complete_verifier/exp_configs/vnncomp22/nn4sys_2022_128d.yaml)
-* Lyapunov-stable neural control (closed-loop controllers): [2D quadrotor with state feedback](https://github.com/Verified-Intelligence/Lyapunov_Stable_NN_Controllers/blob/main/verification/quadrotor2d_state_feedback_lyapunov_in_levelset.yaml) or [`lsnc` in VNN-COMP 2024](/complete_verifier/exp_configs/vnncomp24/lsnc.yaml)
+* Lyapunov-stable neural control (closed-loop controllers): [discret-time 2D quadrotor with state feedback](https://github.com/Verified-Intelligence/Lyapunov_Stable_NN_Controllers/blob/main/verification/quadrotor2d_state_feedback_lyapunov_in_levelset.yaml) or [continuous-time 2D quadrotor with state feedback (including automatic Jacobian bounds computation)](https://github.com/Verified-Intelligence/Two-Stage_Neural_Controller_Training/blob/main/src/verification/2dquadrotor/2dquadrotor.yaml)
 * Low dimensional [bias-field perturbation](https://www.bmvc2021-virtualconference.com/assets/papers/1291.pdf) on CIFAR-10: [CIFAR-10 biasfield](/complete_verifier/exp_configs/vnncomp22/cifar_biasfield.yaml)
 
 If your model is relatively small (a few layers of CNN/MLP) and ReLU branching is used, you can use
@@ -100,6 +100,8 @@ verified by any verifier nor attacked by existing attacks (e.g., PGD), you can
 consider using the
 [BaB-Attack](https://proceedings.mlr.press/v162/zhang22ae/zhang22ae.pdf) with
 instructions listed [here](https://github.com/tcwangshiqi-columbia/BaB-Attack).
+
+If your specification consists of output constraints, consider enabling the [Clip-and-Verify](https://openreview.net/pdf?id=HuSSR12Yot): [`lsnc_relu` benchmark in VNN-COMP 2025](/complete_verifier/exp_configs/vnncomp25/lsnc_relu.yaml).
 
 Note that most configuration files were tested on a GPU with 24 GB memory. If
 you encountered OOM errors, you can reduce batch size in the config files.
@@ -151,7 +153,6 @@ config file. In this example we verify the L2 norm robustness for a recently
 proposed L2 norm certified defense [(Huang et al.)](https://arxiv.org/abs/2111.01395).
 
 ```bash
-wget https://download.huan-zhang.com/models/alpha-beta-crown/cifar_l2_4c3f.pth
 python abcrown.py --config exp_configs/tutorial_examples/cifar_l2_norm.yaml
 ```
 
@@ -194,9 +195,9 @@ as per-element ranges and any general linear specifications on the output can
 be used (to handle non-linear specifications, you can add them as part of the
 network). The format of VNNLIB file is detailed in [this
 document](https://www.vnnlib.org/assets/doc/standard.pdf) and many examples can
-be found at [VNN-COMP 2021
-](https://github.com/stanleybak/vnncomp2021/tree/main/benchmarks) and
-[2022](https://github.com/ChristopherBrix/vnncomp2022_benchmarks/tree/main/benchmarks)
+be found at [VNN-COMP 2025
+](https://github.com/VNN-COMP/vnncomp2025_benchmarks) and
+[2024](https://github.com/VNN-COMP/vnncomp2024_benchmarks)
 repositories.
 Four arguments are necessary in this case: `model: path` is the path to the pytorch model,
 `model: name` is the name of the pytorch model definition which should be found in
@@ -221,7 +222,7 @@ time. The example shows how to verify resnet2b given multiple VNNLIB in a csv fi
 
 ```bash
 # To get the ONNX model and VNNLIB config file, first clone the vnncomp2021 repository, put it at the same folder as the alpha-beta-CROWN repo folder.
-# git clone https://github.com/stanleybak/vnncomp2021 ../../vnncomp2021
+# git clone https://github.com/VNN-COMP/vnncomp2021 ../../vnncomp2021
 python abcrown.py --config exp_configs/tutorial_examples/pytorch_model_with_batch_vnnlib.yaml
 ```
 
@@ -236,7 +237,7 @@ epsilon=2/255:
 
 ```bash
 # To get the ONNX model and VNNLIB config file, first clone the vnncomp2021 repository, put it at the same folder as the alpha-beta-CROWN repo folder.
-# git clone https://github.com/stanleybak/vnncomp2021 ../../vnncomp2021
+# git clone https://github.com/VNN-COMP/vnncomp2021 ../../vnncomp2021
 python abcrown.py --config exp_configs/tutorial_examples/onnx_with_built-in_dataset_linf_bound.yaml
 ```
 
@@ -249,20 +250,20 @@ and path of the pytorch `model`.  Here is an example:
 
 ```bash
 # To get the ONNX model and VNNLIB config file, first clone the vnncomp2021 repository, put it at the same folder as the alpha-beta-CROWN repo folder.
-# git clone https://github.com/stanleybak/vnncomp2021 ../../vnncomp2021
+# git clone https://github.com/VNN-COMP/vnncomp2021 ../../vnncomp2021
 python abcrown.py --config exp_configs/tutorial_examples/onnx_with_custom_cifar_data_element_bound.yaml
 ```
 
 ### ONNX model, *VNNLIB general specification* (data are defined in VNNLIB)
 
 The VNNLIB specification file is given by the `specification: vnnlib_path`
-entry in the config file. The VNNLIB file is from the [vnncomp2021](https://github.com/stanleybak/vnncomp2021)
+entry in the config file. The VNNLIB file is from the [vnncomp2021](https://github.com/VNN-COMP/vnncomp2021)
 benchmark repository and you should first clone that repository.
 The example shows that how to verify one ONNX model with one VNNLIB:
 
 ```bash
 # To get the ONNX model and VNNLIB config file, first clone the vnncomp2021 repository, put it at the same folder as the alpha-beta-CROWN repo folder.
-# git clone https://github.com/stanleybak/vnncomp2021 ../../vnncomp2021
+# git clone https://github.com/VNN-COMP/vnncomp2021 ../../vnncomp2021
 python abcrown.py --config exp_configs/tutorial_examples/onnx_with_one_vnnlib.yaml
 ```
 
@@ -275,31 +276,31 @@ verifier each time.  Here is an example:
 
 ```bash
 # To get the ONNX model and VNNLIB config file, first clone the vnncomp2021 repository, put it at the same folder as the alpha-beta-CROWN repo folder.
-# git clone https://github.com/stanleybak/vnncomp2021 ../../vnncomp2021
+# git clone https://github.com/VNN-COMP/vnncomp2021 ../../vnncomp2021
 python abcrown.py --config exp_configs/tutorial_examples/onnx_with_batch_vnnlib.yaml
 ```
 
 ### *Multiple ONNX models* and multiple VNNLIB specifications in a csv file (VNN-COMP format)
 
 This format is used for evaluating [VNN-COMP
-benchmarks](https://github.com/ChristopherBrix/vnncomp2022_benchmarks), where a
+benchmarks](https://github.com/VNN-COMP/vnncomp2022_benchmarks), where a
 csv file is specified for each benchmark. Each line of the csv file contains
 three elements: path to a ONNX file, path to a VNNLIB file and a timeout
 threshold. See [this
-file](https://github.com/ChristopherBrix/vnncomp2022_benchmarks/blob/main/benchmarks/cifar100_tinyimagenet_resnet/instances.csv)
+file](https://github.com/VNN-COMP/vnncomp2022_benchmarks/blob/main/benchmarks/cifar100_tinyimagenet_resnet/instances.csv)
 for an example. The following command will run all instances in a benchmark
 in batch mode:
 
 ```bash
 # To get the ONNX model and VNNLIB config file, first clone the vnncomp2022_benchmarks repository, put it at the same folder as the alpha-beta-CROWN repo folder.
-# git clone https://github.com/ChristopherBrix/vnncomp2022_benchmarks.git ../../vnncomp2022_benchmarks
+# git clone https://github.com/VNN-COMP/vnncomp2022_benchmarks.git ../../vnncomp2022_benchmarks
 # pushd ../../vnncomp2022_benchmarks; ./setup.sh; popd
 python abcrown.py --config exp_configs/vnncomp22/tinyimagenet_2022.yaml
 ```
 
 The `general: root_path` entry in config file should point to the corresponding
 benchmark in a cloned
-[vnncomp2022\_benchmarks](https://github.com/ChristopherBrix/vnncomp2022_benchmarks)
+[vnncomp2022\_benchmarks](https://github.com/VNN-COMP/vnncomp2022_benchmarks)
 repository, where all models and VNNLIB files are located.  After cloning the
 benchmark repository, please run `./setup.sh` to extract all files and download
 large models. For more details on running VNN-COMP 2021 or VNN-COMP 2022 benchmarks,

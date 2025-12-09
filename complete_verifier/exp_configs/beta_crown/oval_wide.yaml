@@ -1,5 +1,3 @@
-general:
-  enable_incomplete_verification: False
 model:
   name: cifar_model_wide
   path: models/oval/cifar_wide.pth

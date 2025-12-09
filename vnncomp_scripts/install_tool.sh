@@ -37,8 +37,12 @@ echo 'export PATH=${PATH}:'${HOME}'/miniconda/bin' >> ~/.profile
 echo "alias py37=\"source activate alpha-beta-crown\"" >> ${HOME}/.profile
 export PATH=${PATH}:$HOME/miniconda/bin
 
+# Accept anaconda channel terms (required since July 15, 2025)
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
 # Install NVIDIA driver
-DRIVER_VERSION=550.78
+DRIVER_VERSION=570.169
 aria2c -x 10 -s 10 -k 1M https://us.download.nvidia.com/XFree86/Linux-x86_64/$DRIVER_VERSION/NVIDIA-Linux-x86_64-$DRIVER_VERSION.run
 sudo nvidia-smi -pm 0
 chmod +x ./NVIDIA-Linux-x86_64-$DRIVER_VERSION.run
@@ -51,8 +55,7 @@ sudo nvidia-smi -pm 1
 nvidia-smi
 
 # Install conda environment
-${HOME}/miniconda/bin/conda env create --name alpha-beta-crown -f ${TOOL_DIR}/complete_verifier/environment_pyt231.yaml
-${HOME}/miniconda/bin/conda env create --name alpha-beta-crown-2022 -f ${TOOL_DIR}/complete_verifier/environment_2022.yaml
+${HOME}/miniconda/bin/conda env create --name alpha-beta-crown -f ${TOOL_DIR}/complete_verifier/environment_pyt260.yaml
 
 # Install CPLEX
 aria2c -x 10 -s 10 -k 1M "http://d.huan-zhang.com/storage/programs/cplex_studio2211.linux_x86_64.bin"
@@ -67,7 +70,7 @@ sudo ./cplex_studio2211.linux_x86_64.bin -f response.txt
 make -C ${TOOL_DIR}/complete_verifier/cuts/CPLEX_cuts/
 
 echo "Checking python requirements (it might take a while...)"
-if [ "$(${VNNCOMP_PYTHON_PATH}/python -c 'import torch; print(torch.__version__)')" != '2.3.1' ]; then
+if [ "$(${VNNCOMP_PYTHON_PATH}/python -c 'import torch; print(torch.__version__)')" != '2.6.0+cu124' ]; then
     echo "Unsupported PyTorch version"
     echo "Installation Failure!"
     exit 1

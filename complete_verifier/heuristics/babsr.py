@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -20,136 +20,150 @@ from heuristics.base import NeuronBranchingHeuristic
 from heuristics.utils import compute_ratio, get_preact_params
 from utils import get_reduce_op, get_batch_size_from_masks
 
+def babsr_score_intercept_only(lbs, ubs, lAs, batch, final_name, split_activations):
+    """Compute branching scores for kfsb based on intercept only."""
+    score = []
+    for k in lbs:
+        if k == final_name:
+            continue
+        assert len(split_activations[k]) == 1
+        A_key = split_activations[k][0][0].name
+        ratio = ((-lbs[k]).clamp(0, None) * ubs[k].clamp(0, None)) / (ubs[k] - lbs[k])
+        ratio *= (-lAs[A_key].mean(dim=1)).clamp(0, None)
+        score.append(ratio.reshape(batch, -1))
+    return score
+
+def babsr_score(lower_bounds, upper_bounds, lAs,
+                mask, reduce_op, number_bounds,
+                split_nodes, split_activations,
+                prioritize_alphas='none'):
+    """Compute branching scores for kfsb.
+    lower_bounds: [lower_bounds1, lower_bounds2, ...], lower bounds for different pre-activation layers.
+    upper_bounds: [upper_bounds1, upper_bounds2, ...], upper bounds for different pre-activation layers.
+    lAs: list, A matrix used in CROWN for all pre-activation layers.
+    batch: int, batch size for current branching.
+    mask: list, mask indicates whether the neuron in this layer is unstable or not, 1: unstable, 0: stable.
+    reduce_op: min() or max(), consider min or max info for two branches, similar to BFS (min) or DFS (max).
+    number_bounds: int, the number of bounds that will output for one property.
+    prioritize_alphas: 'none', 'positive', 'negative',  Prioritize splits with only positive/negative lA or none.
+
+    return
+    score: list, same structure as lower_bounds indicates the score for all neurons.
+    intercept_tb: list, same as score's structure, only contain the  intercept scores.
+    """
+    batch = get_batch_size_from_masks(mask)
+    score = []
+    intercept_tb = []
+    relu_idx = -1
+    small_score_threshold = 1e-4
+    big_constant = 1e6
+
+    def normalize_scores(scores, normal_score_idx, reduced_score_idx, larger_is_better=True):
+        #  We want to reduce all scores in the reduced_score_idx set, so they are no better than the scores in the normal_score_idx set.
+        if larger_is_better:
+            thresh = small_score_threshold
+            # idx is a mask, setting irrelevant scores to 0. Valid scores are positive.
+            best_score_in_reduced_set = torch.max(
+                scores * reduced_score_idx, dim=1).values
+            worst_score_in_normal_set = torch.clamp_min(( # Setting irrelevant scores to inf.
+                torch.min(
+                    scores * normal_score_idx
+                    + (1.0 - normal_score_idx) * big_constant,
+                    dim=1).values), thresh)
+        else:
+            thresh = -small_score_threshold
+            # idx is a mask, setting irrelevant scores to 0. Valid scores are negative.
+            best_score_in_reduced_set = torch.min(
+                scores * reduced_score_idx, dim=1).values
+            worst_score_in_normal_set = torch.clamp_max(torch.max(
+                scores * normal_score_idx
+                - (1.0 - normal_score_idx) * big_constant,
+                dim=1).values, thresh)
+        # Sizes are (batch,).
+        ratio = torch.clamp_max(
+            worst_score_in_normal_set / (best_score_in_reduced_set + thresh),
+            1.0)
+        # Make the scores in the reduced_score_idx set smaller.
+        adjusted_scores = (scores * normal_score_idx
+                            + scores * reduced_score_idx * ratio.unsqueeze(1))
+        return adjusted_scores
+
+    # Compute BaBSR scores, starting from the last layer.
+    for layer_i, layer in enumerate(reversed(split_nodes)):
+        assert len(split_activations[layer.name]) == 1
+        layer = split_activations[layer.name][0][0]
+        key = layer.inputs[0].name
+        lA_key = layer.name
+        this_layer_mask = mask[key].unsqueeze(1)
+        if prioritize_alphas == 'positive':
+            # Prioritize splits with only positive lA.
+            normal_score_mask = (lAs[lA_key] >= 0).view(batch, number_bounds, -1) * this_layer_mask
+            reduced_score_mask = (lAs[lA_key] < 0).view(batch, number_bounds, -1) * this_layer_mask
+        elif prioritize_alphas == 'negative':
+            # Prioritize splits with only positive lA.
+            normal_score_mask = (lAs[lA_key] <= 0).view(batch, number_bounds, -1) * this_layer_mask
+            reduced_score_mask = (lAs[lA_key] > 0).view(batch, number_bounds, -1) * this_layer_mask
+        elif prioritize_alphas != 'none':
+            raise ValueError(f'Unknown prioritize_alphas parameter {prioritize_alphas}')
+
+        ratio = lAs[lA_key]
+        ratio_temp_0, ratio_temp_1 = compute_ratio(
+            lower_bounds[key], upper_bounds[key])
+
+        # Intercept score, used as a backup score in BaBSR. A lower (more negative) score is better.
+        intercept_temp = torch.clamp(ratio, max=0)
+        intercept_candidate = intercept_temp * ratio_temp_1.unsqueeze(1)
+        reshaped_intercept_candidate = intercept_candidate.view(
+            batch, number_bounds, -1) * this_layer_mask
+        # In case for AND clauses, there are multiple bounds outputs
+        # we need to calculate mean over number_bounds dim to get a average score
+        reshaped_intercept_candidate = reshaped_intercept_candidate.mean(1)
+        if prioritize_alphas != 'none':
+            adjusted_intercept_candidate = normalize_scores(
+                reshaped_intercept_candidate, normal_score_mask,
+                reduced_score_mask, larger_is_better=False)
+        else:
+            adjusted_intercept_candidate = reshaped_intercept_candidate
+        # intercept_tb is a list of intercept scores, each with a array of (batch, neuron).
+        intercept_tb.insert(0, adjusted_intercept_candidate)
+
+        b_temp = get_preact_params(layer)
+        # In some cases, bias=0, we can't treat it like tensors
+        if not isinstance(b_temp, int):
+            b_temp = b_temp.view(-1, *([1] * (ratio.ndim - 3)))
+        b_temp = b_temp * ratio
+        # Estimated bounds of the two sides of the bounds.
+        ratio_temp_0 = ratio_temp_0.unsqueeze(1)
+        bias_candidate_1 = b_temp * (ratio_temp_0 - 1)
+        bias_candidate_2 = b_temp * ratio_temp_0
+        bias_candidate = reduce_op(bias_candidate_1, bias_candidate_2)  # max for babsr by default
+        score_candidate = bias_candidate + intercept_candidate
+        score_candidate = score_candidate.abs().view(batch, number_bounds, -1) * this_layer_mask
+        # In case for AND clauses, there are multiple bounds outputs
+        # we need to calculate mean over number_bounds dim to get a average score
+        score_candidate = score_candidate.mean(1)
+        if prioritize_alphas != 'none':
+            adjusted_score_candidate = normalize_scores(
+                score_candidate, normal_score_mask, reduced_score_mask,
+                larger_is_better=True)
+            remaining_branches = normal_score_mask.sum(dim=1, dtype=torch.int32)
+            print(f'layer {len(split_nodes) - layer_i} '
+                    'remaining preferred branching variables: '
+                    f'{remaining_branches[:10].tolist()}, '
+                    f'avg {remaining_branches.sum().item() / remaining_branches.numel()}')
+        else:
+            adjusted_score_candidate = score_candidate
+        # alpha score, the main score in BaBSR. A higher (more positive) score is batter.
+        score.insert(0, adjusted_score_candidate)
+
+        relu_idx -= 1
+
+    return score, intercept_tb
 
 class BabsrBranching(NeuronBranchingHeuristic):
     def __init__(self, net):
         super().__init__(net)
         self.icp_score_counter = 0
-
-    def babsr_score(self, lower_bounds, upper_bounds, lAs,
-                    mask, reduce_op, number_bounds, prioritize_alphas='none'):
-        """Compute branching scores for kfsb.
-        lower_bounds: [lower_bounds1, lower_bounds2, ...], lower bounds for different pre-activation layers.
-        upper_bounds: [upper_bounds1, upper_bounds2, ...], upper bounds for different pre-activation layers.
-        lAs: list, A matrix used in CROWN for all pre-activation layers.
-        batch: int, batch size for current branching.
-        mask: list, mask indicates whether the neuron in this layer is unstable or not, 1: unstable, 0: stable.
-        reduce_op: min() or max(), consider min or max info for two branches, similar to BFS (min) or DFS (max).
-        number_bounds: int, the number of bounds that will output for one property.
-        prioritize_alphas: 'none', 'positive', 'negative',  Prioritize splits with only positive/negative lA or none.
-
-        return
-        score: list, same structure as lower_bounds indicates the score for all neurons.
-        intercept_tb: list, same as score's structure, only contain the  intercept scores.
-        """
-        batch = get_batch_size_from_masks(mask)
-        score = []
-        intercept_tb = []
-        relu_idx = -1
-        small_score_threshold = 1e-4
-        big_constant = 1e6
-
-        def normalize_scores(scores, normal_score_idx, reduced_score_idx, larger_is_better=True):
-            #  We want to reduce all scores in the reduced_score_idx set, so they are no better than the scores in the normal_score_idx set.
-            if larger_is_better:
-                thresh = small_score_threshold
-                # idx is a mask, setting irrelevant scores to 0. Valid scores are positive.
-                best_score_in_reduced_set = torch.max(
-                    scores * reduced_score_idx, dim=1).values
-                worst_score_in_normal_set = torch.clamp_min(( # Setting irrelevant scores to inf.
-                    torch.min(
-                        scores * normal_score_idx
-                        + (1.0 - normal_score_idx) * big_constant,
-                        dim=1).values), thresh)
-            else:
-                thresh = -small_score_threshold
-                # idx is a mask, setting irrelevant scores to 0. Valid scores are negative.
-                best_score_in_reduced_set = torch.min(
-                    scores * reduced_score_idx, dim=1).values
-                worst_score_in_normal_set = torch.clamp_max(torch.max(
-                    scores * normal_score_idx
-                    - (1.0 - normal_score_idx) * big_constant,
-                    dim=1).values, thresh)
-            # Sizes are (batch,).
-            ratio = torch.clamp_max(
-                worst_score_in_normal_set / (best_score_in_reduced_set + thresh),
-                1.0)
-            # Make the scores in the reduced_score_idx set smaller.
-            adjusted_scores = (scores * normal_score_idx
-                               + scores * reduced_score_idx * ratio.unsqueeze(1))
-            return adjusted_scores
-
-        # Compute BaBSR scores, starting from the last layer.
-        for layer_i, layer in enumerate(reversed(self.net.split_nodes)):
-            assert len(self.net.split_activations[layer.name]) == 1
-            layer = self.net.split_activations[layer.name][0][0]
-            key = layer.inputs[0].name
-            lA_key = layer.name
-            this_layer_mask = mask[key].unsqueeze(1)
-            if prioritize_alphas == 'positive':
-                # Prioritize splits with only positive lA.
-                normal_score_mask = (lAs[lA_key] >= 0).view(batch, number_bounds, -1) * this_layer_mask
-                reduced_score_mask = (lAs[lA_key] < 0).view(batch, number_bounds, -1) * this_layer_mask
-            elif prioritize_alphas == 'negative':
-                # Prioritize splits with only positive lA.
-                normal_score_mask = (lAs[lA_key] <= 0).view(batch, number_bounds, -1) * this_layer_mask
-                reduced_score_mask = (lAs[lA_key] > 0).view(batch, number_bounds, -1) * this_layer_mask
-            elif prioritize_alphas != 'none':
-                raise ValueError(f'Unknown prioritize_alphas parameter {prioritize_alphas}')
-
-            ratio = lAs[lA_key]
-            ratio_temp_0, ratio_temp_1 = compute_ratio(
-                lower_bounds[key], upper_bounds[key])
-
-            # Intercept score, used as a backup score in BaBSR. A lower (more negative) score is better.
-            intercept_temp = torch.clamp(ratio, max=0)
-            intercept_candidate = intercept_temp * ratio_temp_1.unsqueeze(1)
-            reshaped_intercept_candidate = intercept_candidate.view(
-                batch, number_bounds, -1) * this_layer_mask
-            # In case for AND clauses, there are multiple bounds outputs
-            # we need to calculate mean over number_bounds dim to get a average score
-            reshaped_intercept_candidate = reshaped_intercept_candidate.mean(1)
-            if prioritize_alphas != 'none':
-                adjusted_intercept_candidate = normalize_scores(
-                    reshaped_intercept_candidate, normal_score_mask,
-                    reduced_score_mask, larger_is_better=False)
-            else:
-                adjusted_intercept_candidate = reshaped_intercept_candidate
-            # intercept_tb is a list of intercept scores, each with a array of (batch, neuron).
-            intercept_tb.insert(0, adjusted_intercept_candidate)
-
-            b_temp = get_preact_params(layer)
-            # In some cases, bias=0, we can't treat it like tensors
-            if not isinstance(b_temp, int):
-                b_temp = b_temp.view(-1, *([1] * (ratio.ndim - 3)))
-            b_temp = b_temp * ratio
-            # Estimated bounds of the two sides of the bounds.
-            ratio_temp_0 = ratio_temp_0.unsqueeze(1)
-            bias_candidate_1 = b_temp * (ratio_temp_0 - 1)
-            bias_candidate_2 = b_temp * ratio_temp_0
-            bias_candidate = reduce_op(bias_candidate_1, bias_candidate_2)  # max for babsr by default
-            score_candidate = bias_candidate + intercept_candidate
-            score_candidate = score_candidate.abs().view(batch, number_bounds, -1) * this_layer_mask
-            # In case for AND clauses, there are multiple bounds outputs
-            # we need to calculate mean over number_bounds dim to get a average score
-            score_candidate = score_candidate.mean(1)
-            if prioritize_alphas != 'none':
-                adjusted_score_candidate = normalize_scores(
-                    score_candidate, normal_score_mask, reduced_score_mask,
-                    larger_is_better=True)
-                remaining_branches = normal_score_mask.sum(dim=1, dtype=torch.int32)
-                print(f'layer {len(self.net.split_nodes) - layer_i} '
-                      'remaining preferred branching variables: '
-                      f'{remaining_branches[:10].tolist()}, '
-                      f'avg {remaining_branches.sum().item() / remaining_branches.numel()}')
-            else:
-                adjusted_score_candidate = score_candidate
-            # alpha score, the main score in BaBSR. A higher (more positive) score is batter.
-            score.insert(0, adjusted_score_candidate)
-
-            relu_idx -= 1
-
-        return score, intercept_tb
 
     @torch.no_grad()
     def get_branching_decisions(self, domains, split_depth,
@@ -176,9 +190,10 @@ class BabsrBranching(NeuronBranchingHeuristic):
         reduce_op = get_reduce_op(branching_reduceop, with_dim=False)
 
         number_bounds = 1 if cs is None else cs.shape[1]
-        score, intercept_tb = self.babsr_score(
+        score, intercept_tb = babsr_score(
             lower_bounds, upper_bounds, lAs, mask, reduce_op,
-            number_bounds, prioritize_alphas)
+            number_bounds, self.net.split_nodes, self.net.split_activations,
+            prioritize_alphas)
 
         decision = [[] for _ in range(batch)]
 

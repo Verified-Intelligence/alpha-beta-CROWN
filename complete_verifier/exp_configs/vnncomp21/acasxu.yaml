@@ -1,0 +1,20 @@
+# Configuration file for running the ACASXu benchmark (all properties).
+general:
+  root_path: ../../vnncomp2021/benchmarks/acasxu  # Please clone the vnncomp2021 repo first as it contains the benchmark.
+  csv_name: acasxu_instances.csv
+solver:
+  batch_size: 16384  # Number of parallel domains to compute on GPU.
+  bound_prop_method: crown
+bab:
+  branching:
+    method: naive  # Split on input space.
+    input_split:
+      enable: True
+      reorder_bab: True
+  clip_n_verify:
+    clip_input_domain:
+      enabled: True
+attack:
+  pgd_order: after
+  pgd_restarts: 10000
+  pgd_restart_when_stuck: True

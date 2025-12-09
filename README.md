@@ -19,26 +19,26 @@ such as [Lyapunov stability](https://arxiv.org/pdf/2404.07956) in control.
 α,β-CROWN is the **winning verifier** in [VNN-COMP
 2021](https://sites.google.com/view/vnn2021), [VNN-COMP
 2022](https://sites.google.com/view/vnn2022), [VNN-COMP
-2023](https://sites.google.com/view/vnn2023) and
-[VNN-COMP 2024](https://sites.google.com/view/vnn2024) (International Verification of
+2023](https://sites.google.com/view/vnn2023), [VNN-COMP 2024](https://sites.google.com/view/vnn2024), and [VNN-COMP 2025](https://sites.google.com/view/vnn2025) (International Verification of
 Neural Networks Competition) with the highest total score, outperforming many
-other neural network verifiers on a wide range of benchmarks over 4 years.
+other neural network verifiers on a wide range of benchmarks over 5 years.
 Details of competition results can be found in [VNN-COMP 2021
 slides](https://docs.google.com/presentation/d/1oM3NqqU03EUqgQVc3bGK2ENgHa57u-W6Q63Vflkv000/edit#slide=id.ge4496ad360_14_21),
 [report](https://arxiv.org/abs/2109.00498),
 [VNN-COMP 2022 report](https://arxiv.org/pdf/2212.10376.pdf),
 [VNN-COMP 2023 slides](https://github.com/ChristopherBrix/vnncomp2023_results/blob/main/SCORING/slides.pdf) and [report](https://arxiv.org/abs/2312.16760),
-and [VNN-COMP 2024 slides](https://docs.google.com/presentation/d/1RvZWeAdTfRC3bNtCqt84O6IIPoJBnF4jnsEvhTTxsPE/edit) and [report](https://www.arxiv.org/pdf/2412.19985).
+and [VNN-COMP 2024 slides](https://docs.google.com/presentation/d/1RvZWeAdTfRC3bNtCqt84O6IIPoJBnF4jnsEvhTTxsPE/edit) and [report](https://www.arxiv.org/pdf/2412.19985), [VNN-COMP 2025 slides](https://docs.google.com/presentation/d/1ep-hGGotgWQF6SA0JIpQ6nFqs2lXoyuLMM-bORzNvrQ/edit?slide=id.p#slide=id.p).
 
 The α,β-CROWN team is created and led by Prof. [Huan Zhang](https://huan-zhang.com/) at UIUC with contributions from multiple institutions. See the **list of contributors** [below](#developers-and-copyright).
 α,β-CROWN combines our efforts in neural network verification in a series of
 papers building up the bound propagation framework since 2018. See [Publications](#publications) below.
 
-News (2024 - )
+News (2025 - )
 ----------------------
-
-- α,β-CROWN is the winner of [VNN-COMP 2024](https://sites.google.com/view/vnn2024) and is **ranked top-1** in all benchmarks (including 12 [regular track](https://github.com/ChristopherBrix/vnncomp2024_results/blob/main/SCORING/latex/results_regular_track.pdf) and 9 [extended track](https://github.com/ChristopherBrix/vnncomp2024_results/blob/main/SCORING/latex/results_extended_track.pdf) benchmarks). (08/2024)
-- BICCOS ([Zhou et al., NeurIPS 2024](https://openreview.net/pdf?id=FwhM1Zpyft)) is a new cutting plane generation method scalable to large networks and outperforms the MIP-based cuts in GCP-CROWN. (11/2024)
+- α,β-CROWN now provides a **new Python API** that allows users to run the verifier programmatically in Python **without** manually exporting ONNX models, writing VNNLIB specifications, or preparing config files. A good set of **default configuration automatically handles diverse verification scenarios**, while all options remain fully customizable through the API. (**See [API documentation](complete_verifier/docs/abcrown_api.md)**).
+- α,β-CROWN is the winner of [VNN-COMP 2025](https://sites.google.com/view/vnn2025) and is **ranked top-1** in all [scored benchmarks](https://github.com/VNN-COMP/vnncomp2025_results/blob/main/SCORING-SMALL-TOL/latex/main.pdf). (08/2025)
+- Bounding of computation graphs containing Jacobian operators now supports more nonlinear operators (e.g., ```tanh```, ```sigmoid```), enabling verification of [continuous-time Lyapunov stability](https://github.com/Verified-Intelligence/Two-Stage_Neural_Controller_Training). (12/2025)
+- Clip-and-Verify ([Zhou et al., NeurIPS 2025](https://openreview.net/pdf?id=HuSSR12Yot)) efficiently handles linear constraints and can significantly reduce the number of subproblems handled during BaB. It consistently tightens bounds across multiple benchmarks. (12/2025)
 
 Supported Features
 ----------------------
@@ -80,7 +80,7 @@ start with:
 * ACASXu, NN4sys, ML4ACOPF and other low input dimension models
 
 And more examples in other repositories:
-* Stability verification of NN controllers: [Verified-Intelligence/Lyapunov_Stable_NN_Controllers](https://github.com/Verified-Intelligence/Lyapunov_Stable_NN_Controllers)
+* Stability verification of NN controllers for discrete-time systems: [Verified-Intelligence/Lyapunov_Stable_NN_Controllers](https://github.com/Verified-Intelligence/Lyapunov_Stable_NN_Controllers) and continuous-time systems: [Verified-Intelligence/Two-Stage_Neural_Controller_Training](https://github.com/Verified-Intelligence/Two-Stage_Neural_Controller_Training).
 * Branch-and-bound for models with non-ReLU nonlinearities and high dimensional inputs: [GenBaB](https://huggingface.co/datasets/zhouxingshi/GenBaB)
 
 See the [Guide on Algorithm
@@ -90,7 +90,7 @@ to find the most suitable example to get started.
 Installation and Setup
 ----------------------
 
-α,β-CROWN is tested on Python 3.11 and PyTorch 2.3.1 (recent versions may also work).
+α,β-CROWN is tested on Python 3.11 and PyTorch 2.8.0 (recent versions may also work).
 It can be installed
 easily into a conda environment. If you don't have conda, you can install
 [miniconda](https://docs.conda.io/en/latest/miniconda.html).
@@ -101,7 +101,7 @@ git clone --recursive https://github.com/Verified-Intelligence/alpha-beta-CROWN.
 ```
 
 Setup the conda environment from [`environment.yaml`](complete_verifier/environment.yaml)
-with pinned dependencies versions (CUDA>=12.1 is required):
+with pinned dependencies versions (CUDA>=12.8 is required):
 ```bash
 # Remove the old environment, if necessary.
 conda deactivate; conda env remove --name alpha-beta-crown
@@ -129,8 +129,7 @@ access to a license, by default, the above installation procedure includes a
 free and restricted license, which is actually sufficient for many relatively
 small NNs. If you use the GCP-CROWN verifier, an installation of IBM CPlex
 solver is required. Instructions to install the CPlex solver can be found
-in the [VNN-COMP benchmark instructions](/complete_verifier/docs/vnn_comp.md#installation)
-or the [GCP-CROWN instructions](https://github.com/tcwangshiqi-columbia/GCP-CROWN).
+in the [VNN-COMP benchmark instructions](/complete_verifier/docs/vnn_comp.md#installation).
 
 If you want to run α,β-CROWN verifier on the VNN-COMP benchmarks
 (e.g., to make a comparison to a new verifier), you can follow [this
@@ -139,7 +138,12 @@ guide](/complete_verifier/docs/vnn_comp.md).
 Instructions
 ----------------------
 
-We provide a unified front-end for the verifier, `abcrown.py`.  All parameters
+The verifier can be invoked through the 
+**[new Python API](complete_verifier/docs/abcrown_api.md)** or through 
+the command-line interface with configuration files. Checkout the 
+[API documentation](complete_verifier/docs/abcrown_api.md) for API usage.
+For the command-line interface, we provide a 
+unified front-end for the verifier, `abcrown.py`.  All parameters
 for the verifier are defined in a `yaml` config file. For example, to run
 robustness verification on a CIFAR-10 ResNet network, you just run:
 
@@ -198,6 +202,8 @@ We provide bibtex entries at the end of this section.
 * **BICCOS** ([Zhou et al., NeurIPS 2024](https://openreview.net/pdf?id=FwhM1Zpyft)) generates effective cutting planes during branch-and-bound to tighten verification bounds. The cutting plane generation process is efficient and scalable and does not require a MIP solver.
 
 * **GenBaB** ([Shi et al., TACAS 2025](https://arxiv.org/pdf/2405.21063.pdf)) enables branch-and-bound based verification for general nonlinear functions, achieving significant improvements on verifying neural networks with non-ReLU nonlinearties (such as Transformers), and enabling new applications that contain complicated nonlinear functions on the output of neural networks, such as [ML for AC Optimal Power Flow](https://github.com/AI4OPT/ml4acopf_benchmark).
+
+* **Clip-and-Verify** ([Zhou et al., NeurIPS 2025](https://openreview.net/pdf?id=HuSSR12Yot)) efficiently handles linear constraints and can significantly reduce the number of subproblems handled during BaB. It consistently tightens bounds across multiple benchmarks, significantly accelerating challenging verification tasks from research on [provably stable neural network control systems](https://github.com/Verified-Intelligence/Two-Stage_Neural_Controller_Training).
 
 ```
 @article{zhang2018efficient,
@@ -284,29 +290,40 @@ We provide bibtex entries at the end of this section.
   booktitle={International Conference on Tools and Algorithms for the Construction and Analysis of Systems},
   year={2025}
 }
+
+@inproceedings{zhou2025clip,
+  title={Clip-and-Verify: Linear Constraint-Driven Domain Clipping for Accelerating Neural Network Verification},
+  author={Zhou, Duo and Chavez, Jorge and Chen, Hesun and Hanasusanto, Grani A and Zhang, Huan},
+  booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
+  year={2025}
+}
 ```
 
 Developers and Copyright
 ----------------------
 
-The α,β-CROWN verifier is currently being developed by a multi-institutional team:
+Team leaders:
+* Faculty: Huan Zhang (huan@huan-zhang.com), UIUC
+* Student: Xiangru Zhong (xiangru4@illinois.edu), UIUC
 
-**Team lead**:
-* Huan Zhang (huan@huan-zhang.com), UIUC
-
-**Current developers**:
-* Zhouxing Shi (zhouxingshichn@gmail.com), UCLA (Student Lead)
-* Xiangru Zhong (xiangruzh0915@gmail.com), UIUC
+Current developers (* indicates members of VNN-COMP 2025 team):
+* \*Duo Zhou (duozhou2@illinois.edu), UIUC
+* \*Keyi Shen (keyis2@illinois.edu), UIUC (graduated, now at Georgia Tech)
+* \*Hesun Chen (hesunc2@illinois.edu), UIUC
+* \*Haoyu Li (haoyuli5@illinois.edu), UIUC
+* \*Ruize Gao (ruizeg2@illinois.edu), UIUC
+* \*Hao Cheng (haoc539@illinois.edu), UIUC
+* Zhouxing Shi (zhouxingshichn@gmail.com), UCLA/UC Riverside
+* Lei Huang (leih5@illinois.edu), UIUC
+* Taobo Liao (taobol2@illinois.edu), UIUC
 * Jorge Chavez (jorgejc2@illinois.edu), UIUC
-* Duo Zhou (duozhou2@illinois.edu), UIUC
-* Christopher Brix (brix@cs.rwth-aachen.de), RWTH Aachen University
-* Keyi Shen (keyis2@illinois.edu), UIUC
-* Hongji Xu (hx84@duke.edu), Duke University (intern with Prof. Huan Zhang)
-* Kaidi Xu (kx46@drexel.edu), Drexel University
-* Hao Chen (haoc8@illinois.edu), UIUC
-* Keyu Lu (keyulu2@illinois.edu), UIUC
 
 Past developers:
+* Hongji Xu (hx84@duke.edu), Duke University (intern with Prof. Huan Zhang)
+* Christopher Brix (brix@cs.rwth-aachen.de), RWTH Aachen University
+* Hao Chen (haoc8@illinois.edu), UIUC
+* Keyu Lu (keyulu2@illinois.edu), UIUC
+* Kaidi Xu (kx46@drexel.edu), Drexel University
 * Sanil Chawla (schawla7@illinois.edu), UIUC
 * Linyi Li (linyi2@illinois.edu), UIUC
 * Zhuolin Yang (zhuolin5@illinois.edu), UIUC
@@ -316,6 +333,9 @@ Past developers:
 * Yihan Wang (yihanwang@ucla.edu), UCLA
 * Jinqi (Kathryn) Chen (jinqic@cs.cmu.edu), CMU
 
-The team acknowledges the financial and advisory support from Prof. Zico Kolter (zkolter@cs.cmu.edu), Prof. Cho-Jui Hsieh (chohsieh@cs.ucla.edu), Prof. Suman Jana (suman@cs.columbia.edu), Prof. Bo Li (lbo@illinois.edu), and Prof. Xue Lin (xue.lin@northeastern.edu).
+α,β-CROWN is currently supported in part by the National Science Foundation (NSF; award 2331967, 2525287), the AI2050 program at Schmidt Science, the Virtual Institute for Scientific Software (VISS) at Georgia Tech, the University Research Program at Toyota Research Institute (TRI), and a Mathworks research award.
+
+The team acknowledges the financial and advisory support (2021 - 2023) from Prof. Zico Kolter (zkolter@cs.cmu.edu), Prof. Cho-Jui Hsieh (chohsieh@cs.ucla.edu), Prof. Suman Jana (suman@cs.columbia.edu), Prof. Bo Li (lbo@illinois.edu), and Prof. Xue Lin (xue.lin@northeastern.edu) during the years 2021 - 2023.
 
 Our library is released under the BSD 3-Clause license. A copy of the license is included [here](LICENSE).
+

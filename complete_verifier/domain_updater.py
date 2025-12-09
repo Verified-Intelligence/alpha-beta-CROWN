@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -18,7 +18,7 @@ from collections import defaultdict
 
 import torch
 
-from utils import fast_hist_copy
+from utils import fast_hist_copy, convert_history_from_list
 import arguments
 
 
@@ -59,21 +59,6 @@ class DomainUpdater:
 
     def empty_dict(self):
         return {k: [] for k in self.node_names}
-
-    def _convert_history_from_list(self, history):
-        """Convert the history variables into tensors if they are lists.
-
-        It is because some legacy code creates history as lists.
-        """
-
-        if isinstance(history[0], torch.Tensor):
-            return history
-
-        return (torch.tensor(history[0], dtype=torch.long),
-                torch.tensor(history[1]),
-                torch.tensor(history[2]),
-                torch.tensor(history[3]),
-                torch.tensor(history[4]))
 
     def set_branched_bounds(self, d, split, mode='depth'):
         """
@@ -200,16 +185,16 @@ class DomainUpdater:
             for i, lengths in enumerate(history_new_len):
                 for node, l in lengths.items():
                     if len(self.new_history[i][node][0]) > 0:
-                        self.new_history[i][node] = self._convert_history_from_list(
+                        self.new_history[i][node] = convert_history_from_list(
                             self.new_history[i][node])
                         shape_base = self.new_history[i][node][0].numel()
                     else:
                         shape_base = 0
                     loc = torch.empty(shape_base + l, dtype=torch.long)
-                    sign = torch.empty(shape_base + l)
-                    bias = torch.empty(shape_base + l)
-                    score = torch.empty(shape_base + l) if self.biccos_usage else None
-                    depth = torch.empty(shape_base + l) if self.multi_tree_searching else None
+                    sign = torch.full((shape_base + l,), float('nan'))
+                    bias = torch.full((shape_base + l,), float('nan'))
+                    score = torch.full((shape_base + l,), float('nan')) if self.biccos_usage else None
+                    depth = torch.full((shape_base + l,), float('nan')) if self.multi_tree_searching else None
                     if len(self.new_history[i][node][0]) > 0:
                         loc[:shape_base] = self.new_history[i][node][0]
                         sign[:shape_base] = self.new_history[i][node][1]
@@ -217,6 +202,8 @@ class DomainUpdater:
                             bias[:shape_base] = self.new_history[i][node][2]
                         if self.new_history[i][node][3] is not None and self.new_history[i][node][3].numel() > 0:
                             score[:shape_base] = self.new_history[i][node][3]
+                            if l > 0:
+                                score[shape_base] = 0
                         if self.new_history[i][node][4] is not None and self.new_history[i][node][4].numel() > 0:
                             depth[:shape_base] = self.new_history[i][node][4]
                     max_depth = -1
@@ -397,7 +384,7 @@ class DomainUpdaterSimple(DomainUpdater):
             score = torch.tensor([0.]) if self.biccos_usage else None
             depth = torch.tensor([max_depth + 1]) if self.multi_tree_searching else None
         else:
-            self.new_history[idx][node] = self._convert_history_from_list(
+            self.new_history[idx][node] = convert_history_from_list(
                 self.new_history[idx][node])
             shape = self.new_history[idx][node][0].numel()
             loc = torch.empty(shape + 1, dtype=torch.long)

@@ -1,5 +1,3 @@
-general:
-  enable_incomplete_verification: False
 model:
   name: mnist_cnn_4layer
   path: models/sdp/mnist_cnn_a_adv.model

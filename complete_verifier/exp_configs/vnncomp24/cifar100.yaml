@@ -17,9 +17,7 @@ solver:
     lr_alpha: 0.25
     iteration: 20
     full_conv_alpha: False
-  prune_after_crown: True
 bab:
-  initial_max_domains: 100
   interm_transfer: False
   branching:
     method: kfsb

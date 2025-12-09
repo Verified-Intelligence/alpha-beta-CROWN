@@ -10,9 +10,7 @@ solver:
     lr_beta: 0.1
     lr_alpha: 0.03
     iteration: 5
-  prune_after_crown: True
 bab:
-  initial_max_domains: 100
   interm_transfer: False
   branching:
     reduceop: max

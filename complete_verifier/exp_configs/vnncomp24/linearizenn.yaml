@@ -10,8 +10,6 @@ bab:
     method: naive  # Split on input space.
     input_split:
       enable: True
-      # enable_clip_domains: True
-      # reorder_bab: True
 attack:
   pgd_order: after
   pgd_restarts: 10000

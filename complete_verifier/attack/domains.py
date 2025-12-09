@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -196,7 +196,7 @@ class SortedReLUDomainList(AbstractDomainList):
         Maintains a sorted list of domain list, but add and remove domains individually which is slow
     """
 
-    def __init__(self, ret, lAs, global_lbs, global_ubs, alphas, history,
+    def __init__(self, ret, c, lAs, global_lbs, global_ubs, alphas, history,
                  thresholds, net=None, branching_input_and_activation=False, **kwargs):
         super(SortedReLUDomainList, self).__init__()
 
@@ -226,7 +226,7 @@ class SortedReLUDomainList(AbstractDomainList):
             instance_alphas[i],
             history=copy.deepcopy(history),
             depth=0,
-            c=net.c[i:i+1],
+            c=c[i:i+1],
             threshold=thresholds[i] if thresholds.numel() > 1 else thresholds.view(1),
             beta=beta if beta is not None else None
         )) for i in range(num)]

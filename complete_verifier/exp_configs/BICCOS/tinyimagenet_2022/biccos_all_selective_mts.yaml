@@ -27,7 +27,7 @@ bab:
     number_cuts: 500
     biccos:
       enabled: true
-      auto_param: false
+      auto_param: true
       multi_tree_branching:
         enabled: true
         restore_best_tree: true

@@ -9,9 +9,7 @@ solver:
   beta-crown:
     lr_beta: 0.05
     iteration: 10
-  prune_after_crown: True
 bab:
-  initial_max_domains: 100
   branching:
     method: kfsb-intercept-only
     reduceop: max

@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -85,9 +85,7 @@ def deep_update(d, u):
 
 
 def unzip_and_optimize_onnx(path, onnx_optimization_flags: Optional[List[str]] = None):
-    if onnx_optimization_flags is None:
-        onnx_optimization_flags = []
-    if len(onnx_optimization_flags) == 0:
+    if not onnx_optimization_flags:
         if path.endswith('.gz'):
             onnx_model = onnx.load(gzip.GzipFile(path))
         else:
@@ -105,7 +103,11 @@ def unzip_and_optimize_onnx(path, onnx_optimization_flags: Optional[List[str]] =
                 onnx_model = onnx.load(gzip.GzipFile(path))
             else:
                 onnx_model = onnx.load(path)
-            return compress_onnx(onnx_model, path, npath, onnx_optimization_flags, debug=True)
+            try:   # Capture errors during ONNX optimization, skip errors, and display warnings when failures occur.
+                return compress_onnx(onnx_model, path, npath, onnx_optimization_flags, debug=True)
+            except Exception as e:
+                warnings.warn(f"ONNX optimization failed with flags {onnx_optimization_flags}. Skipping optimization.\nError: {e}")
+                return onnx_model  # Fallback to unoptimized model
 
 
 def inference_onnx(path, input):
@@ -116,7 +118,14 @@ def inference_onnx(path, input):
     sess = ort.InferenceSession(unzip_and_optimize_onnx(path).SerializeToString(),
                                 sess_options=options)
     assert len(sess.get_inputs()) == len(sess.get_outputs()) == 1
-    res = sess.run(None, {sess.get_inputs()[0].name: input})[0]
+    input_info = sess.get_inputs()[0]
+    if "float" in input_info.type:
+        # ONNX input is float, convert to float32
+        input = input.astype(np.float32)
+    elif "double" in input_info.type:
+        # ONNX input is double, convert to float64
+        input = input.astype(np.float64)
+    res = sess.run(None, {input_info.name: input})[0]
     return res
 
 
@@ -136,9 +145,10 @@ def load_model_onnx(path, quirks=None, x=None):
             print(f'Loading cached onnx model from {cached_onnx_filename}')
             read_error = False
             try:
-                pytorch_model, onnx_shape, old_file_sha256 = torch.load(cached_onnx_filename)
-            except (Exception, ValueError, EOFError):
-                print("Cannot read cached onnx file. Regenerating...")
+                pytorch_model, onnx_shape, old_file_sha256 = torch.load(cached_onnx_filename, weights_only=False)
+            except (Exception, ValueError, EOFError) as e:
+                # If the cached file is corrupted or not compatible, we will regenerate it.
+                print(f"Error reading cached onnx file {cached_onnx_filename}: {e}")
                 read_error = True
             if not read_error:
                 if curfile_sha256 == old_file_sha256:
@@ -211,14 +221,22 @@ def load_model_onnx(path, quirks=None, x=None):
         else:
             x = torch.randn([1, *onnx_shape])
         output_pytorch = pytorch_model(x).numpy()
+        model_path = path + '.optimized' if arguments.Config['model']['check_optimized'] else path
         try:
-            if arguments.Config['model']['check_optimized']:
-                output_onnx = inference_onnx(path+'.optimized', x.numpy())
-            else:
-                output_onnx = inference_onnx(path, x.numpy())
+            output_onnx = inference_onnx(model_path, x.numpy())
         except ort.capi.onnxruntime_pybind11_state.InvalidArgument:
             # ONNX model might have shape problems. Remove the batch dimension and try again.
-            output_onnx = inference_onnx(path, x.numpy().squeeze(0))
+            try:
+                output_onnx = inference_onnx(model_path, x.numpy().squeeze(0))
+            except Exception:
+                try:
+                    # Still failing: try reshaping the input to (batch, flattened_dim, 1)
+                    output_onnx = inference_onnx(model_path, x.flatten(1).unsqueeze(-1).numpy())
+                except Exception as e:
+                    print(f'Failed to run inference on ONNX model {model_path} with input shape {x.shape}')
+                    print('Please check the ONNX model and input shape.')
+                    raise e
+
         if 'remove_relu_in_last_layer' in onnx_optimization_flags:
             output_pytorch = output_pytorch.clip(min=0)
         conversion_check_result = np.allclose(

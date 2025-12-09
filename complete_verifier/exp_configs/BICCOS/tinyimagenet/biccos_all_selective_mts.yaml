@@ -7,8 +7,6 @@ specification:
   norm: .inf
 solver:
   batch_size: 256
-  auto_enlarge_batch_size: true
-  prune_after_crown: true
   alpha-crown:
     lr_alpha: 0.25
     iteration: 20
@@ -25,7 +23,7 @@ bab:
     number_cuts: 500
     biccos:
       enabled: true
-      auto_param: false
+      auto_param: true
       multi_tree_branching:
         enabled: true
         restore_best_tree: true

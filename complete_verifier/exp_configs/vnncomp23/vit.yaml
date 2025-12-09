@@ -5,6 +5,7 @@ general:
   sparse_alpha: false
   sparse_interm: false
   conv_mode: matrix
+  adhoc_tuning: Customized("custom_adhoc_tuning", "customized_vit_tuning")
 attack:
   pgd_order: skip
 solver:
@@ -20,6 +21,7 @@ solver:
     lr_alpha: 0.05
     lr_beta: 0.05
     iteration: 10
+  forward_before_compute_bounds: True
 bab:
   pruning_in_iteration: False
   branching:

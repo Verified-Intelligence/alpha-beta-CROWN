@@ -37,6 +37,10 @@ EOF
 sudo mkdir -p /opt/gurobi
 sudo mv gurobi.lic /opt/gurobi/
 
-if grep -q "Using license file /opt/gurobi/gurobi.lic" <<< "$(${VNNCOMP_PYTHON_PATH}/gurobi_cl)"; then
-	echo "license setup is successful"
+gurobi_output=$(${VNNCOMP_PYTHON_PATH}/gurobi_cl)
+if grep -q "Using license file /opt/gurobi/gurobi.lic" <<< "$gurobi_output" && grep -q "Academic license" <<< "$gurobi_output"; then
+	echo "Gurobi license setup is successful!"
+else
+	echo "Gurbo license setup failed. Below is the detailed error message:"
+	echo "$gurobi_output"
 fi

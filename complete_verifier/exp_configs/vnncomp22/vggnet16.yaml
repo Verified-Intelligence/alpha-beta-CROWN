@@ -2,18 +2,15 @@
 general:
   root_path: ../../vnncomp2022_benchmarks/benchmarks/vggnet16_2022
   csv_name: instances.csv
-  enable_incomplete_verification: False
   loss_reduction_func: max
+  adhoc_tuning: Customized("custom_adhoc_tuning", "customized_vggnet16_tuning")
 data:
   num_outputs: 1000
 solver:
   batch_size: 1  # Number of parallel domains to compute on GPU.
-  bound_prop_method: forward+backward
+  bound_prop_method: dynamic-forward+backward
   forward:
-    dynamic: True
     max_dim: 100
-  beta-crown:
-    iteration: 10  # Iterations for computing intermediate layer bounds.
   crown:
     batch_size: 16
 bab:
@@ -23,4 +20,3 @@ bab:
       enable: True
 attack:
   pgd_order: input_bab
-  check_clean: True

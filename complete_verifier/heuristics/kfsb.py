@@ -2,11 +2,11 @@
 ##   This file is part of the α,β-CROWN (alpha-beta-CROWN) verifier    ##
 ##                                                                     ##
 ##   Copyright (C) 2021-2025 The α,β-CROWN Team                        ##
-##   Primary contacts: Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
-##                     Zhouxing Shi <zshi@cs.ucla.edu> (UCLA)          ##
-##                     Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
+##   Team leaders:                                                     ##
+##          Faculty:   Huan Zhang <huan@huan-zhang.com> (UIUC)         ##
+##          Student:   Xiangru Zhong <xiangru4@illinois.edu> (UIUC)    ##
 ##                                                                     ##
-##    See CONTRIBUTORS for all author contacts and affiliations.       ##
+##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
 ##        contained in the LICENCE file in this directory.             ##
@@ -15,7 +15,7 @@
 from collections import defaultdict
 import torch
 import numpy as np
-from heuristics.babsr import BabsrBranching
+from heuristics.babsr import BabsrBranching, babsr_score, babsr_score_intercept_only
 from utils import get_reduce_op, get_batch_size_from_masks
 
 
@@ -24,19 +24,6 @@ class KfsbBranching(BabsrBranching):
     Branching using the intercept term in ReLU relaxation.
     TODO: support general activation functions.
     """
-
-    def babsr_score_intercept_only(self, lbs, ubs, lAs, batch):
-        """Compute branching scores for kfsb based on intercept only."""
-        score = []
-        for k in lbs:
-            if k == self.net.final_name:
-                continue
-            assert len(self.net.split_activations[k]) == 1
-            A_key = self.net.split_activations[k][0][0].name
-            ratio = ((-lbs[k]).clamp(0, None) * ubs[k].clamp(0, None)) / (ubs[k] - lbs[k])
-            ratio *= (-lAs[A_key].mean(dim=1)).clamp(0, None)
-            score.append(ratio.reshape(batch, -1))
-        return score
 
     @torch.no_grad()
     def get_branching_decisions(self, domains, split_depth, branching_candidates=5,
@@ -59,11 +46,12 @@ class KfsbBranching(BabsrBranching):
         number_bounds = 1 if cs is None else cs.shape[1]
 
         if method == 'kfsb-intercept-only':
-            score = self.babsr_score_intercept_only(lower_bounds, upper_bounds, lAs, batch)
+            score = babsr_score_intercept_only(lower_bounds, upper_bounds, lAs, batch, self.net.final_name, self.net.split_activations)
         elif method == 'kfsb':
-            score, intercept_tb = self.babsr_score(
+            score, intercept_tb = babsr_score(
                 lower_bounds, upper_bounds, lAs, mask, reduce_op,
-                number_bounds, prioritize_alphas)
+                number_bounds, self.net.split_nodes, self.net.split_activations,
+                prioritize_alphas)
         else:
             raise ValueError(f'Unsupported branching method "{method}" for relu splits.')
 

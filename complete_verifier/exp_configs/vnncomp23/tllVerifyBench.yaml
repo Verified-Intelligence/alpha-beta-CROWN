@@ -2,7 +2,6 @@
 general:
   root_path: ../../vnncomp2023_benchmarks/benchmarks/tllverifybench
   csv_name: instances.csv
-  enable_incomplete_verification: False
 model:
   onnx_optimization_flags: merge_linear
   cache_onnx_conversion: True
@@ -14,5 +13,3 @@ bab:
     method: naive
     input_split:
       enable: True
-      # enable_clip_domains: True
-      # reorder_bab: True
