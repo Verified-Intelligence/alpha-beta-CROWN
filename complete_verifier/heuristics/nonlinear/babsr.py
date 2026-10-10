@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Helper for the BaBSR-like heuristic on general nonlinear functions."""
@@ -116,7 +116,7 @@ class BaBSRNonlinearBranching:
         for node in self.model.nodes():
             if not node.perturbed:
                 fv = self.model.get_forward_value(node)
-                node.interval = node.lower, node.upper = fv, fv
+                node.lower, node.upper = fv, fv
 
         for node in self.model.nodes():
             node.lA = node.uA = None
@@ -144,7 +144,7 @@ class BaBSRNonlinearBranching:
             # Initially, l.lA or l.uA will be set to C for this node.
             if node.lA is not None or node.uA is not None:
                 if not node.perturbed:
-                    if not hasattr(node, 'forward_value'):
+                    if node.forward_value is None:
                         self.model.get_forward_value(node)
                     lb, ub = add_constant_node(lb, ub, node)
                     continue

@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for input_split/batch_branch_and_bound.py"""
@@ -66,7 +66,6 @@ def _setup_mock_config():
     new_config['attack']['input_split_check_adv']['enabled'] = 'false'
     new_config['model']['with_jacobian'] = False
     new_config['general']['device'] = 'cpu'
-    new_config['general']['enable_incomplete_verification'] = True
 
     return new_config
 
@@ -168,6 +167,118 @@ class TestInitialVerification(unittest.TestCase):
         self.assertEqual(result[0].item(), 0.5)
         self.assertEqual(result[1], 10)
         self.assertEqual(result[2], "safe")
+
+
+class TestReorderedSplitClipping(unittest.TestCase):
+    """Tests clipping children after reordered input splitting."""
+
+    def setUp(self):
+        self.original_config = arguments.Config
+        arguments.Config = _setup_mock_config()
+        arguments.Config['bab']['branching']['input_split']['reorder_bab'] = True
+        arguments.Config['bab']['clip_n_verify']['clip_input_domain']['enabled'] = True
+
+    def tearDown(self):
+        arguments.Config = self.original_config
+
+    @patch('input_split.batch_branch_and_bound.input_split_and_repeat')
+    @patch('input_split.batch_branch_and_bound.input_split_branching')
+    @patch('input_split.batch_branch_and_bound.get_bounds')
+    def test_does_not_queue_children_certified_by_affine_bounds(
+            self, mock_get_bounds, mock_branching, mock_split):
+        from input_split.batch_branch_and_bound import batch_verification_input_split
+        from input_split.branching_domains import UnsortedInputDomainList
+        from input_split.utils import Stats
+
+        domains = MagicMock()
+        domains.use_alpha = False
+        domains.__len__.return_value = 0
+        stored_domains = UnsortedInputDomainList(
+            storage_depth=1, output_device='cpu', use_split_idx=False)
+        domains.add.side_effect = stored_domains.add
+        domains.pick_out_batch.return_value = (
+            {}, torch.tensor([[-0.25, -0.25]]),
+            torch.tensor([[0.0]]), torch.tensor([[1.0]]),
+            torch.zeros(1, 2, 2), torch.zeros(1, 2), None,
+            torch.ones(1, dtype=torch.int32), None,
+        )
+
+        # Neither affine bound verifies the parent interval. After splitting,
+        # the first bound verifies the left child and the second verifies the
+        # right child.
+        parent_lA = torch.tensor([[[-1.0], [1.0]]])
+        parent_lbias = torch.tensor([[0.75, -0.25]])
+        mock_get_bounds.return_value = (
+            torch.tensor([[-0.25, -0.25]]), {}, parent_lA, parent_lbias)
+        mock_branching.return_value = torch.tensor([[0]])
+
+        child_x_L = torch.tensor([[0.0], [0.5]])
+        child_x_U = torch.tensor([[0.5], [1.0]])
+        mock_split.return_value = (
+            child_x_L, child_x_U, torch.zeros(2, 2, 2),
+            torch.zeros(2, 2), torch.tensor([[-0.25, -0.25]]).repeat(2, 1),
+            {}, torch.ones(2, dtype=torch.int32), parent_lA.repeat(2, 1, 1),
+            parent_lbias.repeat(2, 1), None,
+        )
+
+        net = MagicMock()
+        net.device = 'cpu'
+        stats = Stats()
+
+        batch_verification_input_split(
+            domains, net, batch=1, num_iter=1,
+            decision_thresh=torch.zeros(1, 2), shape=(1, 1),
+            bounding_method='crown', branching_method='naive',
+            use_reordered_bab=True, stats=stats)
+
+        self.assertEqual(len(stored_domains), 0)
+
+
+class TestInitialDomainClipping(unittest.TestCase):
+    """Tests filtering domains emptied by initial input clipping."""
+
+    def setUp(self):
+        self.original_config = arguments.Config
+        arguments.Config = _setup_mock_config()
+        arguments.Config['bab']['clip_n_verify']['clip_input_domain']['enabled'] = True
+
+    def tearDown(self):
+        arguments.Config = self.original_config
+
+    @patch(
+        'input_split.batch_branch_and_bound.batch_verification_input_split',
+        side_effect=AssertionError('an empty domain entered the BaB loop'))
+    @patch(
+        'input_split.batch_branch_and_bound.input_split_branching',
+        return_value=torch.tensor([[0]]))
+    def test_filters_domain_emptied_by_multiple_constraints(
+            self, mock_branching, mock_batch_verification):
+        from input_split.batch_branch_and_bound import input_bab_parallel
+
+        x = MagicMock()
+        x.shape = (1, 1)
+        x.ptb.x_L = torch.tensor([[0.0]])
+        x.ptb.x_U = torch.tensor([[1.0]])
+
+        net = MagicMock()
+        net.device = 'cpu'
+        net.net.input_name = ['input']
+        net.net.get_splittable_activations.return_value = []
+
+        # Neither affine constraint certifies [0, 1] by itself. Together they
+        # clip it to x <= 0.4 and x >= 0.6, leaving no region to search.
+        reference_dict = {
+            'global_lb': torch.tensor([[-0.4, -0.4]]),
+            'lA': {'input': torch.tensor([[[1.0], [-1.0]]])},
+        }
+
+        _, visited, result = input_bab_parallel(
+            net, x, c=torch.zeros(1, 2, 1), rhs=torch.zeros(1, 2),
+            or_spec_size=torch.tensor([2]), reference_dict=reference_dict)
+
+        self.assertEqual(result, 'safe')
+        self.assertEqual(visited, 1)
+        mock_batch_verification.assert_not_called()
 
 
 if __name__ == '__main__':

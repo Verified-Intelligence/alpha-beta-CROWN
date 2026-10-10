@@ -1,19 +1,11 @@
-# NOTE: This config file is outdated.
-
 # Configuration file for running the collins_rul_cnn benchmark (all properties).
 general:
-  root_path: ../../vnncomp2022_benchmarks/benchmarks/collins_rul_cnn # https://github.com/ChristopherBrix/vnncomp2022_benchmarks/tree/main/benchmarks
-  # root_path: ../../vnncomp22/benchmarks/collins  # https://github.com/loonwerks/vnncomp2022
+  root_path: ../../vnncomp2022_benchmarks/benchmarks/collins_rul_cnn
   csv_name: instances.csv
-  loss_reduction_func: max
-    # conv_mode: matrix
-specification:
-  robustness_type: all-positive
-data:
-  num_outputs: 1
+  conv_mode: matrix
 solver:
   batch_size: 100  # Number of parallel domains to compute on GPU.
-  bound_prop_method: forward+backward
+  bound_prop_method: crown
 bab:
   branching:
     method: sb
@@ -22,4 +14,3 @@ bab:
 attack:
   pgd_order: before
   pgd_restarts: 100
-  attack_tolerance: 0.0001

@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -90,7 +90,8 @@ class ConfigHandler:
                           help='Save returned adversarial example in file.',
                           hierarchy=h + ["save_adv_example"])
         self.add_argument("--verify_onnxruntime_output", action='store_true',
-                          help='Check if the inference results of counterexample are the same on both PyTorch and ONNXRuntime.',
+                          help='Validate counterexamples with ONNXRuntime; '
+                          'fail if validation cannot run.',
                           hierarchy=h + ["verify_onnxruntime_output"])
         self.add_argument("--eval_adv_example", action='store_true',
                           help='Whether to validate the saved adversarial example.',
@@ -117,9 +118,6 @@ class ConfigHandler:
                                '"bab-refine": branch and bound with intermediate layer bounds computed by MIP; '
                                '"Customized": customized verifier, need to specially def by user.',
                           hierarchy=h + ["complete_verifier"])
-        self.add_argument('--no_incomplete', action='store_false', dest='incomplete',
-                          help='Enable/Disable initial alpha-CROWN incomplete verification (disable this can save GPU memory).',
-                          hierarchy=h + ["enable_incomplete_verification"])
         self.add_argument("--csv_name", type=str, default=None,
                           help='Name of .csv file containing a list of properties to verify (VNN-COMP specific).',
                           hierarchy=h + ["csv_name"])
@@ -129,9 +127,6 @@ class ConfigHandler:
         self.add_argument("--root_path", type=str, default='',
                           help='Root path of the specification folder if using vnnlib.',
                           hierarchy=h + ["root_path"])
-        self.add_argument("--deterministic_opt", action="store_true",
-                          help="To ensure that the returned alphas match the returned bounds, so that we can reproduce the bounds using the returned alphas during debugging.",
-                          hierarchy=h + ["deterministic_opt"])
         self.add_argument("--graph_optimizer", type=str, default='Customized("custom_graph_optimizer", "default_optimizer")',
                           help='BoundedModule model graph optimizer function name. For examples of customized graph optimizer, please see the config files for '
                                'the gtrsb benchmark in VNN-COMP 2023.',
@@ -166,9 +161,6 @@ class ConfigHandler:
                           hierarchy=h + ["path"])
         self.add_argument("--onnx_path", type=str, default=None, help='Path to .onnx model file.',
                           hierarchy=h + ["onnx_path"])
-        self.add_argument("--onnx_path_prefix", type=str, default='',
-                          help='Add a prefix to .onnx model path to correct malformed csv files.',
-                          hierarchy=h + ["onnx_path_prefix"])
         self.add_argument("--cache_onnx_conversion", action='store_true',
                           help='Cache the model converted from ONNX.',
                           hierarchy=h + ["cache_onnx_conversion"])
@@ -192,7 +184,8 @@ class ConfigHandler:
         self.add_argument("--onnx_optimization_flags", nargs='+',
                           choices=["merge_bn", "merge_linear", "merge_gemm",
                                    "remove_ineffective_layers",
-                                   "remove_relu_in_last_layer"],
+                                   "remove_relu_in_last_layer",
+                                   "optimize_relu_relationship"],
                           default=[], help='Onnx graph optimization config.',
                           hierarchy=h + ["onnx_optimization_flags"])
         self.add_argument("--onnx_vnnlib_joint_optimization_flags", nargs='+',
@@ -202,6 +195,9 @@ class ConfigHandler:
         self.add_argument('--check_optimized', action='store_true',
                           help='Check the optimized onnx file instead the original one when converting to pytorch. This is used when input shape is changed during optimization.',
                           hierarchy=h + ["check_optimized"])
+        self.add_argument("--use_ort_optimized_model", action='store_true',
+                          help='Load the ONNX Runtime optimized graph before ONNX-to-PyTorch conversion.',
+                          hierarchy=h + ["use_ort_optimized_model"])
         self.add_argument("--flatten_final_output", action='store_true',
                           help='Manually add a flatten layer at the end of the model.',
                           hierarchy=h + ["flatten_final_output"])
@@ -266,9 +262,6 @@ class ConfigHandler:
                           hierarchy=h + ["epsilon_min"])
         self.add_argument("--vnnlib_path", type=str, default=None,
                           help='Path to .vnnlib specification file. Will override any Lp/robustness verification arguments.', hierarchy=h + ["vnnlib_path"])
-        self.add_argument("--vnnlib_path_prefix", type=str, default='',
-                          help='Add a prefix to .vnnlib specs path to correct malformed csv files.',
-                          hierarchy=h + ["vnnlib_path_prefix"])
         self.add_argument("--shrink_eps", type=float, default=None,
                           help='Shrink the input bounds.',
                           hierarchy=h + ['shrink_eps'])
@@ -294,15 +287,20 @@ class ConfigHandler:
         self.add_argument('--min_batch_size_ratio', type=float, default=0.1,
                           help='The minimum batch size ratio in each iteration (splitting multiple layers if the number of domains is smaller than min_batch_size_ratio * batch_size).',
                           hierarchy=h + ["min_batch_size_ratio"])
-        self.add_argument("--use_float64_in_last_iteration", action='store_true',
-                          help='Use double fp (float64) at the last iteration in alpha/beta CROWN.',
-                          hierarchy=h + ["use_float64_in_last_iteration"])
         self.add_argument('--early_stop_patience', type=int, default=10,
                           help='Number of iterations that we will start considering early stop if tracking no improvement.',
                           hierarchy=h + ["early_stop_patience"])
         self.add_argument('--start_save_best', type=float, default=0.5,
                           help='Start to save best optimized bounds when i > int(iteration*start_save_best). Early iterations are skipped for better efficiency.',
                           hierarchy=h + ["start_save_best"])
+        self.add_argument("--reproduce_alpha_bounds", action="store_true",
+                          help='Try to ensure that returned optimization '
+                               'parameters reproduce the returned bounds during '
+                               'debugging. This also preserves the alpha storage '
+                               'dtype even when alpha_dtype is "float16"; it '
+                               'does not select the arithmetic precision used '
+                               'by alpha-CROWN.',
+                          hierarchy=h + ["reproduce_alpha_bounds"])
         self.add_argument('--bound_prop_method', default="alpha-crown",
                           choices=["lp", "lp+crown", "alpha-crown", "crown", "forward", "forward+crown",
                                    "alpha-forward", "crown-ibp", "init-crown", "ibp",
@@ -331,7 +329,6 @@ class ConfigHandler:
         self.add_argument("--forward_before_compute_bounds", action="store_true",
                           help="If set, run forward pass before computing bounds (Sometimes useful for updating the model state before computing bounds).",
                           hierarchy=h + ["forward_before_compute_bounds"])
-
         h = ["solver", "crown"]
         self.add_argument('--crown_batch_size', type=int, default=int(1e9),
                           help='Batch size in batched CROWN.',
@@ -380,7 +377,13 @@ class ConfigHandler:
                            hierarchy=h + ['max_time'])
         self.add_argument('--alpha_dtype', type=str, default='float16',
                           choices = ['float16', 'auto'],
-                          help='The dtype of alpha stored in branch and bound domains. alpha may take a lot of space, and we use float16 to save memory by default. Setting it to "auto" will use float32 or float64 depending on whether double precision is enabled (useful for debugging).',
+                          help='The dtype of alpha stored in branch-and-bound '
+                               'domains. Alpha values may take a lot of space, so '
+                               'float16 is used by default. Setting this to '
+                               '"auto" preserves the graph dtype (useful for '
+                               'debugging). solver.reproduce_alpha_bounds also '
+                               'preserves the source dtype and overrides this '
+                               'setting.',
                           hierarchy=h + ['alpha_dtype'])
         self.add_argument('--input_split_alpha_iteration', type=int, default=5,
                           help='Number of alpha-CROWN iterations during input-split based branch and bound.',
@@ -567,6 +570,35 @@ class ConfigHandler:
                           help='Use the default tensor allocator instead of the HugeTensor allocator.',
                           hierarchy=h + ["hugetensor_allocator"])
 
+        h = ["bab", "mixed_precision"]
+        self.add_argument("--no_tf32_branching_decision", action="store_false",
+                          dest="enable_tf32_branching_decision",
+                          help='Whether to use TF32 precision during branching decision computation.',
+                          hierarchy=h + ["enable_tf32_branching_decision"])
+        self.add_argument("--no_tf32_clip_decision", action="store_false",
+                          dest="enable_tf32_clip_decision",
+                          help='Whether to use TF32 precision during clip decision computation.',
+                          hierarchy=h + ["enable_tf32_clip_decision"])
+        self.add_argument("--check_mixed_decision_bound_soundness", action="store_true",
+                          dest="check_mixed_decision_bound_soundness",
+                          help='Recompute bounds in full precision after mixed-precision BaB bound and check for unsoundness, for debug.',
+                          hierarchy=h + ["check_mixed_decision_bound_soundness"])
+        self.add_argument("--enable_bab_bound_mixed_precision", action="store_true",
+                          dest="enable_bab_bound_mixed_precision",
+                          help='Enable mixed-precision bound computation during BaB. A fp32 bounds is computed for soundness.',
+                          hierarchy=h + ["enable_bab_bound_mixed_precision"])
+        self.add_argument("--bab_bound_mixed_precision_dtype", type=str, default="tf32",
+                          choices=["fp16", "bf16", "tf32", "fp16+tf32", "bf16+tf32", "fp32", "none", ""],
+                          help='Mixed Precision dtype for bound CROWN. A fp32 bounds is computed for soundness. Options: fp16, bf16, tf32, fp16+tf32, bf16+tf32, fp32, none, "".',
+                          hierarchy=h + ["bab_bound_mixed_precision_dtype"])
+        self.add_argument("--disable_prune_even_under_low_precision", action="store_false",
+                          dest="prune_even_under_low_precision",
+                          help='Whether to speculatively prune verified domains to cut workload even under the low-precision iterations of alpha-CROWN using the low-precision. Meaningful only if prune_in_iteration is enabled.',
+                          hierarchy=h + ["prune_even_under_low_precision"])
+        self.add_argument("--low_precision_prune_margin_abs", type=float, default=0.01,
+                          help='Additional absolute margin for speculative pruning to decide verified. The default suits TF32 bound error.',
+                          hierarchy=h + ["low_precision_prune_margin_abs"])
+
         # FIXME: cut should not be under bab. We don't have to use bab with cuts. It should be under "solver" category.
         h = ["bab", "cut"]
         self.add_argument('--enable_cut', action='store_true', dest='enable_cut',
@@ -659,7 +691,7 @@ class ConfigHandler:
                           help='After max_domain visited, we will stop inferencing cuts.',
                           hierarchy=h + ["max_domain"])
         self.add_argument("--biccos_dropping_heuristics", default="neuron_influence_score",
-                          choices=["neuron_influence_score", "random_drop", "sparse_opt", "None"],
+                          choices=["neuron_influence_score", "random_drop", "None"],
                           help='Neuron dropping heuristic.',
                           hierarchy=h + ["heuristic"])
         self.add_argument("--biccos_save_cuts", action='store_true',
@@ -739,6 +771,32 @@ class ConfigHandler:
                           help='Select top-k objective based on their kfsb-score.',
                           hierarchy=h + ['topk_objective'])
 
+        h = ["bab", "shared_slope_bab"]
+        self.add_argument("--enable_shared_slope_bab", action='store_true',
+                          help="Enable the pre-β-CROWN shared-slope BaB. It builds a same-slope "
+                               "CROWN relaxation from the BaB initialization bounds, then runs "
+                               "the factored dual BaB.",
+                          hierarchy=h + ["enabled"])
+        self.add_argument("--shared_slope_bab_iteration", type=int, default=1,
+                          help="Dual-ascent steps per domain in the factored dual kernel "
+                               "(1 warm-started step is the default; more tightens each bound).",
+                          hierarchy=h + ["iteration"])
+        self.add_argument("--shared_slope_bab_line_search_buckets", type=int, default=256,
+                          help="Number of line-search buckets for the compiled dual kernel.",
+                          hierarchy=h + ["line_search_buckets"])
+        self.add_argument("--shared_slope_bab_slope_iteration", type=int, default=80,
+                          help="Adam iterations for per-neuron ReLU slope optimization when "
+                               "building the relaxation state.",
+                          hierarchy=h + ["slope_iteration"])
+        self.add_argument("--shared_slope_bab_shared_slope_iteration", type=int, default=-1,
+                          help="Slope-search iterations for the shared multi-query state. "
+                               "Negative means 0 for multiple queries and slope_iteration for one.",
+                          hierarchy=h + ["shared_slope_iteration"])
+        self.add_argument("--shared_slope_bab_shared_max_domains", type=int, default=250000,
+                          help="Maximum number of domains in the shared multi-query attempt "
+                               "before per-query fallback.",
+                          hierarchy=h + ["shared_max_domains"])
+
         h = ["bab", "branching"]
         self.add_argument("--branching_method", default="kfsb",
                           choices=["babsr", "fsb", "kfsb", "kfsb-intercept-only",
@@ -771,6 +829,9 @@ class ConfigHandler:
         self.add_argument("--save_visited_domains_to", type=str, default="",
                           help="Save visited domains to the specified path for visualization.",
                           hierarchy=h + ["save_visited_domains_to"])
+        self.add_argument('--decision_sub_batch_size', type=int, default=None,
+                          help='Maximum sub-batch size when computing bounds for branching candidates (only applies to KFSB and FSB). Useful to avoid OOM.',
+                          hierarchy=h + ["decision_sub_batch_size"])
 
         h = ["bab", "branching", "nonlinear_split"]
         self.add_argument("--nonlinear_split_method", type=str, default='bbps',
@@ -1016,8 +1077,8 @@ class ConfigHandler:
                           help='Attack algorithm, including vanilla PGD and PGD with diversified output (Tashiro et al.), and GAMA loss (Sriramanan et al.).',
                           choices=['diversed_PGD', 'diversed_GAMA_PGD', 'PGD', 'boundary'],
                           hierarchy=h + ["attack_mode"])
-        self.add_argument('--attack_tolerance', type=self.positive_float_checker, default=0.,
-                          help='Tolerance of floating point error when checking whether attack is successful or not.',
+        self.add_argument('--attack_tolerance', type=float, default=0.,
+                          help='Tolerance when checking whether attack is successful. Positive values relax the check; negative values make it stricter.',
                           hierarchy=h + ["attack_tolerance"])
         self.add_argument('--attack_func', type=str, default='attack_with_general_specs',
                           help='The specific customized attack.',
@@ -1259,12 +1320,6 @@ class ConfigHandler:
             with open(self.all_args["debug"]["save_minimal_config"], 'w') as f:
                 f.write(self.dump_config(self.all_args, omit_defaults=True, omit_keys=self.all_args["debug"]["save_minimal_config_omit_keys"]))
         return parsed_args
-
-    def positive_float_checker(self, x):
-        tolerance = float(x)
-        if tolerance < 0:
-            raise argparse.ArgumentTypeError('invalid attack tolerance')
-        return tolerance
 
     def keys(self):
         return self.all_args.keys()

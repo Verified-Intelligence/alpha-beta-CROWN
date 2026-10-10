@@ -9,9 +9,11 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
+from contextlib import contextmanager
+
 import torch
 from typing import Any
 
@@ -64,3 +66,17 @@ def brutely_gc_tensor(obj, visited_ids=None):
         for v in obj:
             brutely_gc_tensor(v, visited_ids)
         return
+
+
+@contextmanager
+def tf32_ctx(enabled: bool):
+    """Temporarily set TF32 policy for matmul and cuDNN."""
+    old_mm  = torch.backends.cuda.matmul.allow_tf32
+    old_dnn = torch.backends.cudnn.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = enabled
+    torch.backends.cudnn.allow_tf32       = enabled
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = old_mm
+        torch.backends.cudnn.allow_tf32       = old_dnn

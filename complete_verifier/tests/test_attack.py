@@ -9,15 +9,14 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for attack package."""
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
-import math
+from unittest.mock import patch
 import tempfile
 
 import torch
@@ -30,16 +29,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Initialize arguments.Config before importing attack modules
 import arguments
 arguments.Config.parse_config(args=[], verbose=False)
+from cex_validation import CEX_INPUT_TOLERANCE
 
 from auto_LiRPA import BoundedTensor, BoundedModule
 from auto_LiRPA.perturbations import PerturbationLpNorm
 
+import attack.attack_utils as attack_utils_module
 from attack.attack_utils import (
-    Stats, AdamClipping, PGDAttackResult,
-    precompute_group_indices, process_data_for_attack,
-    boundary_attack, default_adv_verifier, is_specification_vio
+    AdamClipping, precompute_group_indices, process_data_for_attack,
+    boundary_attack, default_adv_verifier, is_specification_vio,
+    check_and_save_cex, default_adv_saver, satisfies_open_constraints,
+    PGDAttackResult, verify_onnxruntime_output_matches_pytorch
 )
-from attack.domains import ReLUDomain, SortedReLUDomainList, to_cpu, to_device
 from attack.adv_domains import AdvExample, AdvExamplePool
 
 
@@ -68,35 +69,20 @@ class TestAdamClipping(unittest.TestCase):
         self.assertEqual(len(optimizer.param_groups), 1)
         self.assertEqual(optimizer.param_groups[0]['lr'], 0.01)
 
-    def test_init_invalid_lr_raises(self):
-        """Test that invalid learning rate raises ValueError."""
+    def test_init_rejects_invalid_parameters(self):
+        """Test validation of the public optimizer parameters."""
         param = torch.randn(10, requires_grad=True)
-        with self.assertRaises(ValueError):
-            AdamClipping([param], lr=-0.01)
-
-    def test_init_invalid_eps_raises(self):
-        """Test that invalid epsilon raises ValueError."""
-        param = torch.randn(10, requires_grad=True)
-        with self.assertRaises(ValueError):
-            AdamClipping([param], eps=-1e-8)
-
-    def test_init_invalid_beta0_raises(self):
-        """Test that invalid beta[0] raises ValueError."""
-        param = torch.randn(10, requires_grad=True)
-        with self.assertRaises(ValueError):
-            AdamClipping([param], betas=(1.5, 0.999))
-
-    def test_init_invalid_beta1_raises(self):
-        """Test that invalid beta[1] raises ValueError."""
-        param = torch.randn(10, requires_grad=True)
-        with self.assertRaises(ValueError):
-            AdamClipping([param], betas=(0.9, 1.5))
-
-    def test_init_invalid_weight_decay_raises(self):
-        """Test that invalid weight_decay raises ValueError."""
-        param = torch.randn(10, requires_grad=True)
-        with self.assertRaises(ValueError):
-            AdamClipping([param], weight_decay=-0.1)
+        invalid_parameters = [
+            {'lr': -0.01},
+            {'eps': -1e-8},
+            {'betas': (1.5, 0.999)},
+            {'betas': (0.9, 1.5)},
+            {'weight_decay': -0.1},
+        ]
+        for parameters in invalid_parameters:
+            with self.subTest(parameters=parameters):
+                with self.assertRaises(ValueError):
+                    AdamClipping([param], **parameters)
 
     def test_step_without_clipping(self):
         """Test step without clipping."""
@@ -257,6 +243,496 @@ class TestProcessDataForAttack(unittest.TestCase):
         self.assertEqual(c_out.shape, (6, 5))
 
 
+class TestVNNLib2StrictCounterexample:
+    """Tests for strict VNN-LIB 2.0 checks at the cex save boundary."""
+
+    def _read(self, tmp_path, text):
+        from read_vnnlib2 import read_vnnlib2
+        from specifications import VNNLibEntries
+
+        path = tmp_path / "strict.vnnlib"
+        path.write_text(text)
+        entries, metadata = read_vnnlib2(str(path))
+        return VNNLibEntries(entries, metadata)
+
+    def _check_without_saving(self, adv_input, adv_output, vnnlib):
+        with patch.dict(arguments.Config['general'], {
+            'save_adv_example': False,
+            'eval_adv_example': False,
+        }):
+            return check_and_save_cex(
+                adv_input, adv_output, vnnlib, "unused.txt", "unsafe")
+
+    def test_rejects_strict_input_boundary(self, tmp_path):
+        vnnlib = self._read(tmp_path, """
+(vnnlib-version <2.0>)
+(declare-network f
+  (declare-input X Real [1])
+  (declare-output Y Real [1])
+)
+(assert (> X[0] 0.0))
+(assert (<= X[0] 1.0))
+(assert (<= Y[0] 0.0))
+""")
+
+        adv_input = torch.tensor([[0.0]])
+        adv_output = torch.tensor([[-1.0]])
+
+        assert not satisfies_open_constraints(adv_input, adv_output, vnnlib)
+        status, success = self._check_without_saving(
+            adv_input, adv_output, vnnlib)
+        assert status == "unknown"
+        assert not success
+
+    def test_rejects_strict_output_boundary(self, tmp_path):
+        vnnlib = self._read(tmp_path, """
+(vnnlib-version <2.0>)
+(declare-network f
+  (declare-input X Real [1])
+  (declare-output Y Real [1])
+)
+(assert (and (>= X[0] 0.0) (<= X[0] 1.0)))
+(assert (> Y[0] 0.0))
+""")
+
+        adv_input = torch.tensor([[0.5]])
+        adv_output = torch.tensor([[0.0]])
+
+        status, success = self._check_without_saving(
+            adv_input, adv_output, vnnlib)
+        assert status == "unknown"
+        assert not success
+
+    def test_accepts_strict_counterexample_inside_region(self, tmp_path):
+        vnnlib = self._read(tmp_path, """
+(vnnlib-version <2.0>)
+(declare-network f
+  (declare-input X Real [1])
+  (declare-output Y Real [1])
+)
+(assert (> X[0] 0.0))
+(assert (<= X[0] 1.0))
+(assert (> Y[0] 0.0))
+""")
+
+        adv_input = torch.tensor([[0.5]])
+        adv_output = torch.tensor([[0.1]])
+
+        status, success = self._check_without_saving(
+            adv_input, adv_output, vnnlib)
+        assert status == "unsafe"
+        assert success
+
+
+class TestCounterexampleSaving(unittest.TestCase):
+    """Tests for the controlled counterexample saving path."""
+
+    @staticmethod
+    def _vnnlib():
+        return [(
+            [[0.0, 1.0]],
+            [(np.array([[1.0]]), np.array([0.0]))],
+        )]
+
+    @staticmethod
+    def _vnnlib2(temp_dir, text):
+        from read_vnnlib2 import read_vnnlib2
+        from specifications import VNNLibEntries
+
+        path = os.path.join(temp_dir, 'property.vnnlib')
+        with open(path, 'w', encoding='utf-8') as vnnlib_file:
+            vnnlib_file.write(text)
+        entries, metadata = read_vnnlib2(path)
+        return VNNLibEntries(entries, metadata)
+
+    def _config(self, cex_path, eval_adv_example=False,
+                verify_onnxruntime_output=False,
+                onnx_path='model.onnx', vnnlib_path='property.vnnlib'):
+        return (
+            patch.dict(arguments.Config['general'], {
+                'save_adv_example': True,
+                'eval_adv_example': eval_adv_example,
+                'onnx_adv_example': False,
+                'verify_onnxruntime_output': verify_onnxruntime_output,
+            }),
+            patch.dict(arguments.Config['attack'], {
+                'adv_saver': 'default_adv_saver',
+                'adv_verifier': 'default_adv_verifier',
+                'cex_path': cex_path,
+            }),
+            patch.dict(arguments.Config['model'], {'onnx_path': onnx_path}),
+            patch.dict(
+                arguments.Config['specification'],
+                {'vnnlib_path': vnnlib_path}),
+        )
+
+    def test_adv_savers_reject_direct_calls(self):
+        from custom.custom_adv_saver import customized_gtrsb_saver
+
+        cases = [
+            (
+                default_adv_saver,
+                torch.tensor([[0.5]]),
+                torch.tensor([[0.0]]),
+            ),
+            (
+                customized_gtrsb_saver,
+                torch.zeros(1, 1, 1, 1),
+                torch.zeros(1, 1),
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            for saver, x, y in cases:
+                with self.subTest(saver=saver.__name__):
+                    with self.assertRaisesRegex(
+                            RuntimeError, 'check_and_save_cex'):
+                        saver(x, y, path)
+
+    def test_check_and_save_cex_allows_configured_saver(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            patches = self._config(path)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(
+                        attack_utils_module, '_save_vnnlib1_assignment',
+                        wraps=attack_utils_module._save_vnnlib1_assignment
+                    ) as mock_assignment:
+                status, success = check_and_save_cex(
+                    torch.tensor([[0.5]]), torch.tensor([[0.0]]),
+                    self._vnnlib(), path, 'unsafe')
+
+            self.assertEqual(status, 'unsafe')
+            self.assertTrue(success)
+            mock_assignment.assert_called_once()
+            with open(path, encoding='utf-8') as cex_file:
+                content = cex_file.read()
+            self.assertIn('(X_0', content)
+            self.assertIn('(Y_0', content)
+
+    def test_configured_saver_can_receive_vnnlib(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            vnnlib = self._vnnlib()
+            seen = {}
+
+            def vnnlib_aware_saver(adv_input, adv_output, res_path, vnnlib=None):
+                seen['vnnlib'] = vnnlib
+                with open(res_path, 'w', encoding='utf-8') as cex_file:
+                    cex_file.write('saved')
+
+            patches = self._config(path)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.dict(
+                        arguments.Config['attack'],
+                        {'adv_saver': 'vnnlib_aware_saver'}), \
+                    patch.object(
+                        attack_utils_module,
+                        'vnnlib_aware_saver',
+                        vnnlib_aware_saver,
+                        create=True):
+                status, success = check_and_save_cex(
+                    torch.tensor([[0.5]]), torch.tensor([[0.0]]),
+                    vnnlib, path, 'unsafe')
+
+            self.assertEqual(status, 'unsafe')
+            self.assertTrue(success)
+            self.assertIs(seen['vnnlib'], vnnlib)
+
+    def test_check_and_save_cex_writes_vnnlib2_assignment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            vnnlib = self._vnnlib2(temp_dir, """
+(vnnlib-version <2.0>)
+(declare-network f
+  (declare-input X1 Real [1, 2])
+  (declare-input X2 Real [1, 1])
+  (declare-output Y Real [1, 2])
+)
+(assert (<= Y[0,0] 10.0))
+""")
+            patches = self._config(path)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(
+                        attack_utils_module, 'default_adv_verifier',
+                        return_value=True), \
+                    patch.object(
+                        attack_utils_module, '_save_vnnlib2_assignment',
+                        wraps=attack_utils_module._save_vnnlib2_assignment
+                    ) as mock_assignment:
+                status, success = check_and_save_cex(
+                    torch.tensor([[1.0, 2.0, 3.0]]),
+                    torch.tensor([[4.0, 5.0]]),
+                    vnnlib, path, 'unsafe')
+
+            self.assertEqual(status, 'unsafe')
+            self.assertTrue(success)
+            mock_assignment.assert_called_once()
+            with open(path, encoding='utf-8') as cex_file:
+                lines = cex_file.read().splitlines()
+            self.assertEqual(lines, [
+                'sat',
+                'X1 real [1, 2]',
+                '1',
+                '2',
+                'X2 real [1, 1]',
+                '3',
+                'Y real [1, 2]',
+                '4',
+                '5',
+            ])
+
+    def test_vnnlib2_assignment_reconstructs_shared_inputs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            vnnlib = self._vnnlib2(temp_dir, """
+(vnnlib-version <2.0>)
+(declare-network f
+  (declare-input X_f Real [1])
+  (declare-output Y_f Real [1])
+)
+(declare-network g
+  (equal-to f)
+  (declare-input X_g Real [1])
+  (declare-output Y_g Real [1])
+)
+(assert (and (>= X_f[0] 0.0) (<= X_f[0] 1.0)))
+(assert (== X_f[0] X_g[0]))
+(assert (<= Y_f[0] Y_g[0]))
+""")
+            self.assertEqual(vnnlib.metadata.input_index_map, [0, 0])
+            patches = self._config(path)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(
+                        attack_utils_module, 'default_adv_verifier',
+                        return_value=True):
+                status, success = check_and_save_cex(
+                    torch.tensor([[7.0]]),
+                    torch.tensor([[11.0, 13.0]]),
+                    vnnlib, path, 'unsafe')
+
+            self.assertEqual(status, 'unsafe')
+            self.assertTrue(success)
+            with open(path, encoding='utf-8') as cex_file:
+                lines = cex_file.read().splitlines()
+            self.assertEqual(lines, [
+                'sat',
+                'X_f real [1]',
+                '7',
+                'Y_f real [1]',
+                '11',
+                'X_g real [1]',
+                '7',
+                'Y_g real [1]',
+                '13',
+            ])
+
+    def test_vnnlib2_eval_adv_example_skips_external_checker(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            vnnlib = self._vnnlib2(temp_dir, """
+(vnnlib-version <2.0>)
+(declare-network f
+  (declare-input X Real [1])
+  (declare-output Y Real [1])
+)
+(assert (<= Y[0] 0.0))
+""")
+            patches = self._config(path, eval_adv_example=True)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(
+                        attack_utils_module, 'default_adv_verifier',
+                        return_value=True), \
+                    patch.object(
+                        attack_utils_module.subprocess, 'run') as mock_run:
+                status, success = check_and_save_cex(
+                    torch.tensor([[0.5]]),
+                    torch.tensor([[-1.0]]),
+                    vnnlib, path, 'unsafe')
+
+            self.assertEqual(status, 'unsafe')
+            self.assertTrue(success)
+            mock_run.assert_not_called()
+
+    def test_onnxruntime_spec_check_rejects_nonviolating_cex(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            patches = self._config(path, verify_onnxruntime_output=True)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(
+                        attack_utils_module, 'inference_onnx',
+                        return_value=np.array([[1.0]], dtype=np.float32)):
+                status, success = check_and_save_cex(
+                    torch.tensor([[0.5]]), torch.tensor([[0.0]]),
+                    self._vnnlib(), path, 'unsafe')
+
+            self.assertEqual(status, 'unknown')
+            self.assertFalse(success)
+            self.assertFalse(os.path.exists(path))
+
+    def test_onnxruntime_spec_check_accepts_violating_cex(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            patches = self._config(path, verify_onnxruntime_output=True)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(
+                        attack_utils_module, 'inference_onnx',
+                        return_value=np.array([[-0.5]], dtype=np.float32)):
+                status, success = check_and_save_cex(
+                    torch.tensor([[0.5]]), torch.tensor([[0.0]]),
+                    self._vnnlib(), path, 'unsafe')
+
+            self.assertEqual(status, 'unsafe')
+            self.assertTrue(success)
+            self.assertTrue(os.path.exists(path))
+
+    def test_vnnlib2_rejects_onnx_replay_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            property_path = os.path.join(temp_dir, 'property.vnnlib')
+            vnnlib = self._vnnlib2(temp_dir, """
+(vnnlib-version <2.0>)
+(declare-network f
+  (declare-input X Real [1])
+  (declare-output Y Real [1])
+)
+(assert (> Y[0] 0.0))
+""")
+            patches = self._config(
+                path, verify_onnxruntime_output=True,
+                vnnlib_path=property_path)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(
+                        attack_utils_module, 'inference_onnx',
+                        return_value=np.array([[-1.0]], dtype=np.float32)):
+                status, success = check_and_save_cex(
+                    torch.tensor([[0.5]]),
+                    torch.tensor([[1.0]]),
+                    vnnlib, path, 'unsafe')
+
+            self.assertEqual(status, 'unknown')
+            self.assertFalse(success)
+            self.assertFalse(os.path.exists(path))
+
+    def test_vnnlib2_onnx_replay_supports_multiple_networks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            property_path = os.path.join(temp_dir, 'property.vnnlib')
+            vnnlib = self._vnnlib2(temp_dir, """
+(vnnlib-version <2.0>)
+(declare-network f
+  (declare-input X_f Real [1])
+  (declare-output Y_f Real [1])
+)
+(declare-network g
+  (declare-input X_g Real [1])
+  (declare-output Y_g Real [1])
+)
+(assert (== X_f[0] X_g[0]))
+(assert (> Y_g[0] (+ Y_f[0] 0.05)))
+""")
+            vnnlib.metadata.network_paths = {
+                'f': 'f.onnx',
+                'g': 'g.onnx',
+            }
+
+            def inference(path, inputs):
+                np.testing.assert_allclose(inputs, np.array([0.5]))
+                return np.array([0.0 if path == 'f.onnx' else 0.1])
+
+            patches = self._config(
+                path, verify_onnxruntime_output=True,
+                onnx_path=None, vnnlib_path=property_path)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(
+                        attack_utils_module, 'inference_onnx',
+                        side_effect=inference) as replay:
+                status, success = check_and_save_cex(
+                    torch.tensor([[0.5]]),
+                    torch.tensor([[0.0, 0.1]]),
+                    vnnlib, path, 'unsafe')
+
+            self.assertEqual(status, 'unsafe')
+            self.assertTrue(success)
+            self.assertTrue(os.path.exists(path))
+            self.assertEqual(
+                [call.args[0] for call in replay.call_args_list],
+                ['f.onnx', 'g.onnx'])
+
+    def test_vnnlib2_onnx_replay_rejects_invalid_multiple_network_cex(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            property_path = os.path.join(temp_dir, 'property.vnnlib')
+            vnnlib = self._vnnlib2(temp_dir, """
+(vnnlib-version <2.0>)
+(declare-network f
+  (declare-input X_f Real [1])
+  (declare-output Y_f Real [1])
+)
+(declare-network g
+  (declare-input X_g Real [1])
+  (declare-output Y_g Real [1])
+)
+(assert (== X_f[0] X_g[0]))
+(assert (> Y_g[0] (+ Y_f[0] 0.05)))
+""")
+            vnnlib.metadata.network_paths = {
+                'f': 'f.onnx',
+                'g': 'g.onnx',
+            }
+
+            def inference(path, inputs):
+                del inputs
+                return np.array([0.0 if path == 'f.onnx' else 0.01])
+
+            patches = self._config(
+                path, verify_onnxruntime_output=True,
+                onnx_path=None, vnnlib_path=property_path)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(
+                        attack_utils_module, 'inference_onnx',
+                        side_effect=inference):
+                status, success = check_and_save_cex(
+                    torch.tensor([[0.5]]),
+                    torch.tensor([[0.0, 0.1]]),
+                    vnnlib, path, 'unsafe')
+
+            self.assertEqual(status, 'unknown')
+            self.assertFalse(success)
+            self.assertFalse(os.path.exists(path))
+
+    def test_external_validation_failure_raises(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            patches = self._config(path, eval_adv_example=True)
+            error = attack_utils_module.subprocess.CalledProcessError(
+                1, ['check_counterexample.py'])
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch.object(
+                        attack_utils_module.subprocess, 'run',
+                        side_effect=error) as mock_run:
+                with self.assertRaises(
+                        attack_utils_module.subprocess.CalledProcessError):
+                    check_and_save_cex(
+                        torch.tensor([[0.5]]), torch.tensor([[0.0]]),
+                        self._vnnlib(), path, 'unsafe')
+
+            self.assertEqual(mock_run.call_count, 1)
+
+    def test_saver_failure_raises(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, 'cex.txt')
+            patches = self._config(path)
+            with patches[0], patches[1], patches[2], patches[3], \
+                    patch(
+                        'attack.attack_utils.default_adv_saver',
+                        side_effect=OSError('write failed')):
+                with self.assertRaisesRegex(OSError, 'write failed'):
+                    check_and_save_cex(
+                        torch.tensor([[0.5]]), torch.tensor([[0.0]]),
+                        self._vnnlib(), path, 'unsafe')
+
+
 class TestBoundaryAttack(unittest.TestCase):
     """Tests for boundary_attack function."""
 
@@ -288,17 +764,322 @@ class TestBoundaryAttack(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestAttackWithGeneralSpecs(unittest.TestCase):
+    """Tests for the top-level general-spec attack interface."""
+
+    def test_clean_input_invalid_candidate_runs_pgd(self):
+        from attack.attack_interface import attack_with_general_specs
+        import attack.general_spec_attack as general_spec_attack
+
+        model = nn.Linear(1, 1)
+        with torch.no_grad():
+            model.weight.zero_()
+            model.bias.fill_(0.5)
+
+        config = {
+            'specification': {'norm': float('inf')},
+            'attack': {
+                'general_attack': True,
+                'pgd_alpha': 0.01,
+                'pgd_alpha_scale': False,
+                'pgd_restarts': 1,
+                'pgd_batch_size': 1,
+                'pgd_steps': 1,
+                'attack_tolerance': 0.0,
+                'adv_example_finalizer': 'default_adv_example_finalizer',
+            },
+            'bab': {'attack': {'enabled': False}},
+        }
+        pgd_result = PGDAttackResult(
+            attack_success=torch.tensor([False]),
+            best_or_idx=torch.tensor([0]),
+            adv_input_per_or=torch.tensor([[[0.25]]]),
+            adv_output_per_or=torch.tensor([[[0.4]]]),
+            adv_margin_per_or=torch.tensor([[0.1]]),
+            adv_input_best=torch.tensor([[0.25]]),
+            adv_output_best=torch.tensor([[0.4]]),
+            adv_margin_best=torch.tensor([0.1]),
+            adv_margin_per_spec=torch.tensor([[0.1]]),
+            adv_input_all=None,
+        )
+        vnnlib = [([[0.0, 1.0]], [])]
+
+        with patch('arguments.Config', config), \
+                patch.object(
+                    general_spec_attack, 'pgd_attack_with_general_specs',
+                    return_value=pgd_result) as pgd_attack, \
+                patch(
+                    'attack.attack_utils.is_valid_attack_counterexample',
+                    return_value=False) as validator:
+            result = attack_with_general_specs(
+                model,
+                torch.tensor([[0.25]]),
+                torch.tensor([[0.0]]),
+                torch.tensor([[1.0]]),
+                torch.tensor([[-1.0]]),
+                torch.tensor([-0.5]),
+                torch.tensor([1]),
+                vnnlib=vnnlib,
+            )
+
+        self.assertFalse(result[0].all())
+        self.assertEqual(validator.call_count, 1)
+        pgd_attack.assert_called_once()
+        self.assertIs(pgd_attack.call_args.kwargs['vnnlib'], vnnlib)
+
+    def test_clean_input_uses_other_valid_or_candidate(self):
+        from attack.attack_interface import attack_with_general_specs
+        import attack.general_spec_attack as general_spec_attack
+
+        model = nn.Linear(1, 1)
+        with torch.no_grad():
+            model.weight.zero_()
+            model.bias.fill_(0.5)
+
+        config = {
+            'specification': {'norm': float('inf')},
+            'attack': {
+                'general_attack': True,
+                'pgd_alpha': 0.01,
+                'pgd_alpha_scale': False,
+                'pgd_restarts': 1,
+                'pgd_batch_size': 1,
+                'pgd_steps': 1,
+                'attack_tolerance': 0.0,
+                'adv_example_finalizer': 'default_adv_example_finalizer',
+            },
+            'bab': {'attack': {'enabled': False}},
+        }
+        vnnlib = [([[0.0, 1.0]], [])]
+
+        with patch('arguments.Config', config), \
+                patch.object(
+                    general_spec_attack, 'pgd_attack_with_general_specs'
+                ) as pgd_attack, \
+                patch(
+                    'attack.attack_utils.is_valid_attack_counterexample',
+                    side_effect=[False, True]) as validator:
+            result = attack_with_general_specs(
+                model,
+                torch.tensor([[0.25], [0.75]]),
+                torch.tensor([[0.0], [0.0]]),
+                torch.tensor([[1.0], [1.0]]),
+                torch.tensor([[-1.0], [-1.0]]),
+                torch.tensor([-0.3, -0.4]),
+                torch.tensor([1, 1]),
+                vnnlib=vnnlib,
+            )
+
+        self.assertTrue(result[0].all())
+        self.assertEqual(result[1].item(), 1)
+        self.assertEqual(validator.call_count, 2)
+        pgd_attack.assert_not_called()
+
+    def test_invalid_pgd_batch_candidate_continues_restarts(self):
+        from attack.attack_interface import attack_with_general_specs
+        import attack.general_spec_attack as general_spec_attack
+
+        model = nn.Linear(1, 1)
+        with torch.no_grad():
+            model.weight.zero_()
+            model.bias.fill_(0.5)
+
+        config = {
+            'specification': {'norm': float('inf')},
+            'attack': {
+                'general_attack': True,
+                'pgd_alpha': 0.01,
+                'pgd_alpha_scale': False,
+                'pgd_restarts': 2,
+                'pgd_batch_size': 1,
+                'pgd_steps': 1,
+                'attack_tolerance': 0.0,
+                'adv_example_finalizer': 'default_adv_example_finalizer',
+            },
+            'bab': {'attack': {'enabled': False}},
+        }
+        invalid_result = PGDAttackResult(
+            attack_success=torch.tensor([True]),
+            best_or_idx=torch.tensor([0]),
+            adv_input_per_or=torch.tensor([[[0.0]]]),
+            adv_output_per_or=torch.tensor([[[-1.0]]]),
+            adv_margin_per_or=torch.tensor([[-1.0]]),
+            adv_input_best=torch.tensor([[0.0]]),
+            adv_output_best=torch.tensor([[-1.0]]),
+            adv_margin_best=torch.tensor([-1.0]),
+            adv_margin_per_spec=torch.tensor([[-1.0]]),
+            adv_input_all=None,
+        )
+        valid_result = PGDAttackResult(
+            attack_success=torch.tensor([True]),
+            best_or_idx=torch.tensor([0]),
+            adv_input_per_or=torch.tensor([[[0.25]]]),
+            adv_output_per_or=torch.tensor([[[-0.5]]]),
+            adv_margin_per_or=torch.tensor([[-0.5]]),
+            adv_input_best=torch.tensor([[0.25]]),
+            adv_output_best=torch.tensor([[-0.5]]),
+            adv_margin_best=torch.tensor([-0.5]),
+            adv_margin_per_spec=torch.tensor([[-0.5]]),
+            adv_input_all=None,
+        )
+        vnnlib = [([[0.0, 1.0]], [])]
+
+        with patch('arguments.Config', config), \
+                patch.object(
+                    general_spec_attack, 'pgd_attack_with_general_specs',
+                    side_effect=[invalid_result, valid_result]) as pgd_attack, \
+                patch(
+                    'attack.attack_utils.is_valid_attack_counterexample',
+                    side_effect=[False, True]) as validator:
+            result = attack_with_general_specs(
+                model,
+                torch.tensor([[0.25]]),
+                torch.tensor([[0.0]]),
+                torch.tensor([[1.0]]),
+                torch.tensor([[-1.0]]),
+                torch.tensor([-0.6]),
+                torch.tensor([1]),
+                vnnlib=vnnlib,
+            )
+
+        self.assertTrue(result[0].all())
+        self.assertEqual(validator.call_count, 2)
+        self.assertEqual(pgd_attack.call_count, 2)
+
+
 class TestDefaultAdvVerifier(unittest.TestCase):
     """Tests for default_adv_verifier function."""
 
-    def test_without_vnnlib_returns_true(self):
-        """Test verifier returns True without vnnlib."""
+    def test_gtrsb_onnxruntime_counterexample_conversion(self):
+        """GTSRB ONNX checks use NHWC inputs and Softmax outputs."""
+        from custom.custom_adv_verifier import (
+            prepare_gtrsb_onnxruntime_counterexample)
+
+        adv_input = torch.arange(
+            2 * 3 * 4 * 5, dtype=torch.float32).reshape(2, 3, 4, 5)
+        logits = torch.tensor([[1.0, 2.0, -1.0]], dtype=torch.float32)
+
+        onnx_input, onnx_output = prepare_gtrsb_onnxruntime_counterexample(
+            adv_input, logits)
+
+        self.assertEqual(tuple(onnx_input.shape), (2, 4, 5, 3))
+        self.assertTrue(onnx_input.is_contiguous())
+        self.assertTrue(torch.equal(onnx_input[0, :, :, 0], adv_input[0, 0]))
+        self.assertTrue(torch.allclose(
+            onnx_output, torch.nn.functional.softmax(logits, dim=1)))
+
+    def test_requires_vnnlib(self):
+        """default_adv_verifier validates specs and requires a vnnlib."""
         adv_input = torch.randn(1, 10)
         adv_output = torch.randn(1, 5)
 
-        result = default_adv_verifier(adv_input, adv_output, vnnlib=None)
+        with self.assertRaisesRegex(ValueError, 'requires a vnnlib'):
+            default_adv_verifier(adv_input, adv_output, vnnlib=None)
+
+    def test_output_consistency_helper_requires_onnx_path(self):
+        """Legacy output comparison raises when no ONNX path exists."""
+        adv_input = torch.randn(1, 10)
+        adv_output = torch.randn(1, 5)
+        old_path = arguments.Config['model']['onnx_path']
+        arguments.Config['model']['onnx_path'] = None
+        try:
+            with patch('attack.attack_utils.inference_onnx') as check:
+                with self.assertRaisesRegex(
+                        RuntimeError, 'requires a single ONNX'):
+                    verify_onnxruntime_output_matches_pytorch(
+                        adv_input, adv_output)
+        finally:
+            arguments.Config['model']['onnx_path'] = old_path
+
+        check.assert_not_called()
+
+    def test_uses_onnx_output_for_vnnlib1_spec_check(self):
+        """ONNX output, not PyTorch output closeness, decides VNN-LIB 1 specs."""
+        adv_input = torch.tensor([[0.5]])
+        adv_output = torch.tensor([[1.0]])
+        vnnlib = [(
+            np.array([[0.0, 1.0]]),
+            [(np.array([[1.0]]), np.array([0.0]))],
+        )]
+        old_path = arguments.Config['model']['onnx_path']
+        arguments.Config['model']['onnx_path'] = 'model.onnx'
+        try:
+            with patch(
+                    'attack.attack_utils.inference_onnx',
+                    return_value=np.array([[-1.0]], dtype=np.float32)):
+                result = default_adv_verifier(
+                    adv_input, adv_output, vnnlib=vnnlib,
+                    verify_with_onnxruntime=True)
+        finally:
+            arguments.Config['model']['onnx_path'] = old_path
 
         self.assertTrue(result)
+
+    def test_rejects_vnnlib1_when_onnx_output_does_not_violate_spec(self):
+        """A PyTorch-only violation is not enough when ONNX checking is on."""
+        adv_input = torch.tensor([[0.5]])
+        adv_output = torch.tensor([[-1.0]])
+        vnnlib = [(
+            np.array([[0.0, 1.0]]),
+            [(np.array([[1.0]]), np.array([0.0]))],
+        )]
+        old_path = arguments.Config['model']['onnx_path']
+        arguments.Config['model']['onnx_path'] = 'model.onnx'
+        try:
+            with patch(
+                    'attack.attack_utils.inference_onnx',
+                    return_value=np.array([[1.0]], dtype=np.float32)):
+                result = default_adv_verifier(
+                    adv_input, adv_output, vnnlib=vnnlib,
+                    verify_with_onnxruntime=True)
+        finally:
+            arguments.Config['model']['onnx_path'] = old_path
+
+        self.assertFalse(result)
+
+    def test_onnxruntime_batch_validation_preserves_input_shape(self):
+        """Batched attack candidate checks keep model input shape for ONNX."""
+        adv_input = torch.full((1, 1, 1, 3, 4, 5), 0.5)
+        adv_output = torch.tensor([[[[-1.0]]]])
+        input_box = np.array([[0.0, 1.0]] * 60)
+        vnnlib = [(input_box, [(np.array([[1.0]]), np.array([0.0]))])]
+
+        old_path = arguments.Config['model']['onnx_path']
+        arguments.Config['model']['onnx_path'] = 'model.onnx'
+        try:
+            def fake_inference_onnx(path, onnx_input):
+                self.assertEqual(path, 'model.onnx')
+                self.assertEqual(onnx_input.shape, (1, 3, 4, 5))
+                return np.array([[-1.0]], dtype=np.float32)
+
+            with patch(
+                    'attack.attack_utils.inference_onnx',
+                    side_effect=fake_inference_onnx):
+                result = attack_utils_module.are_attack_counterexamples_valid(
+                    adv_input, adv_output, vnnlib,
+                    verify_with_onnxruntime=True)
+        finally:
+            arguments.Config['model']['onnx_path'] = old_path
+
+        self.assertTrue(result)
+
+    def test_onnxruntime_spec_check_requires_onnx_path(self):
+        """ONNX validation must not fall back when no ONNX path is available."""
+        adv_input = torch.tensor([[0.5]])
+        adv_output = torch.tensor([[-1.0]])
+        vnnlib = [(
+            np.array([[0.0, 1.0]]),
+            [(np.array([[1.0]]), np.array([0.0]))],
+        )]
+        old_path = arguments.Config['model']['onnx_path']
+        arguments.Config['model']['onnx_path'] = None
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'requires a single ONNX'):
+                default_adv_verifier(
+                    adv_input, adv_output, vnnlib=vnnlib,
+                    verify_with_onnxruntime=True)
+        finally:
+            arguments.Config['model']['onnx_path'] = old_path
 
 
 class TestIsSpecificationVio(unittest.TestCase):
@@ -317,8 +1098,10 @@ class TestIsSpecificationVio(unittest.TestCase):
         expected_y = torch.tensor([-0.5, 0.0, 0.0, 0.0, 0.0])  # y[0] = -0.5 < 0, violates y[0] <= 0? No, satisfies.
 
         # Actually, is_specification_vio checks if ANY spec in spec_list is SAT (violated from verifier perspective)
-        # If vec = mat @ y <= rhs + tol, then sat=True, meaning the spec is violated (adversarial found)
-        result = is_specification_vio(box_spec_list, x_list, expected_y, tol=1e-4)
+        # If vec = mat @ y <= rhs + output_tol, then sat=True,
+        # meaning the spec is violated (adversarial found).
+        result = is_specification_vio(
+            box_spec_list, x_list, expected_y, tol=CEX_INPUT_TOLERANCE)
 
         self.assertTrue(result)  # Spec is satisfied (attacked successfully)
 
@@ -333,7 +1116,8 @@ class TestIsSpecificationVio(unittest.TestCase):
         x_list = torch.tensor([0.5] * 5)
         expected_y = torch.tensor([0.5, 0.0, 0.0, 0.0, 0.0])  # y[0] = 0.5 > -1.0, does not satisfy
 
-        result = is_specification_vio(box_spec_list, x_list, expected_y, tol=1e-4)
+        result = is_specification_vio(
+            box_spec_list, x_list, expected_y, tol=CEX_INPUT_TOLERANCE)
 
         self.assertFalse(result)
 
@@ -348,7 +1132,8 @@ class TestIsSpecificationVio(unittest.TestCase):
         x_list = torch.tensor([0.5] * 5)  # Outside the box
         expected_y = torch.tensor([-0.5, 0.0, 0.0, 0.0, 0.0])
 
-        result = is_specification_vio(box_spec_list, x_list, expected_y, tol=1e-4)
+        result = is_specification_vio(
+            box_spec_list, x_list, expected_y, tol=CEX_INPUT_TOLERANCE)
 
         self.assertFalse(result)  # Input outside box, so no violation found
 

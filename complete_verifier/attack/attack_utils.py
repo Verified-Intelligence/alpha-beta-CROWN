@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 
@@ -25,9 +25,10 @@ from typing import Optional
 from string import Template
 
 import arguments
+from cex_validation import CEX_INPUT_TOLERANCE, CEX_OUTPUT_TOLERANCE
 from load_model import inference_onnx, Customized
 from auto_LiRPA import BoundedTensor
-from utils import unpad_to_list_of_tensors, expand_batch
+from utils import unpad_to_list_of_tensors, expand_batch, assert_allowed_caller
 
 class Stats:
     def __init__(self):
@@ -52,6 +53,8 @@ class Stats:
         self.num_steps += steps
 
 stats = Stats()
+
+
 def reset_attack_stats():
     if arguments.Config['attack']['pgd_order'] != 'skip':
         stats.reset()
@@ -123,6 +126,94 @@ class PGDAttackResult:
     adv_input_all: Optional[torch.Tensor] = None
 
 
+def _has_open_constraints(strictness) -> bool:
+    """Return whether any lowered entry has open input or spec constraints."""
+    if strictness is None:
+        return False
+    for branch in strictness:
+        if bool(branch.input_lower.any()) or bool(branch.input_upper.any()):
+            return True
+        if any(bool(spec.any()) for spec in branch.specs):
+            return True
+    return False
+
+
+def _inside_open_aware_box(x, input_box, branch_strictness, tol):
+    """Check a flattened input against closed and open box bounds."""
+    box = torch.tensor(input_box, dtype=x.dtype, device=x.device)
+    lower, upper = box[:, 0], box[:, 1]
+    lower_strict = torch.as_tensor(
+        branch_strictness.input_lower, dtype=torch.bool, device=x.device)
+    upper_strict = torch.as_tensor(
+        branch_strictness.input_upper, dtype=torch.bool, device=x.device)
+
+    if x.numel() != lower.numel():
+        return False
+    closed_lower = x >= lower - tol
+    closed_upper = x <= upper + tol
+    strict_lower = x > lower
+    strict_upper = x < upper
+    # Strict masks select the bounds that exclude equality.
+    lower_ok = torch.where(lower_strict, strict_lower, closed_lower).all()
+    upper_ok = torch.where(upper_strict, strict_upper, closed_upper).all()
+    return bool((lower_ok & upper_ok).item())
+
+
+def _satisfies_open_aware_spec(y, spec, spec_strictness, output_tol):
+    """Check one AND spec with per-row open-constraint metadata."""
+    mat, rhs = spec
+    mat = torch.tensor(mat, dtype=y.dtype, device=y.device)
+    rhs = torch.tensor(rhs, dtype=y.dtype, device=y.device)
+    strict = torch.as_tensor(
+        spec_strictness, dtype=torch.bool, device=y.device)
+
+    if mat.shape[-1] != y.numel() or rhs.numel() != mat.shape[0]:
+        return False
+    value = torch.matmul(mat, y)
+    closed_rows = value <= rhs + output_tol
+    strict_rows = value < rhs
+    # Each row is an AND constraint. Strict rows reject equality-boundary
+    # counterexamples, while closed rows use the configured output tolerance.
+    return bool(torch.where(strict, strict_rows, closed_rows).all().item())
+
+
+def satisfies_open_constraints(
+        adv_input, adv_output, vnnlib,
+        input_tol=CEX_INPUT_TOLERANCE,
+        output_tol=CEX_OUTPUT_TOLERANCE):
+    """Check open-bound metadata at the counterexample boundary.
+
+    The lowered vnnlib keeps the normal verifier structure:
+
+    * entries are OR branches over input boxes;
+    * each entry contains OR alternatives in ``spec_list``;
+    * rows within each spec matrix are AND constraints.
+
+    Strictness metadata selects the rows and input bounds that must be checked
+    as open inequalities.
+    """
+    metadata = getattr(vnnlib, "metadata", None)
+    strictness = getattr(metadata, "strictness", None)
+    if not _has_open_constraints(strictness):
+        return True
+
+    x = adv_input.view(-1)
+    y = adv_output.view(-1)
+    assert len(vnnlib) == len(strictness)
+
+    for (input_box, spec_list), branch_strictness in zip(
+            vnnlib, strictness):
+        if not _inside_open_aware_box(
+                x, input_box, branch_strictness, input_tol):
+            continue
+        assert len(spec_list) == len(branch_strictness.specs)
+        for spec, spec_strictness in zip(spec_list, branch_strictness.specs):
+            if _satisfies_open_aware_spec(
+                    y, spec, spec_strictness, output_tol):
+                return True
+    return False
+
+
 def check_and_save_cex(adv_input, adv_output, vnnlib, res_path, expected_verified_status):
     """
     adv_input: [batch_size, *input_shape]
@@ -137,46 +228,259 @@ def check_and_save_cex(adv_input, adv_output, vnnlib, res_path, expected_verifie
 
     verified_status = expected_verified_status
     verified_success = True
+    saved_adv_example = False
+    metadata = getattr(vnnlib, "metadata", None)
+
+    if not satisfies_open_constraints(adv_input, adv_output, vnnlib):
+        print('WARNING: Counterexample does not satisfy open constraints.')
+        return 'unknown', False
 
     if arguments.Globals['example_idx'] >= 0:
         res_path = Template(res_path).substitute(IDX=arguments.Globals['example_idx'])
 
     if arguments.Config['general']['save_adv_example']:
+        verify_with_onnxruntime = arguments.Config[
+            'general']['verify_onnxruntime_output']
         if eval(arguments.Config['attack']['adv_verifier'])(adv_input, adv_output, vnnlib,
-                                                            arguments.Config['general']['verify_onnxruntime_output']):
-            try:
-                print('Saving counterexample to', os.path.abspath(res_path))
-                eval(arguments.Config['attack']['adv_saver'])(adv_input, adv_output, res_path)
-                verified_status = expected_verified_status
-                verified_success = True
-            except Exception as e:
-                print(str(e))
-                print('save adv example failed')
-                verified_status = 'unknown'
-                verified_success = False
+                                                            verify_with_onnxruntime):
+            print('Saving counterexample to', os.path.abspath(res_path))
+            adv_saver = eval(arguments.Config['attack']['adv_saver'])
+            adv_saver(adv_input, adv_output, res_path, vnnlib=vnnlib)
+            verified_status = expected_verified_status
+            verified_success = True
+            saved_adv_example = True
         else:
             verified_status = 'unknown'
             verified_success = False
 
     if arguments.Config['general']['eval_adv_example']:
-        onnx_path = arguments.Config['model']['onnx_path']
-        vnnlib_path = arguments.Config['specification']['vnnlib_path']
-
-        onnx_path = os.path.join(os.getcwd(), onnx_path)
-        vnnlib_path = os.path.join(os.getcwd(), vnnlib_path)
-        current_dir = os.path.dirname(__file__)
-        script_path = os.path.join(current_dir, '../', 'check_counterexample.py')
-
-        try:
-            subprocess.run([sys.executable, script_path, onnx_path, vnnlib_path, res_path], check=True)
-        except subprocess.CalledProcessError:
-            print('Unexpected error in checking adv example')
+        if saved_adv_example:
+            _run_external_cex_validation(res_path, metadata)
+        else:
+            raise RuntimeError(
+                "External counterexample validation requires a saved "
+                "counterexample file.")
 
     if arguments.Config['general']['show_adv_example']:
         print('Adv example:')
         print(adv_input[0])
     print()
     return verified_status, verified_success
+
+
+def validate_counterexample_with_onnxruntime(adv_input, vnnlib):
+    """Check a candidate counterexample using ONNXRuntime output."""
+    metadata = getattr(vnnlib, "metadata", None)
+    if metadata is not None:
+        return _vnnlib2_onnx_replay_counterexample_valid(adv_input, metadata)
+
+    onnx_path = _onnx_path_for_validation(
+        'ONNXRuntime counterexample validation', required=True)
+
+    try:
+        onnx_output = inference_onnx(
+            onnx_path, adv_input.detach().cpu().numpy())
+    except Exception as e:
+        raise RuntimeError(
+            f'ONNXRuntime counterexample validation failed: {e}') from e
+
+    onnx_spec_output = torch.as_tensor(
+        onnx_output, dtype=adv_input.dtype,
+        device=adv_input.device).reshape(1, -1)
+
+    return is_specification_vio(
+        vnnlib, adv_input.view(-1), onnx_spec_output.view(-1),
+        tol=CEX_INPUT_TOLERANCE, output_tol=CEX_OUTPUT_TOLERANCE)
+
+
+def _vnnlib2_assertion_holds(expr, assignment):
+    """Evaluate one original VNN-LIB 2.0 assertion under concrete values."""
+    def arithmetic_value(node):
+        node_type = type(node).__name__
+        if node_type == "Var":
+            return assignment[node.name][tuple(node.indices)]
+        if node_type in ("Float", "Int", "IntExpr"):
+            return node.value
+        if node_type == "Literal":
+            return float(node.lexeme)
+        if node_type == "Negate":
+            return -arithmetic_value(node.expr)
+        if node_type == "Plus":
+            return sum(arithmetic_value(arg) for arg in node.args)
+        if node_type == "Minus":
+            value = arithmetic_value(node.head)
+            return value - sum(arithmetic_value(arg) for arg in node.rest)
+        if node_type == "Multiply":
+            return math.prod(arithmetic_value(arg) for arg in node.args)
+        raise NotImplementedError(
+            f'Unsupported VNN-LIB 2.0 expression {node_type}')
+
+    def boolean_value(node):
+        node_type = type(node).__name__
+        if node_type == "And":
+            return all(boolean_value(arg) for arg in node.args)
+        if node_type == "Or":
+            return any(boolean_value(arg) for arg in node.args)
+
+        lhs = arithmetic_value(node.lhs)
+        rhs = arithmetic_value(node.rhs)
+        if node_type == "GreaterThan":
+            return lhs > rhs
+        if node_type == "LessThan":
+            return lhs < rhs
+        if node_type == "GreaterEqual":
+            return lhs >= rhs
+        if node_type == "LessEqual":
+            return lhs <= rhs
+        if node_type == "Equal":
+            return lhs == rhs
+        if node_type == "NotEqual":
+            return lhs != rhs
+        raise NotImplementedError(
+            f'Unsupported VNN-LIB 2.0 expression {node_type}')
+
+    return boolean_value(expr)
+
+
+def _vnnlib2_onnx_replay_counterexample_valid(adv_input, metadata):
+    """Validate VNN-LIB 2.0 cex candidates against original ONNX execution."""
+    vnnlib_path = arguments.Config["specification"]["vnnlib_path"]
+    if vnnlib_path is None:
+        raise RuntimeError(
+            'VNN-LIB 2.0 ONNX replay requires a VNNLIB path.')
+    network_paths = getattr(metadata, "network_paths", None) or {}
+    if not network_paths:
+        onnx_path = arguments.Config["model"]["onnx_path"]
+        if onnx_path is None:
+            raise RuntimeError(
+                'VNN-LIB 2.0 ONNX replay requires ONNX paths.')
+        if len(metadata.networks) != 1:
+            raise RuntimeError(
+                'VNN-LIB 2.0 ONNX replay for multiple networks requires '
+                'named ONNX paths.')
+        network_paths = {metadata.networks[0].name: onnx_path}
+
+    try:
+        import vnnlib as vnnlib_parser  # pylint: disable=import-outside-toplevel
+
+        flat_input = adv_input.detach().cpu().reshape(-1).numpy()
+        input_index_map = np.asarray(metadata.input_index_map, dtype=np.int64)
+        assignment = {}
+        for network in metadata.networks:
+            onnx_path = network_paths.get(network.name)
+            if (onnx_path is None and network.relation
+                    and network.relation[0] == 'equal-to'):
+                onnx_path = network_paths.get(network.relation[1])
+            if onnx_path is None:
+                raise RuntimeError(
+                    f'Missing ONNX path for VNN-LIB network {network.name}.')
+            if len(network.outputs) != 1:
+                raise RuntimeError(
+                    'VNN-LIB 2.0 ONNX replay does not support multiple '
+                    f'outputs for network {network.name}.')
+
+            onnx_inputs = []
+            for decl in network.inputs:
+                indices = input_index_map[decl.offset:decl.offset + decl.size]
+                value = flat_input[indices].reshape(decl.shape)
+                assignment[decl.name] = value
+                onnx_inputs.append(value)
+
+            if len(onnx_inputs) == 1:
+                onnx_inputs = onnx_inputs[0]
+            onnx_output = inference_onnx(onnx_path, onnx_inputs).reshape(-1)
+            output_decl = network.outputs[0]
+            if onnx_output.size != output_decl.size:
+                raise RuntimeError(
+                    f'ONNX output for VNN-LIB network {network.name} has '
+                    f'{onnx_output.size} values, expected {output_decl.size}.')
+            assignment[output_decl.name] = onnx_output.reshape(
+                output_decl.shape)
+
+        query = vnnlib_parser.parse_query_file(vnnlib_path)
+        for assertion_idx, assertion in enumerate(query.assertions):
+            if not _vnnlib2_assertion_holds(assertion.expr, assignment):
+                print('VNN-LIB 2.0 ONNX replay failed assertion '
+                      f'{assertion_idx}.')
+                return False
+    except Exception as error:
+        raise RuntimeError(
+            f'VNN-LIB 2.0 ONNX replay failed: {error}') from error
+    return True
+
+
+def _run_external_cex_validation(res_path, metadata=None):
+    if metadata is not None:
+        print(
+            'Skipping external counterexample validation: VNN-LIB 2.0 '
+            'assignment files are not supported by check_counterexample.py.')
+        return True
+
+    onnx_path = _onnx_path_for_validation('external counterexample validation')
+    vnnlib_path = arguments.Config['specification']['vnnlib_path']
+
+    if onnx_path is None:
+        return True
+
+    onnx_path = os.path.join(os.getcwd(), onnx_path)
+    vnnlib_path = os.path.join(os.getcwd(), vnnlib_path)
+    current_dir = os.path.dirname(__file__)
+    script_path = os.path.join(current_dir, '../', 'check_counterexample.py')
+
+    subprocess.run(
+        [sys.executable, script_path, onnx_path, vnnlib_path, res_path],
+        check=True)
+
+
+def is_valid_attack_counterexample(
+        adv_input, adv_output, vnnlib, verify_with_onnxruntime=False):
+    """Return whether one candidate passes concrete counterexample checks."""
+    if vnnlib is not None and not satisfies_open_constraints(
+            adv_input, adv_output, vnnlib):
+        return False
+    verify_with_onnxruntime = (
+        verify_with_onnxruntime
+        or arguments.Config['general']['verify_onnxruntime_output'])
+    return eval(arguments.Config['attack']['adv_verifier'])(
+        adv_input, adv_output, vnnlib, verify_with_onnxruntime)
+
+
+def are_attack_counterexamples_valid(
+        adv_input, adv_output, vnnlib, verify_with_onnxruntime=False):
+    """Return whether every candidate in a batch is a valid counterexample."""
+    if vnnlib is None:
+        return True
+
+    adv_input = adv_input.detach()
+    adv_output = adv_output.detach()
+    candidate_rank = adv_output.dim() - 1
+    adv_input = adv_input.reshape(-1, *adv_input.shape[candidate_rank:])
+    adv_output = adv_output.reshape(-1, adv_output.shape[-1])
+    for batch_idx in range(adv_input.shape[0]):
+        if not is_valid_attack_counterexample(
+                adv_input[batch_idx:batch_idx + 1],
+                adv_output[batch_idx:batch_idx + 1],
+                vnnlib, verify_with_onnxruntime=verify_with_onnxruntime):
+            return False
+    return True
+
+
+def invalid_attack_success_mask(
+        adv_input_per_or, adv_output_per_or, adv_margin_per_or, vnnlib,
+        attack_tolerance, verify_with_onnxruntime=False):
+    """Return successful OR candidates that fail concrete validation."""
+    success_mask = adv_margin_per_or <= attack_tolerance
+    invalid_mask = torch.zeros_like(success_mask, dtype=torch.bool)
+    if vnnlib is None or not success_mask.any():
+        return invalid_mask
+
+    for batch_idx, or_idx in success_mask.nonzero(as_tuple=False).tolist():
+        if not is_valid_attack_counterexample(
+                adv_input_per_or[batch_idx:batch_idx + 1, or_idx],
+                adv_output_per_or[batch_idx:batch_idx + 1, or_idx],
+                vnnlib, verify_with_onnxruntime=verify_with_onnxruntime):
+            invalid_mask[batch_idx, or_idx] = True
+    return invalid_mask
 
 
 class AdamClipping(Optimizer):
@@ -386,7 +690,7 @@ def boundary_attack(model, x, data_min, data_max):
     return adv_input.view(-1, *data_max.shape[1:])
 
 
-def default_adv_saver(adv_input, adv_output, res_path):
+def default_adv_saver(adv_input, adv_output, res_path, vnnlib=None):
     '''
     Saves an adversarial example and its corresponding outputs to a specified file in a
     format compatible with further analysis or validation processes.
@@ -396,70 +700,119 @@ def default_adv_saver(adv_input, adv_output, res_path):
     - adv_output: [1, num_output]
     - res_path: String specifying the path where the counter-example should be saved.
     '''
-    num_input = len(adv_input) if adv_input.ndim == 1 else np.prod(adv_input[0].shape)
-    num_output = adv_output.shape[1]
+    if not assert_allowed_caller(["check_and_save_cex"]):
+        raise RuntimeError(
+            "Adversarial example savers must be called through "
+            "check_and_save_cex().")
+    metadata = getattr(vnnlib, "metadata", None)
     adv_input = adv_input.detach().cpu().numpy()
     adv_output = adv_output.view(-1).detach().cpu().numpy()
     if arguments.Config['general']['onnx_adv_example']:
         # Inference using ONNX Runtime to get the output
-        onnx_path = arguments.Config["model"]["onnx_path"]
-        adv_output = inference_onnx(onnx_path, adv_input).flatten()
+        onnx_path = _onnx_path_for_validation('ONNX adversarial output')
+        if onnx_path is not None:
+            adv_output = inference_onnx(onnx_path, adv_input).flatten()
     adv_input = adv_input.flatten()
 
+    if metadata is not None:
+        _save_vnnlib2_assignment(adv_input, adv_output, res_path, metadata)
+        return
+    _save_vnnlib1_assignment(adv_input, adv_output, res_path)
+
+
+def _save_vnnlib1_assignment(flat_input, flat_output, res_path):
     if res_path.endswith(".pt"):
-        torch.save((adv_input, adv_output), res_path)
+        torch.save((flat_input, flat_output), res_path)
     else:
         with open(res_path, 'w+') as f:
             f.write("(")
-            for i in range(num_input):
-                f.write("(X_{}  {})\n".format(i, adv_input[i]))
-            f.write("(Y_{}  {})".format(0, adv_output[0]))
-            for j in range(1, num_output):
-                f.write("\n(Y_{}  {})".format(j, adv_output[j]))
+            for i, value in enumerate(flat_input):
+                f.write("(X_{}  {})\n".format(i, value))
+            f.write("(Y_{}  {})".format(0, flat_output[0]))
+            for j, value in enumerate(flat_output[1:], start=1):
+                f.write("\n(Y_{}  {})".format(j, value))
             f.write(")")
-            f.flush()
-
-    if arguments.Config["general"]["eval_adv_example"]:
-        onnx_path = arguments.Config["model"]["onnx_path"]
-        vnnlib_path = arguments.Config["specification"]["vnnlib_path"]
-
-        onnx_path = os.path.join(os.getcwd(), onnx_path)
-        vnnlib_path = os.path.join(os.getcwd(), vnnlib_path)
-        script_path = os.path.join('/'.join(__file__.split('/')[:-1]), '../', 'check_counterexample.py')
-
-        # print(onnx_path, vnnlib_path, script_path)
-        try:
-            subprocess.run([sys.executable, script_path, onnx_path, vnnlib_path, res_path], check=True)
-        except subprocess.CalledProcessError:
-            print('Unexpected error in checking adv example')
 
 
-def default_adv_verifier(adv_input, adv_output, vnnlib=None, check_output=False):
+def _save_vnnlib2_assignment(flat_input, flat_output, res_path, metadata):
+    def write_assignment_block(output_file, decl, values):
+        shape = ", ".join(str(dim) for dim in decl.shape)
+        output_file.write(f"{decl.name} real [{shape}]\n")
+        output_file.write("".join(f"{value:.17g}\n" for value in values))
+
+    input_index_map = np.asarray(metadata.input_index_map, dtype=np.int64)
+
+    with open(res_path, 'w+', encoding='utf-8') as output_file:
+        output_file.write("sat\n")
+        for network in metadata.networks:
+            for decl in network.inputs:
+                indices = input_index_map[decl.offset:decl.offset + decl.size]
+                write_assignment_block(output_file, decl, flat_input[indices])
+            for decl in network.outputs:
+                write_assignment_block(
+                    output_file, decl,
+                    flat_output[decl.offset:decl.offset + decl.size])
+
+
+def default_adv_verifier(
+        adv_input, adv_output, vnnlib,
+        verify_with_onnxruntime=False):
     """
     Do two kinds of check on counterexample:
 
-    1.check if the inference outptus are the same on both PyTorch and ONNXRuntime
-      (enabled when check_output is True)
-    2.check if the output satisfied spec conditions (enabled when inputting vnnlib)
+    1.check the counterexample with ONNXRuntime when
+      verify_with_onnxruntime is True.
+      VNN-LIB 2.0 has original assertions in addition to the verifier's
+      lowered spec. Replay the original ONNX model and evaluate those original
+      assertions, matching the scoring checker. For VNN-LIB 1.0, validate the
+      verifier's lowered spec with ONNXRuntime outputs.
+    2.check the verifier-computed output against the vnnlib spec. Saved
+      counterexample paths are expected to provide vnnlib.
 
     Args:
         adv_output: [1, *intput_shape]
         adv_input: [1, *input_shape]
     """
+    if vnnlib is None:
+        raise ValueError(
+            'default_adv_verifier requires a vnnlib specification. Use '
+            'verify_onnxruntime_output_matches_pytorch() for legacy output '
+            'consistency checks without a spec.')
+
     flatten_output = adv_output.view(-1)
-    onnx_adv_input = adv_input.cpu().numpy()
+    if verify_with_onnxruntime:
+        return validate_counterexample_with_onnxruntime(adv_input, vnnlib)
 
-    rel_tol = 1e-3
-    abs_tol = 1e-4
-    if check_output and not is_onnx_equal_to_pytorch_output(arguments.Config['model']['onnx_path'],
-                                                            onnx_adv_input,
-                                                            flatten_output.detach().cpu().numpy(), rel_tol):
-        return False
-
-    if vnnlib is not None and not is_specification_vio(vnnlib, adv_input.view(-1), flatten_output, abs_tol):
+    if not is_specification_vio(
+            vnnlib, adv_input.view(-1), flatten_output,
+            tol=CEX_INPUT_TOLERANCE, output_tol=CEX_OUTPUT_TOLERANCE):
         return False
 
     return True
+
+
+def verify_onnxruntime_output_matches_pytorch(
+        adv_input, adv_output, operation='ONNX Runtime output verification'):
+    """Legacy check for callers without a specification to validate."""
+    onnx_path = _onnx_path_for_validation(operation, required=True)
+    return is_onnx_equal_to_pytorch_output(
+        onnx_path, adv_input.cpu().numpy(),
+        adv_output.view(-1).detach().cpu().numpy(), rel_tol=1e-3)
+
+
+def _onnx_path_for_validation(operation, required=False):
+    """Return the configured ONNX file for optional or required validation."""
+    onnx_path = arguments.Config["model"]["onnx_path"]
+    if onnx_path is None:
+        message = (
+            f'{operation} requires a single ONNX model path '
+            '(for example, VNN-LIB 2.0 multi-network wrappers do not have one).')
+        if required:
+            raise RuntimeError(message)
+        print(
+            f'Skipping {operation}: no single ONNX model path is available '
+            '(for example, VNN-LIB 2.0 multi-network wrappers do not have one).')
+    return onnx_path
 
 
 def is_onnx_equal_to_pytorch_output(onnx_path, onnx_adv_input, pytorch_y, rel_tol):
@@ -498,8 +851,14 @@ def is_onnx_equal_to_pytorch_output(onnx_path, onnx_adv_input, pytorch_y, rel_to
     return True
 
 
-def is_specification_vio(box_spec_list, x_list, expected_y, tol):
-    """Check that the spec file was obeyed"""
+def is_specification_vio(
+        box_spec_list, x_list, expected_y, tol,
+        output_tol=CEX_OUTPUT_TOLERANCE):
+    """Check that the spec file was obeyed.
+
+    ``tol`` is only for input-box membership. Output/spec rows are checked with
+    ``output_tol`` and default to exact validation for saved counterexamples.
+    """
     rv = False
 
     for i, box_spec in enumerate(box_spec_list):
@@ -509,7 +868,8 @@ def is_specification_vio(box_spec_list, x_list, expected_y, tol):
         input_box_tensor = torch.tensor(input_box, dtype=x_list.dtype, device=x_list.device)
         lb_tensor, ub_tensor = input_box_tensor[:, 0], input_box_tensor[:, 1]
 
-        # Check if x_list is inside the input box using tensor operations
+        # The candidate must belong to this input box before its output specs
+        # can witness a violation.
         inside_input_box = torch.all((x_list >= lb_tensor - tol) & (x_list <= ub_tensor + tol))
 
         if inside_input_box:
@@ -521,7 +881,7 @@ def is_specification_vio(box_spec_list, x_list, expected_y, tol):
                 prop_rhs_tensor = torch.tensor(prop_rhs, dtype=expected_y.dtype, device=expected_y.device)
 
                 vec = torch.matmul(prop_mat_tensor, expected_y)
-                sat = torch.all(vec <= prop_rhs_tensor + tol)
+                sat = torch.all(vec <= prop_rhs_tensor + output_tol)
 
                 if sat:
                     violated = True

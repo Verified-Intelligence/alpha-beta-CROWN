@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Branch and bound for activation space split."""
@@ -231,6 +231,7 @@ def split_domain(
         final_name=net.final_name,
         net_c=net.c,
         net_x=net.x,
+        dtype_map=net.get_split_node_dtype_map(),
         timer=net.timer,
         device=net.device,
         beta_bias=branching_points is not None,

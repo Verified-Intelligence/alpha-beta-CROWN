@@ -3,16 +3,18 @@ general:
   root_path: ../../vnncomp2022_benchmarks/benchmarks/vggnet16_2022
   csv_name: instances.csv
   loss_reduction_func: max
+  graph_optimizer: Customized("custom_graph_optimizer", "maxpool_to_relu")
   adhoc_tuning: Customized("custom_adhoc_tuning", "customized_vggnet16_tuning")
-data:
-  num_outputs: 1000
+model:
+  cache_onnx_conversion: True
+  bound_opts: "{'clampmult_patches_padding_pos_masked': True}"
 solver:
   batch_size: 1  # Number of parallel domains to compute on GPU.
   bound_prop_method: dynamic-forward+backward
   forward:
     max_dim: 100
   crown:
-    batch_size: 16
+    batch_size: 64
 bab:
   branching:
     method: sb

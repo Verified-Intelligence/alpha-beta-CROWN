@@ -18,6 +18,7 @@ bab:
       adv_check: .inf
       sb_coeff_thresh: 0.1
       reorder_bab: True
+      ibp_enhancement: false
   clip_n_verify:
    clip_input_domain:
      enabled: True

@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for onnx_opt.py"""
@@ -966,6 +966,60 @@ class TestCompressOnnxRemoveLastLayer(unittest.TestCase):
             # Squeeze should be removed, leaving only MatMul
             self.assertEqual(len(result.graph.node), 1)
             self.assertEqual(result.graph.node[0].op_type, 'MatMul')
+        finally:
+            if os.path.exists(old_path):
+                os.unlink(old_path)
+            if os.path.exists(save_path):
+                os.unlink(save_path)
+
+    def test_remove_final_squeeze_reshape_output_wrapper(self):
+        """Remove the final Squeeze->Reshape([1, 1]) wrapper."""
+        from onnx_opt import compress_onnx
+
+        input_tensor = onnx.helper.make_tensor_value_info(
+            'input', onnx.TensorProto.FLOAT, [1, 1])
+        output_tensor = onnx.helper.make_tensor_value_info(
+            'output', onnx.TensorProto.FLOAT, [1, 1])
+        w_init = onnx.numpy_helper.from_array(
+            np.ones((1, 1), dtype=np.float32), name='w')
+        shape_init = onnx.numpy_helper.from_array(
+            np.array([1, 1], dtype=np.int64), name='output_shape')
+        nodes = [
+            onnx.helper.make_node(
+                'MatMul', ['input', 'w'], ['mm_out']),
+            onnx.helper.make_node(
+                'Squeeze', ['mm_out'], ['scalar_or_vector']),
+            onnx.helper.make_node(
+                'Reshape', ['scalar_or_vector', 'output_shape'], ['output']),
+        ]
+        graph = onnx.helper.make_graph(
+            nodes, 'squeeze_reshape_output_wrapper',
+            [input_tensor], [output_tensor], [w_init, shape_init])
+        model = onnx.helper.make_model(graph, producer_name='test')
+        model.opset_import[0].version = 11
+
+        with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
+            old_path = f.name
+        with tempfile.NamedTemporaryFile(suffix='.onnx', delete=False) as f:
+            save_path = f.name
+
+        try:
+            onnx.save(model, old_path)
+            result = compress_onnx(
+                model, old_path, save_path,
+                ['remove_squeeze_in_last_layer'])
+
+            onnx.checker.check_model(result)
+            self.assertEqual(len(result.graph.node), 1)
+            self.assertEqual(result.graph.node[0].op_type, 'MatMul')
+            self.assertEqual(result.graph.output[0].name, 'mm_out')
+            self.assertEqual(
+                [dim.dim_value for dim in
+                 result.graph.output[0].type.tensor_type.shape.dim],
+                [1, 1])
+            self.assertEqual(
+                [initializer.name for initializer in result.graph.initializer],
+                ['w'])
         finally:
             if os.path.exists(old_path):
                 os.unlink(old_path)

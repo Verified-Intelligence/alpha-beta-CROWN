@@ -9,13 +9,12 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
 import torch.nn as nn
 import numpy as np
-from auto_LiRPA import BoundedTensor
 from auto_LiRPA.bound_ops import BoundConstant, BoundParams, BoundBuffers, BoundInput
 
 
@@ -45,7 +44,6 @@ def precompute_A(net, A, x, interm_bounds):
 
 def set_roots(roots, x, A):
     assert isinstance(roots[0], BoundInput)
-    assert isinstance(roots[0].value, BoundedTensor)
     roots[0].center = x
     roots[0].perturbation = x.ptb
     roots[0].aux = None

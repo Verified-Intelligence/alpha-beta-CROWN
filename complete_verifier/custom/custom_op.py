@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 r"""
@@ -95,12 +95,9 @@ class BoundLinearMaskedRelu(BoundRelu):
 
     def interval_propagate(self, x, mask, slope, bias):
         """Interval bound propagation (IBP)."""
-        # Each x, mask, slope, bias is a tuple, or a Interval object representing lower and upper bounds.
-        # We assume Linf norm perturbation on input.
-        assert Interval.get_perturbation(x)[0] == float("inf")
-        x_L, x_U = x[0], x[1]  # The inputs (x)
+        x_L, x_U = x.lower, x.upper
         # We assume no perturbations on mask, slope and bias.
-        mask, slope, bias = mask[0], slope[0], bias[0]
+        mask, slope, bias = mask.lower, slope.lower, bias.lower
         # Lower and upper bounds when ReLU is selected.
         relu_lb = x_L.clamp(min=0)
         relu_ub = x_U.clamp(min=0)
@@ -112,7 +109,7 @@ class BoundLinearMaskedRelu(BoundRelu):
         # Select the final bounds according to the mask.
         final_lb = mask * linear_lb + (1.0 - mask) * relu_lb
         final_ub = mask * linear_ub + (1.0 - mask) * relu_ub
-        return final_lb, final_ub
+        return Interval(final_lb, final_ub)
 
     def _backward_relaxation(self, last_lA, last_uA, x, start_node, unstable_idx):
         """Element-wise CROWN relaxation for our special ReLU activation function."""
@@ -188,4 +185,3 @@ class linear_masked_relu_model(nn.Module):
         # out = torch.nn.functional.relu(out)
         out = self.linear2(out)
         return out
-

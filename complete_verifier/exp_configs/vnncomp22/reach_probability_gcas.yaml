@@ -16,5 +16,7 @@ bab:
   branching:
     method: kfsb  # Split on input space.
     candidates: 3
+  mixed_precision:
+    bab_bound_mixed_precision_dtype: none
 attack:
   pgd_order: before

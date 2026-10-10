@@ -6,12 +6,14 @@ The high-level API turns formal verification into a tiny Python surface. Provide
 |---|---|
 | `solver.verify(...)`              | prove an output constraint holds on the whole input region |
 | `solver.compute_bounds(...)`      | get **sound + tight** numeric bounds for output objectives |
-| `solver.minimize(...)`            | find a feasible primal optimum that **minimizes** a scalar objective |
-| `solver.maximize(...)`            | find a feasible primal optimum that **maximizes** a scalar objective |
+| `solver.minimize(...)`            | search for a feasible input that **minimizes** a scalar objective |
+| `solver.maximize(...)`            | search for a feasible input that **maximizes** a scalar objective |
 
-`verify` returns `safe` / `unsafe-pgd` / `unsafe-bab` / `safe-incomplete` / `unknown`; the other three return their numerical result with a status field.
+`verify` returns `verified`, `falsified`, or `unknown`. `compute_bounds` returns
+bound tensors and a success flag; `minimize` and `maximize` return candidate
+inputs, objective values, and optimization status.
 
-The notebook demos under `complete_verifier/examples_abcrown` are runnable Colab examples of every method, with end-to-end visualizations.
+The [Python examples](../examples_abcrown/) demonstrate verification, output bounds, and optimization.
 
 ---
 
@@ -34,26 +36,31 @@ pip install .
 Then the API can be imported and called via
 
 ```python
+import torch
 from abcrown import (
     ABCrownSolver, IOConstraints, ConfigBuilder, input_vars, output_vars
 )
 
-# Construct constraints with L-infinity box and logit ordering
-x = input_vars((1, 28, 28))
-y = output_vars(3)
-input_constraint = (x >= base - eps) & (x <= base + eps)
-output_constraint = (y[0] > y[1]) & (y[0] > y[2])
+torch.manual_seed(0)
+model = torch.nn.Sequential(
+    torch.nn.Linear(2, 16), torch.nn.ReLU(), torch.nn.Linear(16, 2),
+).eval()
+sample = torch.tensor([0.5, -0.5])
+eps = 0.01
+with torch.no_grad():
+    label = model(sample.unsqueeze(0)).argmax(dim=1).item()
 
+x = input_vars(2)
+y = output_vars(2)
 constraints = IOConstraints(
     input_vars=x,
     output_vars=y,
-    input_constraint=input_constraint,
-    output_constraint=output_constraint,
+    input_constraint=(x >= sample - eps) & (x <= sample + eps),
+    output_constraint=y[label] > y[1 - label],
 )
-# Config (defaults)
-config = ConfigBuilder.from_defaults()
 
-# Verify
+# Use CPU for this small model, or "cuda" with a compatible GPU.
+config = ConfigBuilder.from_defaults().set("general/device", "cpu")
 solver = ABCrownSolver(model, x, y, config=config)
 result = solver.verify(constraints=constraints)
 print(result.status, result.success)
@@ -94,7 +101,7 @@ Still supported for backward compatibility. New code should prefer `IOConstraint
 | Logit ordering    | `(y[0] > y[1]) & (y[0] > y[2])`                          | indexing syntax mirrors PyTorch               |
 | Linear inequality | `y[0] - y[1] > 0`                                        | auto-converted to `(C, rhs)`                  |
 | OR between specs  | `(y[0] > 0) \| (y[1] > 0)`                               | produces two OR clauses internally            |
-| Pin to a point    | `point = torch.tensor([1.0]); (x > point) & (x < point)` | handy for single-sample demos                 |
+| Pin to a point    | `point = torch.tensor([1.0]); (x >= point) & (x <= point)` | handy for single-sample demos               |
 
 Comparisons must involve `input_vars` or `output_vars`. The opposite operand can be a
 scalar, list, NumPy array, or torch tensor.
@@ -121,17 +128,16 @@ scalar, list, NumPy array, or torch tensor.
 
 ### `ABCrownSolver`
 Recommended constructor:
-- `ABCrownSolver(computing_graph, input_vars, output_vars, config=None, name=None)`
+- `ABCrownSolver(computing_graph, input_vars, output_vars, *, config=None, name="instance")`
 
 Compatibility forms are still accepted:
-- `ABCrownSolver(constraint, computing_graph, config=None, name=None)`
+- `ABCrownSolver(constraint, computing_graph, *, config=None, name="instance")`
 - `ABCrownSolver(..., constraint=...)`
 - `spec=` alias for `constraint=` (legacy)
 
 `verify(constraints=None, interm_bounds=None, return_reference=True)` returns `SolveResult` with:
-- `status`: `safe`, `unsafe-pgd`, `unsafe-bab`, `safe-incomplete`, `unknown`, …
-- `success`: boolean (`True` if the property is satisfied, or a counterexample is
-  confirmed when unsafety is expected).
+- `status`: `verified`, `falsified`, or `unknown`.
+- `success`: boolean (`True` for either a proof or a counterexample, `False` for `unknown`).
 - `reference`: optional dict of intermediate data (bounds, attack traces, etc.).
 - `stats`: metadata such as elapsed time, PGD iterations, BaB splits.
 
@@ -149,15 +155,10 @@ returns `BoundsResult` with:
   the global input-side CROWN affine relaxation. `subdomains` contains the
   current per-subdomain affine records when input-BaB is active.
 
-**Soundness + tightness guarantee.** `compute_bounds` lays each objective out as an
-independent input batch and uses a per-c-group hook around the single parallel BaB run
-to expose a per-objective tightened ``lb - rhs`` back to the API. The returned bound is
-guaranteed to satisfy `lb_i <= min_x obj_i(x)` and `ub_i >= max_x obj_i(x)` for every
-`x` in the input region (soundness). It is also as tight as BaB's current frontier
-allows (tightness — verified by the regression test
-``test_compute_bounds_sound_multi_objective`` in `examples_abcrown/api_tests.py`,
-which Monte-Carlo + corner-samples the model output and refuses to certify any
-bound that's punctured by a sampled value).
+For each objective, the returned bounds satisfy `lower_i <= obj_i(x) <= upper_i`
+throughout the input region. Branch-and-bound refines these bounds within the
+configured search budget. `result.stats["statuses"]` records the verification
+outcomes of the lower- and upper-bound subproblems.
 
 **Default-tuning that `compute_bounds` applies internally.** PGD attack is skipped,
 BaB attack is disabled, domain sorting is enabled when the config leaves it off
@@ -184,17 +185,15 @@ so you can plot convergence directly from the solver output.
 2. Write input/output constraints using the DSL.
 3. Build constraints via `IOConstraints(...)`.
 4. (Optional) tweak a config with `ConfigBuilder` or `default_config()`.
-5. Instantiate `ABCrownSolver(model, x, y, config)` and call one of:
+5. Instantiate `ABCrownSolver(model, x, y, config=config)` and call one of:
    - `.verify(constraints=...)`
    - `.compute_bounds(constraints=..., objective=...)`
-  - `.minimize(objective=..., constraints=..., return_bound_history=False)`
-  - `.maximize(objective=..., constraints=..., return_bound_history=False)`
+   - `.minimize(objective=..., constraints=..., return_bound_history=False)`
+   - `.maximize(objective=..., constraints=..., return_bound_history=False)`
 
-`result.status` indicates which stage produced the answer for verification:
-- `unsafe-pgd`: PGD attack already found a counterexample.
-- `unsafe-bab`: branching-and-bound found a counterexample.
-- `safe`: property proven.
-- `safe-incomplete`: incomplete verification sufficed.
+`result.status` reports the verification outcome:
+- `verified`: property proven over the input region.
+- `falsified`: a counterexample was found.
 - `unknown`: search stopped early (timeout / resource limit).
 
 ---
@@ -228,10 +227,10 @@ y = output_vars(2)                         # y[0] = V(x), y[1] = V_dot(x)
 constraints = IOConstraints(
     input_vars=x, output_vars=y,
     input_constraint=(x >= [-4.8, -10.8]) & (x <= [4.8, 10.8]),
-    output_constraint=(y[0] < v_min) | (y[0] > v_max) | (y[1] < 0.0),  # falsification predicate
+    output_constraint=(y[0] < v_min) | (y[0] > v_max) | (y[1] < 0.0),  # desired Lyapunov property
 )
 
-# Lyapunov graphs that produce V_dot via Jacobian need one config knob.
+# Enable Jacobian handling explicitly; the API also detects JacobianOP graphs.
 cfg = ConfigBuilder.from_defaults().set("model/with_jacobian", True)
 result = ABCrownSolver(model, x, y, config=cfg).verify(constraints=constraints)
 print(result.status, result.success)
@@ -253,7 +252,8 @@ constraints = IOConstraints(
     input_constraint=(x >= [-1.0, -0.5, -0.25, -0.75])
                      & (x <= [ 0.8,  0.6,  0.9 ,  1.1 ]),
 )
-result = ABCrownSolver(ReachabilityGraph(), x, y).compute_bounds(
+cfg = ConfigBuilder.from_defaults().set("general/device", "cpu")
+result = ABCrownSolver(ReachabilityGraph(), x, y, config=cfg).compute_bounds(
     constraints=constraints,
     objective=[y[0], y[1] - y[2], 0.5 * y[0] + y[2]],
     return_linear_bounds=True,
@@ -278,7 +278,8 @@ constraints = IOConstraints(
     input_vars=u,
     input_constraint=(u >= -1.0) & (u <= 1.0),
 )
-solver = ABCrownSolver(model, u, y)
+cfg = ConfigBuilder.from_defaults().set("general/device", "cpu")
+solver = ABCrownSolver(model, u, y, config=cfg)
 
 min_r = solver.minimize(
   objective=y[0] + 0.2 * y[1],
@@ -293,15 +294,31 @@ print(max_r.primal_value, max_r.x_best)
 
 Swap in your own model — the plumbing stays identical.
 
-## 5. Examples and Colab demos
+## 5. Python examples
 
-End-to-end runnable scripts and a richly-visualized Colab notebook live in
-`complete_verifier/examples_abcrown/`:
+Run the scripts from `complete_verifier/examples_abcrown/` in the installed
+environment, for example:
+
+```bash
+cd complete_verifier/examples_abcrown
+python optimization_example.py
+```
+
+The examples use CUDA verifier defaults. For CPU execution, configure the solver
+with `ConfigBuilder.from_defaults().set("general/device", "cpu")`; for the
+VNNLIB example, apply that setting to its `ConfigBuilder.from_yaml(...)`.
+Verification and bound refinement can finish with `unknown` when their search
+budget is exhausted.
+
+`vnnlib_example.py` loads a configuration with CPLEX cuts enabled, which requires
+the CPLEX installation and compiled `get_cuts` executable described in the
+[installation instructions](../cuts/CPLEX_cuts/README.md). To run with the
+standard verifier instead, set `config.set("bab/cut/enabled", False)` before
+constructing the solver.
 
 | File | Demo |
 |---|---|
-| `demo.ipynb` | **Colab walk-through** of all 5 workflows, with matplotlib / plotly visualizations |
-| `image_classification_example.py` | tiny CNN, L∞ robustness check on an 8×8 image |
+| `image_classification_example.py` | CNN, L∞ robustness check on a 384×384 image; creates a local checkpoint |
 | `neural_lyapunov_example.py` | Van der Pol controller + Lyapunov NN, with state-box verification |
 | `compute_bounds_example.py` | residual MLP, sound + tight bounds for 5 output objectives |
 | `optimization_example.py` | `minimize` / `maximize` on a small tanh-ReLU "process control" graph |

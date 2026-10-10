@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """complete verifier main interface."""
@@ -19,10 +19,9 @@ import gc
 import torch
 
 import arguments
-from beta_CROWN_solver import LiRPANet
 from domain_utils import DomainDB
 from attack import check_and_save_cex
-from utils import Logger, print_model, take_batch
+from utils import Logger, take_batch
 from specifications import BatchedSpecs
 from activation_split.bab_bootstrap import general_bab
 from input_split.batch_branch_and_bound import input_bab_parallel
@@ -72,18 +71,10 @@ def bab(self: 'ABCROWN',
     bab_attack_enabled = arguments.Config['bab']['attack']['enabled']
 
     # initialize the model.
-    # Since we always enable incomplete verification by default,
-    # we will reuse the model.
-    if arguments.Config['general']['enable_incomplete_verification']:
-        assert reference_dict
-        lirpa_model = reference_dict.get('model', None)
-        assert lirpa_model is not None
-    else:
-        # FIXME: This branch should not be used by default and is only for backup.
-        # Maybe it can be removed in the future.
-        assert not cplex_cuts
-        lirpa_model = LiRPANet(model, in_size=[1, *x.shape[1:]])
-        print_model(lirpa_model.net)
+    # Reuse the model produced by incomplete verification.
+    assert reference_dict
+    lirpa_model = reference_dict.get('model', None)
+    assert lirpa_model is not None
 
     # save the output of the model from the last input
     # it is just for comparing with reference in tests

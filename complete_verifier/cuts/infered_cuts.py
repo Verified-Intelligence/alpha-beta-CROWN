@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -156,10 +156,9 @@ class BICCOS:
                     print(
                         "Warning: Random drop heuristic used, performance may be bad."
                     )
-                elif heuristic == "sparse_opt":
-                    raise NotImplementedError(
-                        "Sparse Optimization Heuristic is not implemented yet."
-                    )
+                elif heuristic not in (None, "None"):
+                    raise ValueError(
+                        f'Unknown BICCOS dropping heuristic: {heuristic}')
 
                 if self.inference_condition(lbs_final) or (enforce_usage and (lbs_final > self.decision_thresh).any()):
                     inference_time = time.time() # record the preprocessing time
@@ -526,10 +525,11 @@ class BICCOS:
                         condition = self.random_drop()
                     elif heuristic == 'neuron_influence_score':
                         condition = self.neuron_influence_score(relu_score[i], criterion)
-                    elif heuristic == 'sparse_opt':
-                        NotImplementedError('Sparse Optimization Heuristic is not implemented yet.')
-                    else:
+                    elif heuristic in (None, 'None'):
                         condition = False
+                    else:
+                        raise ValueError(
+                            f'Unknown BICCOS dropping heuristic: {heuristic}')
 
                     # if (beta > 0 and upper bound used) or condition = True, keep the neuron to the cut, else drop the neuron
                     if ret['betas'][v_idx[j]][key][i] > 0 or condition:
@@ -657,7 +657,9 @@ def biccos_verification(self: 'LiRPANet', d, beta=True,
         if self.net.cut_used:
             self.disable_cut_for_branching()
         # nums_effective_beta_per_domain = self.beta_set_net_from_d(d, bias=False)
-        beta_full_data, nums_effective_beta_per_domain = BetaFullData.from_domain_dict(d, bias=False, device=self.device)
+        beta_full_data, nums_effective_beta_per_domain = BetaFullData.from_domain_dict(
+            d, bias=False, dtype_map=self.get_split_node_dtype_map(),
+            device=self.device)
         beta_full_data.attach_to_net(self)
 
         self.net.cut_used = (

@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -30,8 +30,12 @@ import arguments
 
 from onnx_opt import create_initializer_tensor
 from load_model import load_model_onnx
-from loading import joint_optimization_with_onnx_and_vnnlib
+from loading import (
+    joint_optimization_with_onnx_and_vnnlib,
+    vnnlib2_onnx_and_vnnlib_loader,
+)
 from read_vnnlib import read_vnnlib
+from read_vnnlib2 import is_vnnlib2_file
 from model_defs import Step_carvana
 
 
@@ -341,8 +345,16 @@ def customized_TEST_loader(file_root, onnx_path, vnnlib_path):
     Customized test model loader in VNNComp.
     The linear layers in this model seems in the wrong order.
     """
+    vnnlib_abs_path = os.path.join(file_root, vnnlib_path)
+    if is_vnnlib2_file(vnnlib_abs_path):
+        model_ori, shape, vnnlib = vnnlib2_onnx_and_vnnlib_loader(
+            file_root, onnx_path, vnnlib_path)
+        for name in list(model_ori.models.keys()):
+            model_ori.models[name] = transpose_linear_layers(model_ori.models[name])
+        return model_ori, shape, vnnlib
+
     model_ori, onnx_shape = load_model_onnx(os.path.join(file_root, onnx_path))
     shape = (-1, *onnx_shape)  # add the batch dim to onnx_shape
-    vnnlib = read_vnnlib(os.path.join(file_root, vnnlib_path))
+    vnnlib = read_vnnlib(vnnlib_abs_path)
     model_ori = transpose_linear_layers(model_ori)
     return model_ori, shape, vnnlib

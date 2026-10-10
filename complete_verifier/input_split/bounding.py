@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -23,6 +23,7 @@ from auto_LiRPA.utils import stop_criterion_batch_any
 
 from typing import TYPE_CHECKING, Optional, Tuple, Callable
 from state import AlphaValueData
+from state.alpha import resolve_alpha_storage_dtype
 
 if TYPE_CHECKING:
     from beta_CROWN_solver import LiRPANet
@@ -169,8 +170,12 @@ def get_lower_bound_naive(
             #     == "float16",
             # )
             ret_alphas = AlphaValueData.from_net(self, starting_node_scope="all", move=False)
-            if arguments.Config["solver"]["alpha-crown"]["alpha_dtype"] == "float16":
-                ret_alphas = ret_alphas.to(dtype=torch.float16)
+            alpha_storage_dtype = resolve_alpha_storage_dtype(
+                arguments.Config["solver"]["alpha-crown"]["alpha_dtype"],
+                reproduce_alpha_bounds=arguments.Config[
+                    "solver"]["reproduce_alpha_bounds"],
+            )
+            ret_alphas = ret_alphas.to(dtype=alpha_storage_dtype)
         else:
             # There might be alphas in initial alpha-crown,
             # which will be used in all later bounding steps.

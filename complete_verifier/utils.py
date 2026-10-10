@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 
@@ -37,6 +37,18 @@ def _source_mentions_jacobian_op(obj: Any) -> bool:
     code = getattr(obj, '__code__', None)
     if code is not None and 'JacobianOP' in getattr(code, 'co_names', ()):
         return True
+    if inspect.isclass(obj):
+        # Locating a class with inspect.getsource parses its entire source file.
+        # A marker-free file rules out the class without that AST construction;
+        # files containing markers still need the class-specific check below.
+        # Match getsource's __wrapped__ traversal when choosing the source file.
+        try:
+            module_source = inspect.getsource(inspect.getmodule(inspect.unwrap(obj)))
+        except (OSError, TypeError):
+            module_source = None
+        if (module_source is not None and 'JacobianOP' not in module_source
+                and 'grad::jacobian' not in module_source):
+            return False
     try:
         source = inspect.getsource(obj)
     except (OSError, TypeError):

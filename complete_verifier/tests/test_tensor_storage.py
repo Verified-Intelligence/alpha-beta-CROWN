@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for tensor_storage.py"""
@@ -26,6 +26,56 @@ from tensor_storage import (
     TensorStorage, StackTensorStorage, QueueTensorStorage,
     HugeTensorAllocator
 )
+
+
+class TestTensorStorageDtype(unittest.TestCase):
+    """Tests for the dtype contract shared by all tensor storages."""
+
+    def test_tensor_input_owns_storage_dtype(self):
+        """Tensor initialization preserves its dtype through storage use."""
+        original_default = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(torch.float64)
+            for storage_cls in (StackTensorStorage, QueueTensorStorage):
+                for input_dtype in (torch.float16, torch.int64):
+                    with self.subTest(
+                            storage=storage_cls.__name__, dtype=input_dtype):
+                        data = torch.arange(
+                            6, dtype=input_dtype).reshape(2, 3)
+                        storage = storage_cls(
+                            data, initial_size=2, switching_size=4)
+                        self.assertEqual(storage.dtype, input_dtype)
+                        self.assertEqual(storage.tensor().dtype, input_dtype)
+
+                        storage.append(torch.ones(
+                            3, 3, dtype=input_dtype))
+                        self.assertEqual(storage.tensor().dtype, input_dtype)
+                        self.assertEqual(storage.pop(1).dtype, input_dtype)
+        finally:
+            torch.set_default_dtype(original_default)
+
+    def test_explicit_dtype_overrides_tensor_dtype(self):
+        """An explicit storage dtype takes precedence over input dtype."""
+        data = torch.arange(6, dtype=torch.float64).reshape(2, 3)
+        for storage_cls in (StackTensorStorage, QueueTensorStorage):
+            with self.subTest(storage=storage_cls.__name__):
+                storage = storage_cls(data, dtype=torch.float32)
+                self.assertEqual(storage.dtype, torch.float32)
+                self.assertEqual(storage.tensor().dtype, torch.float32)
+                self.assertTrue(torch.equal(storage.tensor(), data.float()))
+
+    def test_shape_input_uses_default_dtype(self):
+        """Shape-only initialization retains the default dtype contract."""
+        original_default = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(torch.float64)
+            for storage_cls in (StackTensorStorage, QueueTensorStorage):
+                with self.subTest(storage=storage_cls.__name__):
+                    storage = storage_cls((0, 3), initial_size=2)
+                    self.assertEqual(storage.dtype, torch.float64)
+                    self.assertEqual(storage.tensor().dtype, torch.float64)
+        finally:
+            torch.set_default_dtype(original_default)
 
 
 class TestStackTensorStorage(unittest.TestCase):

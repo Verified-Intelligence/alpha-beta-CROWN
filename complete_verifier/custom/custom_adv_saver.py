@@ -9,13 +9,20 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import numpy as np
 import torch.nn.functional as F
 
-def customized_gtrsb_saver(adv_example, adv_output, res_path):
+from utils import assert_allowed_caller
+
+
+def customized_gtrsb_saver(adv_example, adv_output, res_path, vnnlib=None):
+    if not assert_allowed_caller(["check_and_save_cex"]):
+        raise RuntimeError(
+            "Adversarial example savers must be called through "
+            "check_and_save_cex().")
     # almost the same as the original save_cex function
     # permute the input back before flattening the tensor
     # (See customized_Gtrsb_loader() from custom/custom_model_loader.py
@@ -37,4 +44,3 @@ def customized_gtrsb_saver(adv_example, adv_output, res_path):
                 f.write("\n(Y_{} {})".format(i, adv_output[0,i]))
         f.write(")")
         f.flush()
-

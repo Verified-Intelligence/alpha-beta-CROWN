@@ -1,0 +1,13 @@
+# Configuration for the VNN-COMP 2026 smart-turn multimodal benchmark.
+
+general:
+  root_path: ../../vnncomp2026_benchmarks/benchmarks/smart_turn_multimodal_2026/2.0
+  csv_name: instances.csv
+model:
+  use_ort_optimized_model: true
+  onnx_quirks: "{'Quantized': {'enabled': True}}"
+attack:
+  pgd_order: before
+  pgd_steps: 20
+  pgd_restarts: 4
+  pgd_batch_size: 4

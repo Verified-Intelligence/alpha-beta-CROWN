@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for heuristics/branching_heuristics.py"""
@@ -64,6 +64,40 @@ class TestGetBranchingHeuristic(unittest.TestCase):
         # Should return some heuristic object with a net attribute
         self.assertIsNotNone(heuristic)
         self.assertEqual(heuristic.net, mock_net)
+
+
+class TestReadsSavedA(unittest.TestCase):
+    """Only BBPS reads the A matrices of the split-node inputs from A_saved."""
+
+    def _reads_saved_A(self, nonlinear_split, method='kfsb', disable=False,
+                       nonlinear_method='bbps'):
+        import arguments
+        from heuristics.branching_heuristics import reads_saved_A
+
+        branching = arguments.Config['bab']['branching']
+        saved = (branching['method'], branching['nonlinear_split']['disable'],
+                 branching['nonlinear_split']['method'])
+        branching['method'] = method
+        branching['nonlinear_split']['disable'] = disable
+        branching['nonlinear_split']['method'] = nonlinear_method
+        try:
+            return reads_saved_A(MagicMock(nonlinear_split=nonlinear_split))
+        finally:
+            (branching['method'], branching['nonlinear_split']['disable'],
+             branching['nonlinear_split']['method']) = saved
+
+    def test_saved_A_requirement_follows_branching_selection(self):
+        cases = (
+            ({'nonlinear_split': True}, True),
+            ({'nonlinear_split': False, 'method': 'nonlinear'}, True),
+            ({'nonlinear_split': False}, False),
+            ({'nonlinear_split': True, 'disable': True}, False),
+            ({'nonlinear_split': True,
+              'nonlinear_method': 'babsr-like'}, False),
+        )
+        for options, expected in cases:
+            with self.subTest(**options):
+                self.assertEqual(self._reads_saved_A(**options), expected)
 
 
 class TestFsbBranching(unittest.TestCase):
@@ -155,11 +189,6 @@ class TestKfsbBranching(unittest.TestCase):
 
 class TestComputeRatioFunction(unittest.TestCase):
     """Tests for compute_ratio function."""
-
-    def test_compute_ratio_import(self):
-        """Test importing compute_ratio."""
-        from heuristics.utils import compute_ratio
-        self.assertIsNotNone(compute_ratio)
 
     def test_compute_ratio_basic(self):
         """Test basic compute_ratio functionality."""

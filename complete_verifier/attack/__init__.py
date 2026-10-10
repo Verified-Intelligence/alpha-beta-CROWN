@@ -9,15 +9,17 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import arguments
 from . import attack_pgd, general_spec_attack
 
 # They are shared with two versions of attack
-from .attack_utils import (default_adv_saver, default_adv_verifier, PGDAttackResult,
-                           reset_attack_stats, get_attack_stats, check_and_save_cex)
+from .attack_utils import (
+    default_adv_saver, default_adv_verifier, PGDAttackResult,
+    reset_attack_stats, get_attack_stats, check_and_save_cex,
+    verify_onnxruntime_output_matches_pytorch)
 from .attack_interface import attack, attack_with_general_specs
 
 

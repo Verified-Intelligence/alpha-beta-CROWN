@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Various kinds of specifications for verification."""
@@ -23,6 +23,33 @@ import arguments
 from auto_LiRPA import BoundedTensor
 from auto_LiRPA.perturbations import PerturbationLpNorm
 from utils import pad_list_of_input_to_tensor, take_batch
+
+
+class VNNLibEntries(list):
+    """Verifier vnnlib entries with optional parser metadata."""
+
+    def __init__(self, entries, metadata=None):
+        super().__init__(entries)
+        self.metadata = metadata
+
+
+def _open_aware_input_box(input_box, branch_strictness):
+    """Return the nearest closed input box inside the original open bounds."""
+    if branch_strictness is None:
+        return input_box
+    # TODO: This closed box excludes the open boundary by one representable
+    # value. A safe proof covers this floating-point subset, not the full
+    # real-valued open input domain.
+    np_dtype = np.float64 if torch.get_default_dtype() == torch.float64 else np.float32
+    box = np.asarray(input_box, dtype=np_dtype).copy()
+    lower_strict = np.asarray(branch_strictness.input_lower, dtype=bool)
+    upper_strict = np.asarray(branch_strictness.input_upper, dtype=bool)
+    box[lower_strict, 0] = np.nextafter(
+        box[lower_strict, 0], np_dtype(np.inf))
+    box[upper_strict, 1] = np.nextafter(
+        box[upper_strict, 1], np_dtype(-np.inf))
+    return box
+
 
 class Specification:
     def __init__(self):
@@ -219,8 +246,8 @@ def add_rhs_offset_legacy(
                 k += len(v[1][i][1])
             result.append(item)
         updated_vnnlib.append((v[0], result))
-    
-    return updated_vnnlib
+
+    return VNNLibEntries(updated_vnnlib, getattr(vnnlib, "metadata", None))
 
 
 @dataclass
@@ -284,6 +311,7 @@ class vnnlibHandler:
         shrink_eps = arguments.Config['specification']['shrink_eps']
         if shrink_eps is not None:
             vnnlib = shrink_vnnlib(vnnlib, float(shrink_eps))
+        vnnlib = VNNLibEntries(vnnlib, getattr(vnnlib, "metadata", None))
         if arguments.Config['general']['store_all_specs_on_cpu']:
             self.device = "cpu"
         else:
@@ -297,6 +325,8 @@ class vnnlibHandler:
         eps_list = []
         c_list, or_spec_size_list, rhs_list = [], [], []
         num_or_per_x_list = []
+        # strictness is aligned with vnnlib entries and their per-entry specs.
+        strictness = getattr(getattr(vnnlib, "metadata", None), "strictness", None)
 
         # Determine input format
         # input range can be: 1. a dict for general Lp norm and 2. np array or list of tuples for Linf norm
@@ -311,10 +341,12 @@ class vnnlibHandler:
 
         # Parse input data
         # iterate through different inputs
-        for vnn in vnnlib:
+        for vnn_idx, vnn in enumerate(vnnlib):
+            branch_strictness = strictness[vnn_idx] if strictness else None
             if is_linf_norm:
                 # vnn[0] is a list of tuples
-                x_range_list.append(vnn[0])
+                x_range_list.append(
+                    _open_aware_input_box(vnn[0], branch_strictness))
             else:
                 # vnn[0]["X"] is a tensor
                 x_list.append(vnn[0]["X"])
@@ -328,18 +360,21 @@ class vnnlibHandler:
                 # c shape: [num_and, num_output], rhs shape: [num_and]
                 # num_and can be different for different OR specs.
                 c_list.append(c)
+                # rhs_list stores the numeric thresholds for c @ y <= rhs.
+                # Row strictness is represented separately in vnnlib metadata.
                 rhs_list.append(rhs)
                 # record the number of ANDs in every OR spec
                 or_spec_size_list.append(c.shape[0])
 
         # Convert lists to tensors with desired dtype, device, and shape.
-        # We empirically find that using torch.Tensor is efficient.
         device = self.device
         dtype = torch.get_default_dtype()
         self.or_spec_size = torch.Tensor(or_spec_size_list).to(dtype=torch.int, device=device)
         if is_linf_norm:
             # [num_different_X, *input_shape[1:], 2]
-            x_range_list = torch.Tensor(x_range_list).to(dtype=dtype, device=device).view(input_shape + [2])
+            x_range_list = torch.as_tensor(
+                np.asarray(x_range_list), dtype=dtype, device=device
+            ).view(input_shape + [2])
             # [num_different_X, *input_shape[1:]]
             self.data_min = x_range_list.select(dim=-1, index=0)
             self.data_max = x_range_list.select(dim=-1, index=1)

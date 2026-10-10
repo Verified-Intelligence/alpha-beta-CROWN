@@ -9,18 +9,21 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from collections import defaultdict
 import torch
 import numpy as np
+import arguments
 from heuristics.babsr import BabsrBranching, babsr_score
 from heuristics.decision_types import BranchingDecisions
+from heuristics.compute_bounds_chunks import compute_lower_bounds_chunks
 from utils import get_reduce_op
 
 
 class FsbBranching(BabsrBranching):
+    supports_decision_sub_batch_size = True
 
     @torch.no_grad()
     def compute_branching_decisions(
@@ -41,7 +44,7 @@ class FsbBranching(BabsrBranching):
         # In case number of unstable neurons less than topk
         topk = min(branching_candidates,
                    int(sum([item.sum() for item in mask.values()]).item()))
-        number_bounds = 1 if cs is None else cs.shape[1]
+        number_bounds = cs.shape[1]
         score, intercept_tb = babsr_score(
             lower_bounds, upper_bounds, lAs, mask, reduce_op,
             number_bounds, self.net.split_nodes, self.net.split_activations,
@@ -66,9 +69,8 @@ class FsbBranching(BabsrBranching):
             bs = [torch.cat([i, i]) for i in betas]
             history += history
         rhs = torch.cat([rhs, rhs])
-        if cs is not None:
-            cs = torch.cat([cs, cs])
-        set_alpha = True  # We only set the alpha once.
+        cs = torch.cat([cs, cs])
+        sub_batch_size = arguments.Config['bab']['branching']['decision_sub_batch_size']
 
         for i in range(score_from_layer_idx, len(score)):
             if ((score[i].max(1).values <= 1e-4).all()
@@ -92,23 +94,18 @@ class FsbBranching(BabsrBranching):
                 # only save the best lower bounds of the two splits
                 args_update_bounds = {
                     'lower_bounds': lbs, 'upper_bounds': ubs,
-                    'alphas': sps if set_alpha else {}, 'cs': cs
+                    'alphas': sps, 'cs': cs
                 }
                 split = {'decision': k_decision[-1]}
                 self.net.build_history_and_set_bounds(args_update_bounds, split)
                 if use_beta:
                     args_update_bounds.update({'betas': bs, 'history': history})
-                    k_ret_lbs = self.net.update_bounds(
-                        args_update_bounds,
-                        fix_interm_bounds=True, shortcut=True, beta_bias=False)
-                else:
-                    k_ret_lbs = self.net.update_bounds(
-                        args_update_bounds, beta=False,
-                        fix_interm_bounds=True, shortcut=True, beta_bias=False)
+                k_ret_lbs = compute_lower_bounds_chunks(
+                    self.net, args_update_bounds,
+                    sub_batch_size=sub_batch_size,
+                )
                 # consider the max improvement among multi bounds in one C matrix
                 k_ret_lbs = (k_ret_lbs - torch.cat([rhs, rhs])).max(-1).values
-                # No need to set alpha next time; we do not optimize the alphas.
-                set_alpha = False
                 # build mask indicates invalid scores (stable neurons), batch wise, 1: invalid
                 mask_score = (score_idx.values[:, k] <= 1e-4).float()
                 mask_itb = (itb_idx.values[:, k] >= -1e-4).float()

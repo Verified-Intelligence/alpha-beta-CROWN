@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for input_split/attack_in_input_split.py"""
@@ -89,6 +89,7 @@ class TestPgdAttackOnDomainsStageInit(unittest.TestCase):
 
         self.assertFalse(result)
         mock_pgd_attack.assert_called_once()
+        self.assertIs(mock_pgd_attack.call_args.kwargs['vnnlib'], vnnlib)
 
     @patch('input_split.attack_in_input_split.arguments.Config', new_callable=dict)
     @patch('input_split.attack_in_input_split.pgd_attack_with_general_specs')

@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import arguments
@@ -30,7 +30,8 @@ BranchingHeuristicObj = (
 )
 
 
-def get_branching_heuristic(net, method=None) -> BranchingHeuristicObj:
+def resolve_branching_method(net, method=None):
+    """The branching method BaB uses for the activation splits of `net`."""
     if method is None:
         branching_method = arguments.Config['bab']['branching']['method']
     else:
@@ -38,6 +39,19 @@ def get_branching_heuristic(net, method=None) -> BranchingHeuristicObj:
     disable_genbab = arguments.Config['bab']['branching']['nonlinear_split']['disable']
     if branching_method != 'nonlinear' and net.nonlinear_split and not disable_genbab:
         branching_method = 'nonlinear'
+    return branching_method
+
+
+def reads_saved_A(net):
+    """Whether the branching heuristic BaB uses for `net` reads the A matrices
+    of the split-node inputs from `net.A_saved`; only BBPS does."""
+    nonlinear_split_args = arguments.Config['bab']['branching']['nonlinear_split']
+    return (resolve_branching_method(net) == 'nonlinear'
+            and nonlinear_split_args['method'] == 'bbps')
+
+
+def get_branching_heuristic(net, method=None) -> BranchingHeuristicObj:
+    branching_method = resolve_branching_method(net, method)
     branching_obj = None
     if branching_method == 'random':
         branching_obj = RandomNeuronBranching(net)

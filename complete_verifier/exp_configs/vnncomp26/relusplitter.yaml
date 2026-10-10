@@ -1,0 +1,24 @@
+# Configuration file for running the relusplitter_2026
+
+general:
+  root_path: ../../vnncomp2026_benchmarks/benchmarks/relusplitter_2026/1.0
+  csv_name: instances.csv
+  complete_verifier: bab-refine
+model:
+  input_shape: [-1, 784]
+  onnx_optimization_flags: [optimize_relu_relationship]
+solver:
+  batch_size: 4096
+  beta-crown:
+    iteration: 20
+    lr_beta: 0.03
+  mip:
+    parallel_solvers: 32
+  start_save_best: -1
+bab:
+  branching:
+    candidates: 5
+    reduceop: max
+attack:
+  attack_mode: diversed_PGD
+  pgd_restarts: 100

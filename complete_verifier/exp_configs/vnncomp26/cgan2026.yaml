@@ -1,0 +1,29 @@
+general:
+  root_path: ../../vnncomp2026_benchmarks/benchmarks/cgan2026/1.0
+  csv_name: instances.csv
+  conv_mode: matrix
+model:
+  onnx_optimization_flags: ["remove_squeeze_in_last_layer", "merge_gemm_reshape_bn", "merge_bn_reshape_gemm", "check_duplicate_upsample_initializers"]
+  onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
+  cache_onnx_conversion: True
+  bound_opts: "{'clampmult_patches_padding_pos_masked': True}"
+attack:
+  pgd_order: before
+  pgd_restarts: 100
+solver:
+  batch_size: 1
+  auto_enlarge_batch_size: True
+  batched_crown_auto_enlarge_max_vram_ratio: 0.65
+  bound_prop_method: crown
+  crown:
+    batch_size: 512
+bab:
+  branching:
+    method: sb  # Split on input space.
+    input_split:
+      enable: True
+      sb_coeff_thresh: 0.01
+      reorder_bab: True
+  clip_n_verify:
+    clip_input_domain:
+      enabled: True

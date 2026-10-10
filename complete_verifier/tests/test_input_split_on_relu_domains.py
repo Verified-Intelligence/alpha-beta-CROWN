@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for input_split/input_split_on_relu_domains.py"""
@@ -364,18 +364,6 @@ class TestInputBranchingDecisionsNoGrad(unittest.TestCase):
 
         # Result should not require gradients
         self.assertFalse(result.requires_grad)
-
-
-class TestInputSplitOnReluDomainsNoGrad(unittest.TestCase):
-    """Tests for torch.no_grad decorator on input_split_on_relu_domains."""
-
-    def test_function_has_no_grad_decorator(self):
-        """Test that the function is decorated with torch.no_grad."""
-        from input_split.input_split_on_relu_domains import input_split_on_relu_domains
-        # The function should be wrapped by torch.no_grad
-        # We can check this by examining if __wrapped__ attribute exists
-        self.assertTrue(hasattr(input_split_on_relu_domains, '__wrapped__')
-                       or 'no_grad' in str(input_split_on_relu_domains))
 
 
 class TestInputReluSplitterSplitConditionPrinting(unittest.TestCase):

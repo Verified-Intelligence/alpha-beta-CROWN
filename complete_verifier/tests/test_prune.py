@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for prune.py"""
@@ -172,6 +172,23 @@ class TestPruneAfterCROWNRecoverData(unittest.TestCase):
         self.assertTrue(torch.allclose(result[1], torch.tensor([1.0, 2.0, 3.0])))
         self.assertTrue((result[0] == 0.0).all())
         self.assertTrue((result[2] == 0.0).all())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_recover_data_accepts_indices_from_another_device(self):
+        """Recovery follows the data device after results are moved to CPU."""
+        from prune import PruneAfterCROWN
+
+        mock_instance = MagicMock()
+        mock_instance.unverified_indices = torch.tensor(
+            [1, 3], device='cuda')
+        data = torch.tensor([[10.0], [20.0]], device='cpu')
+
+        result = PruneAfterCROWN._recover_data(
+            mock_instance, data, full_size=4, fill_value=0, recover_dim=0)
+
+        expected = torch.tensor([[0.0], [10.0], [0.0], [20.0]])
+        self.assertEqual(result.device.type, 'cpu')
+        self.assertTrue(torch.equal(result, expected))
 
 
 class TestPruneAfterCROWNGetPrunedData(unittest.TestCase):

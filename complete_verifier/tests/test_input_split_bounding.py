@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for input_split/bounding.py"""
@@ -241,6 +241,7 @@ class TestGetLowerBoundNaiveAlphaCrown:
             'branching': {'input_split': {'ibp_enhancement': False}}
         }
         mock_config['solver'] = {
+            'reproduce_alpha_bounds': False,
             'alpha-crown': {
                 'input_split_alpha_iteration': 20,
                 'input_split_lr_alpha': 0.01,
@@ -412,6 +413,7 @@ class TestGetLowerBoundNaiveReturnA:
             'branching': {'input_split': {'ibp_enhancement': False}}
         }
         mock_config['solver'] = {
+            'reproduce_alpha_bounds': False,
             'alpha-crown': {
                 'input_split_alpha_iteration': 20,
                 'input_split_lr_alpha': 0.01,
@@ -530,6 +532,7 @@ class TestGetLowerBoundNaiveReturnB:
             'branching': {'input_split': {'ibp_enhancement': False}}
         }
         mock_config['solver'] = {
+            'reproduce_alpha_bounds': False,
             'alpha-crown': {
                 'input_split_alpha_iteration': 20,
                 'input_split_lr_alpha': 0.01,

@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for cuts/cut_verification.py"""
@@ -564,7 +564,7 @@ class TestEnableCuts(unittest.TestCase):
         self.mock_lirpa_net.net = MagicMock()
         self.mock_lirpa_net.net.output_name = ['output_0']
         self.mock_lirpa_net.net.input_name = ['input_0']
-        self.mock_lirpa_net.net.splittable_activations = []
+        self.mock_lirpa_net.net.get_splittable_activations.return_value = []
 
     def test_enable_cuts_sets_return_A(self):
         """Test enable_cuts sets return_A to True."""
@@ -599,7 +599,8 @@ class TestEnableCuts(unittest.TestCase):
         mock_activation = MagicMock()
         mock_activation.inputs = [MagicMock(name='pre_relu_0')]
         mock_activation.inputs[0].name = 'pre_relu_0'
-        self.mock_lirpa_net.net.splittable_activations = [mock_activation]
+        self.mock_lirpa_net.net.get_splittable_activations.return_value = [
+            mock_activation]
 
         enable_cuts(self.mock_lirpa_net)
 
@@ -703,9 +704,17 @@ class TestSetCutParams(unittest.TestCase):
         self.mock_lirpa_net.net = MagicMock()
         self.mock_lirpa_net.net.device = 'cpu'
         self.mock_lirpa_net.net.final_name = 'output'
+        output_node = MagicMock()
+        output_node.name = 'output'
+        output_node.output_dtype = torch.float64
+        self.mock_lirpa_net.net.__getitem__.side_effect = {
+            'output': output_node
+        }.__getitem__
+        self.mock_lirpa_net.net.get_output_dtype.side_effect = (
+            lambda node: node.output_dtype)
         self.mock_lirpa_net.net.cut_module = MagicMock()
         self.mock_lirpa_net.net.cut_module.cut_bias = torch.zeros(10)
-        self.mock_lirpa_net.net.splittable_activations = []
+        self.mock_lirpa_net.net.get_splittable_activations.return_value = []
         self.mock_lirpa_net.net.cut_timestamp = 1
 
     @patch('cuts.cut_verification.arguments.Config', {
@@ -791,6 +800,14 @@ class TestSetCutParams(unittest.TestCase):
         # Check that cut_beta_params was set
         self.assertIsNotNone(self.mock_lirpa_net.net.cut_beta_params)
 
+        general_beta = self.mock_lirpa_net.net.cut_beta_params[0]
+        self.assertEqual(general_beta.dtype, torch.float64)
+        self.assertTrue(general_beta.requires_grad)
+        self.assertTrue(general_beta.is_leaf)
+        optimizer = torch.optim.Adam([general_beta], lr=0.1)
+        general_beta.sum().backward()
+        optimizer.step()
+
     @patch('cuts.cut_verification.arguments.Config', {
         'bab': {'cut': {'bab_iteration': 0}},
         'solver': {'beta-crown': {'iteration': 100}}
@@ -826,7 +843,8 @@ class TestSetCutParams(unittest.TestCase):
         from cuts.cut_verification import set_cut_params
 
         mock_activation = MagicMock()
-        self.mock_lirpa_net.net.splittable_activations = [mock_activation]
+        self.mock_lirpa_net.net.get_splittable_activations.return_value = [
+            mock_activation]
 
         batch_size = 4
         batch_base = 2
@@ -940,7 +958,8 @@ class TestDisableCutForBranching(unittest.TestCase):
         mock_activation1.cut_used = True
         mock_activation2 = MagicMock()
         mock_activation2.cut_used = True
-        self.mock_lirpa_net.net.splittable_activations = [mock_activation1, mock_activation2]
+        self.mock_lirpa_net.net.get_splittable_activations.return_value = [
+            mock_activation1, mock_activation2]
 
     @patch('builtins.print')
     def test_disable_cut_sets_net_cut_used_false(self, mock_print):
@@ -967,7 +986,8 @@ class TestDisableCutForBranching(unittest.TestCase):
 
         disable_cut_for_branching(self.mock_lirpa_net)
 
-        for activation in self.mock_lirpa_net.net.splittable_activations:
+        for activation in (
+                self.mock_lirpa_net.net.get_splittable_activations()):
             self.assertFalse(activation.cut_used)
 
     @patch('builtins.print')
@@ -984,7 +1004,7 @@ class TestDisableCutForBranching(unittest.TestCase):
         """Test disable_cut_for_branching handles empty splittable_activations."""
         from cuts.cut_verification import disable_cut_for_branching
 
-        self.mock_lirpa_net.net.splittable_activations = []
+        self.mock_lirpa_net.net.get_splittable_activations.return_value = []
 
         # Should not raise
         disable_cut_for_branching(self.mock_lirpa_net)
@@ -1067,7 +1087,7 @@ class TestIntegrationScenarios(unittest.TestCase):
         self.mock_lirpa_net.net = MagicMock()
         self.mock_lirpa_net.net.output_name = ['output_0']
         self.mock_lirpa_net.net.input_name = ['input_0']
-        self.mock_lirpa_net.net.splittable_activations = []
+        self.mock_lirpa_net.net.get_splittable_activations.return_value = []
         self.mock_lirpa_net.needed_A_dict = None
         self.mock_lirpa_net.return_A = False
 
@@ -1079,7 +1099,8 @@ class TestIntegrationScenarios(unittest.TestCase):
         mock_activation = MagicMock()
         mock_activation.inputs = [MagicMock()]
         mock_activation.inputs[0].name = 'relu_input_0'
-        self.mock_lirpa_net.net.splittable_activations = [mock_activation]
+        self.mock_lirpa_net.net.get_splittable_activations.return_value = [
+            mock_activation]
 
         enable_cuts(self.mock_lirpa_net)
 
@@ -1100,6 +1121,14 @@ class TestIntegrationScenarios(unittest.TestCase):
         self.mock_lirpa_net.cutter.beta_init = 0
         self.mock_lirpa_net.net.device = 'cpu'
         self.mock_lirpa_net.net.final_name = 'output'
+        output_node = MagicMock()
+        output_node.name = 'output'
+        output_node.output_dtype = torch.float64
+        self.mock_lirpa_net.net.__getitem__.side_effect = {
+            'output': output_node
+        }.__getitem__
+        self.mock_lirpa_net.net.get_output_dtype.side_effect = (
+            lambda node: node.output_dtype)
         self.mock_lirpa_net.net.cut_module = MagicMock()
         self.mock_lirpa_net.net.cut_module.cut_bias = torch.zeros(5)
         self.mock_lirpa_net.net.cut_timestamp = 1

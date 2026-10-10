@@ -9,16 +9,19 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from collections import defaultdict
 import gc
 import torch
 import numpy as np
+import arguments
 from heuristics.babsr import BabsrBranching, babsr_score, babsr_score_intercept_only
 from heuristics.decision_types import BranchingDecisions
+from heuristics.compute_bounds_chunks import compute_lower_bounds_chunks
 from utils import get_reduce_op, get_batch_size_from_masks
+
 
 
 class KfsbBranching(BabsrBranching):
@@ -26,6 +29,7 @@ class KfsbBranching(BabsrBranching):
     Branching using the intercept term in ReLU relaxation.
     TODO: support general activation functions.
     """
+    supports_decision_sub_batch_size = True
 
     @torch.no_grad()
     def compute_branching_decisions(self, domains, split_depth, branching_candidates=5,
@@ -98,10 +102,10 @@ class KfsbBranching(BabsrBranching):
         batch_size = batch * 2 if method == 'kfsb' else batch
         k_ret = torch.empty(size=(topk, batch_size),
                             device=all_score.device, requires_grad=False)
-        set_alpha = True  # We only set the alpha once.
 
         reduce_op = get_reduce_op(branching_reduceop, with_dim=True)
         if timer: timer.start('get_branching_decision.update_bounds')
+        sub_batch_size = arguments.Config['bab']['branching']['decision_sub_batch_size']
         for k in range(topk):
             # top-k candidates from the alpha scores.
             decision_index = score_idx_indices[:, k]
@@ -134,28 +138,20 @@ class KfsbBranching(BabsrBranching):
             # only save the best lower bounds of the two splits
             args_update_bounds = {
                 'lower_bounds': lbs, 'upper_bounds': ubs,
-                'alphas': sps if set_alpha else {}, 'cs': css
+                'alphas': sps, 'cs': css
             }
             split = {'decision': k_decision[-1]}
             self.net.build_history_and_set_bounds(args_update_bounds, split)
-
             if use_beta:
                 args_update_bounds.update({'betas': bs, 'history': history})
-                k_ret_lbs = self.net.update_bounds(
-                    args_update_bounds,
-                    fix_interm_bounds=True, shortcut=True,
-                    beta_bias=False)
-            else:
-                k_ret_lbs = self.net.update_bounds(
-                    args_update_bounds, beta=False,
-                    fix_interm_bounds=True, shortcut=True,
-                    beta_bias=False)
 
+            k_ret_lbs = compute_lower_bounds_chunks(
+                self.net, args_update_bounds,
+                sub_batch_size=sub_batch_size,
+            )
 
             # consider the max improvement among multi bounds in one C matrix
             k_ret_lbs = (k_ret_lbs - torch.cat([rhs, rhs])).max(-1).values
-            # No need to set alpha next time; we do not optimize the alphas.
-            set_alpha = False
 
             mask_score = (score_idx.values[:,
                           k] <= 1e-4).float()  # build mask indicates invalid scores (stable neurons), batch wise, 1: invalid

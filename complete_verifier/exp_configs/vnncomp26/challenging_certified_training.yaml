@@ -1,0 +1,35 @@
+general:
+  root_path: ../../vnncomp2026_benchmarks/benchmarks/challenging_certified_training_2026/1.0
+  csv_name: instances.csv
+model:
+  onnx_optimization_flags: ["merge_bn"]
+attack:
+  pgd_order: middle
+  pgd_restarts: 50
+solver:
+  auto_enlarge_batch_size: True
+  batch_size: 32
+  optimize_disjuncts_separately: True
+  build_batch_size: 1
+  beta-crown:
+    lr_alpha: 0.1
+    lr_beta: 0.15
+    iteration: 20
+  alpha-crown:
+    lr_alpha: 0.25
+    iteration: 20
+    full_conv_alpha: False
+bab:
+  interm_transfer: False
+  branching:
+    method: kfsb
+    candidates: 7
+    reduceop: max
+    decision_sub_batch_size: 256
+  mixed_precision:
+    enable_bab_bound_mixed_precision: true
+    bab_bound_mixed_precision_dtype: tf32
+    low_precision_prune_margin_abs: -0.001
+  clip_n_verify:
+    clip_interm_domain:
+      clip_in_alpha_crown: True

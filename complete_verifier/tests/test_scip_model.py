@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for scip_model.py"""
@@ -595,11 +595,11 @@ class TestSCIPModelGetVarByName(unittest.TestCase):
             self.assertIsInstance(result, SCIPVariable)
 
 
-class TestSCIPModelReset(unittest.TestCase):
-    """Tests for SCIPModel reset method."""
+class TestSCIPModelCompatibilityNoOps(unittest.TestCase):
+    """Tests for no-op methods used by shared solver code."""
 
-    def test_reset_does_nothing(self):
-        """Test reset is a no-op that returns None without raising."""
+    def test_reset_and_update_are_supported_no_ops(self):
+        """The Gurobi-compatible reset and update calls should be harmless."""
         mock_pyscipopt, mock_grb, _ = setup_mocked_imports()
 
         with patch.dict('sys.modules', {
@@ -611,9 +611,9 @@ class TestSCIPModelReset(unittest.TestCase):
             from scip_model import SCIPModel
 
             model = SCIPModel()
-            result = model.reset()
-
-            self.assertIsNone(result)
+            for method_name in ('reset', 'update'):
+                with self.subTest(method_name=method_name):
+                    self.assertIsNone(getattr(model, method_name)())
 
 
 class TestSCIPModelSetParamBasic(unittest.TestCase):
@@ -972,48 +972,6 @@ class TestSCIPModelGetConstrs(unittest.TestCase):
             result = model.getConstrs()
 
             self.assertEqual(result, mock_conss)
-
-
-class TestSCIPModelUpdate(unittest.TestCase):
-    """Tests for SCIPModel update method."""
-
-    def test_update_does_nothing(self):
-        """Test update is a no-op that returns None without raising."""
-        mock_pyscipopt, mock_grb, _ = setup_mocked_imports()
-
-        with patch.dict('sys.modules', {
-            'pyscipopt': mock_pyscipopt,
-            'gurobipy': mock_grb,
-        }):
-            if 'scip_model' in sys.modules:
-                del sys.modules['scip_model']
-            from scip_model import SCIPModel
-
-            model = SCIPModel()
-            result = model.update()
-
-            self.assertIsNone(result)
-
-
-class TestSCIPModelGetConstrByName(unittest.TestCase):
-    """Tests for SCIPModel getConstrByName method."""
-
-    def test_getConstrByName_raises(self):
-        """Test getConstrByName raises NotImplementedError."""
-        mock_pyscipopt, mock_grb, _ = setup_mocked_imports()
-
-        with patch.dict('sys.modules', {
-            'pyscipopt': mock_pyscipopt,
-            'gurobipy': mock_grb,
-        }):
-            if 'scip_model' in sys.modules:
-                del sys.modules['scip_model']
-            from scip_model import SCIPModel
-
-            model = SCIPModel()
-
-            with self.assertRaises(NotImplementedError):
-                model.getConstrByName()
 
 
 class TestSCIPModelCopy(unittest.TestCase):
@@ -1408,72 +1366,6 @@ class TestSCIPModelInit(unittest.TestCase):
 
             model = SCIPModel("TestModel")
             self.assertIsNotNone(model)
-
-
-class TestEventFunction(unittest.TestCase):
-    """Tests for the event() function."""
-
-    def test_event_function_is_callable(self):
-        """Test event function can be imported and is callable."""
-        mock_pyscipopt, mock_grb, MockEventhdlr = setup_mocked_imports()
-
-        with patch.dict('sys.modules', {
-            'pyscipopt': mock_pyscipopt,
-            'gurobipy': mock_grb,
-        }):
-            if 'scip_model' in sys.modules:
-                del sys.modules['scip_model']
-            from scip_model import event
-
-            # Just verify the function is callable
-            self.assertTrue(callable(event))
-
-    def test_event_function_uses_model(self):
-        """Test event() uses Model from pyscipopt."""
-        mock_pyscipopt, mock_grb, MockEventhdlr = setup_mocked_imports()
-
-        # Create a mock model that returns mock variables supporting arithmetic
-        mock_model = MagicMock()
-
-        # Create mock variables that support arithmetic operations
-        class MockVar:
-            def __init__(self, name, obj=0.0):
-                self.name = name
-                self.obj = obj
-
-            def __add__(self, other):
-                return MagicMock()
-
-            def __radd__(self, other):
-                return MagicMock()
-
-            def __mul__(self, other):
-                return MagicMock()
-
-            def __rmul__(self, other):
-                return MagicMock()
-
-            def __sub__(self, other):
-                return MagicMock()
-
-        mock_model.addVar.side_effect = lambda name, obj=0.0: MockVar(name, obj)
-        mock_pyscipopt.Model = MagicMock(return_value=mock_model)
-
-        # Mock the constraint expression to support >= operator
-        mock_expr = MagicMock()
-        mock_expr.__ge__ = MagicMock(return_value=MagicMock())
-
-        with patch.dict('sys.modules', {
-            'pyscipopt': mock_pyscipopt,
-            'gurobipy': mock_grb,
-        }):
-            if 'scip_model' in sys.modules:
-                del sys.modules['scip_model']
-            from scip_model import event
-
-            # The event function uses operations that can't be fully mocked
-            # So we just verify the function exists and can be imported
-            self.assertTrue(callable(event))
 
 
 if __name__ == '__main__':

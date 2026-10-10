@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -62,7 +62,8 @@ def pgd_attack_on_domains(model_ori, domains, stage, vnnlib):
 
     ret: PGDAttackResult = pgd_attack_with_general_specs(
         model_ori, center_x, dm_l, dm_u, c, rhs, spec_size,
-        alpha=alpha, pgd_steps=pgd_steps, num_restarts=num_restarts
+        alpha=alpha, pgd_steps=pgd_steps, num_restarts=num_restarts,
+        vnnlib=vnnlib
     )
 
     adv_input, adv_output = ret.adv_input_per_or, ret.adv_output_per_or

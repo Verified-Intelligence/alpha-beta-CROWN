@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for check_counterexample.py"""
@@ -17,15 +17,19 @@ import os
 import sys
 import tempfile
 import unittest
+import warnings
+from unittest.mock import patch
 
 import numpy as np
 
 # Add complete_verifier to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import check_counterexample as check_counterexample_module
+from cex_validation import CEX_INPUT_TOLERANCE, CEX_OUTPUT_TOLERANCE
 from check_counterexample import (
     parse_cex, print_vnnlib, read_statements, update_rv_tuple,
-    make_input_box_dict
+    make_input_box_dict, check_adv_example, CexResult
 )
 
 
@@ -299,6 +303,81 @@ class TestCheckSpecFunction(unittest.TestCase):
         spec_ys = [[[0.0]]]
         # Should not raise
         check_spec(y, spec_cs, spec_ys)
+
+
+class TestCheckAdvExample(unittest.TestCase):
+    """Tests for counterexample classification."""
+
+    def _classify(self, x, pred, vnnlib=None):
+        if vnnlib is None:
+            vnnlib = [(
+                [[0.0, 1.0]],
+                [(np.array([[1.0]]), np.array([0.0]))],
+            )]
+        with patch.object(
+                check_counterexample_module, 'parse_cex',
+                return_value=(np.array(x), np.array([]))), \
+                patch.object(
+                    check_counterexample_module, 'read_vnnlib_simple',
+                    return_value=vnnlib), \
+                patch.object(
+                    check_counterexample_module.onnx, 'load',
+                    return_value=object()), \
+                patch.object(
+                    check_counterexample_module, 'get_io_nodes',
+                    return_value=(None, None, np.float32)), \
+                patch.object(
+                    check_counterexample_module, 'eval_onnx',
+                    return_value=np.array(pred)):
+            with warnings.catch_warnings(record=True) as recorded:
+                warnings.simplefilter("always")
+                result = check_adv_example(
+                    "model.onnx", "property.vnnlib", "cex.txt")
+        return result, recorded
+
+    def test_check_adv_example_classifies_strict_and_invalid_cases(self):
+        cases = [
+            ('strict success', [0.5], [0.0], CexResult.CORRECT),
+            ('input outside box beyond tolerance',
+             [1.0 + 2 * CEX_INPUT_TOLERANCE], [0.0],
+             CexResult.INCORRECT),
+            ('output outside exact tolerance', [0.5],
+             [CEX_OUTPUT_TOLERANCE + 1e-12],
+             CexResult.INCORRECT),
+        ]
+        for name, x, pred, expected in cases:
+            with self.subTest(name=name):
+                result, recorded = self._classify(x, pred)
+                self.assertEqual(result, expected)
+                self.assertEqual(len(recorded), 0)
+
+    def test_correct_with_tolerance_warning_describes_input_tolerance(self):
+        result, recorded = self._classify(
+            [1.0 + CEX_INPUT_TOLERANCE / 2], [0.0])
+        self.assertEqual(result, CexResult.CORRECT_WITH_TOLERANCE)
+        self.assertEqual(len(recorded), 1)
+        message = str(recorded[0].message)
+        self.assertIn("input tolerance", message)
+        self.assertIn("weak success", message)
+
+    def test_main_exit_codes(self):
+        argv = [
+            'check_counterexample.py', 'model.onnx', 'property.vnnlib',
+            'cex.txt',
+        ]
+        cases = [
+            (CexResult.CORRECT_WITH_TOLERANCE, 0),
+            (CexResult.INCORRECT, 1),
+        ]
+        for result, expected_code in cases:
+            with self.subTest(result=result):
+                with patch.object(check_counterexample_module.sys, 'argv', argv), \
+                        patch.object(
+                            check_counterexample_module, 'check_adv_example',
+                            return_value=result):
+                    with self.assertRaises(SystemExit) as exc:
+                        check_counterexample_module.main()
+                self.assertEqual(exc.exception.code, expected_code)
 
 
 class TestParseCexEdgeCases(unittest.TestCase):

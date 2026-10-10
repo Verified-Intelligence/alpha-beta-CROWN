@@ -24,5 +24,8 @@ release
 release
 release_abcrown
 cachier
+counterexample_checker/SCORING/
+counterexample_checker/.scoring-download.lock/
+counterexample_checker/cex_wrong_shape.csv
 out.csv
 results.csv

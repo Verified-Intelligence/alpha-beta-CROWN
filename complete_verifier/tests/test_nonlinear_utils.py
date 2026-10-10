@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for heuristics/nonlinear/utils.py module."""
@@ -478,19 +478,10 @@ class TestPrecomputeAEdgeCases(unittest.TestCase):
 class TestSetRootsBasic(unittest.TestCase):
     """Basic tests for set_roots function."""
 
-    def _create_mock_bounded_tensor(self):
-        """Create a mock BoundedTensor."""
-        from auto_LiRPA import BoundedTensor
-        tensor = torch.rand(2, 3)
-        ptb = MagicMock()
-        return BoundedTensor(tensor, ptb)
-
-    def _create_mock_bound_input(self, value=None):
+    def _create_mock_bound_input(self):
         """Create a mock BoundInput node."""
         from auto_LiRPA.bound_ops import BoundInput
-        mock_input = MagicMock(spec=BoundInput)
-        mock_input.value = value if value is not None else self._create_mock_bounded_tensor()
-        return mock_input
+        return MagicMock(spec=BoundInput)
 
     def _create_mock_bound_constant(self):
         """Create a mock BoundConstant node."""
@@ -604,13 +595,6 @@ class TestSetRootsBasic(unittest.TestCase):
 class TestSetRootsAssertions(unittest.TestCase):
     """Tests for set_roots assertions."""
 
-    def _create_mock_bounded_tensor(self):
-        """Create a mock BoundedTensor."""
-        from auto_LiRPA import BoundedTensor
-        tensor = torch.rand(2, 3)
-        ptb = MagicMock()
-        return BoundedTensor(tensor, ptb)
-
     def test_first_root_must_be_bound_input(self):
         """Test that first root must be BoundInput."""
         from heuristics.nonlinear.utils import set_roots
@@ -626,31 +610,12 @@ class TestSetRootsAssertions(unittest.TestCase):
         with self.assertRaises(AssertionError):
             set_roots(roots, x, A)
 
-    def test_first_root_value_must_be_bounded_tensor(self):
-        """Test that first root's value must be BoundedTensor."""
-        from heuristics.nonlinear.utils import set_roots
-        from auto_LiRPA.bound_ops import BoundInput
-
-        mock_input = MagicMock(spec=BoundInput)
-        mock_input.value = torch.rand(2, 3)  # Regular tensor, not BoundedTensor
-        roots = [mock_input]
-
-        x = torch.rand(2, 3)
-        x.ptb = MagicMock()
-        A = torch.rand(4, 2, 3)
-
-        with self.assertRaises(AssertionError):
-            set_roots(roots, x, A)
-
     def test_subsequent_roots_must_be_valid_types(self):
         """Test that subsequent roots must be BoundConstant, BoundParams, or BoundBuffers."""
         from heuristics.nonlinear.utils import set_roots
         from auto_LiRPA.bound_ops import BoundInput
-        from auto_LiRPA import BoundedTensor
 
-        # Create valid first root
         mock_input = MagicMock(spec=BoundInput)
-        mock_input.value = BoundedTensor(torch.rand(2, 3), MagicMock())
 
         # Create invalid second root (not BoundConstant, BoundParams, or BoundBuffers)
         invalid_root = MagicMock()
@@ -667,10 +632,8 @@ class TestSetRootsAssertions(unittest.TestCase):
         """Test that BoundParams.param must be nn.Parameter."""
         from heuristics.nonlinear.utils import set_roots
         from auto_LiRPA.bound_ops import BoundInput, BoundParams
-        from auto_LiRPA import BoundedTensor
 
         mock_input = MagicMock(spec=BoundInput)
-        mock_input.value = BoundedTensor(torch.rand(2, 3), MagicMock())
 
         mock_params = MagicMock(spec=BoundParams)
         mock_params.param = torch.rand(3, 3)  # Regular tensor, not nn.Parameter
@@ -688,19 +651,10 @@ class TestSetRootsAssertions(unittest.TestCase):
 class TestSetRootsMultipleRoots(unittest.TestCase):
     """Tests for set_roots with multiple root nodes."""
 
-    def _create_mock_bounded_tensor(self):
-        """Create a mock BoundedTensor."""
-        from auto_LiRPA import BoundedTensor
-        tensor = torch.rand(2, 3)
-        ptb = MagicMock()
-        return BoundedTensor(tensor, ptb)
-
     def _create_mock_bound_input(self):
         """Create a mock BoundInput node."""
         from auto_LiRPA.bound_ops import BoundInput
-        mock_input = MagicMock(spec=BoundInput)
-        mock_input.value = self._create_mock_bounded_tensor()
-        return mock_input
+        return MagicMock(spec=BoundInput)
 
     def _create_mock_bound_constant(self):
         """Create a mock BoundConstant node."""
@@ -769,11 +723,7 @@ class TestSetRootsLAComputation(unittest.TestCase):
     def _create_mock_bound_input(self):
         """Create a mock BoundInput node."""
         from auto_LiRPA.bound_ops import BoundInput
-        from auto_LiRPA import BoundedTensor
-
-        mock_input = MagicMock(spec=BoundInput)
-        mock_input.value = BoundedTensor(torch.rand(2, 3), MagicMock())
-        return mock_input
+        return MagicMock(spec=BoundInput)
 
     def test_lA_sum_over_correct_dimension(self):
         """Test that lA is computed as sum over dim=2."""
@@ -816,11 +766,7 @@ class TestSetRootsEdgeCases(unittest.TestCase):
     def _create_mock_bound_input(self):
         """Create a mock BoundInput node."""
         from auto_LiRPA.bound_ops import BoundInput
-        from auto_LiRPA import BoundedTensor
-
-        mock_input = MagicMock(spec=BoundInput)
-        mock_input.value = BoundedTensor(torch.rand(2, 3), MagicMock())
-        return mock_input
+        return MagicMock(spec=BoundInput)
 
     def test_single_element_A(self):
         """Test with single-element A tensor."""

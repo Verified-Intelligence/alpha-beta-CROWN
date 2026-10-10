@@ -9,13 +9,15 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for custom package modules."""
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 import torch
 import torch.nn as nn
@@ -24,12 +26,113 @@ import numpy as np
 # Add complete_verifier to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from custom.custom_model_loader import (
-    conv_output_shape, transpose_linear_layers
-)
+from custom import custom_model_loader
+from custom import custom_adhoc_tuning
+from custom import custom_soundness_attack
+from custom.custom_model_loader import conv_output_shape, transpose_linear_layers
 from custom.custom_op import (
     LinearMaskedReluOp, LinearMaskedRelu
 )
+
+
+class TestNN4SysTuning(unittest.TestCase):
+    """Large NN4Sys models cap the batch without increasing a user's limit."""
+
+    def test_build_batch_upper_limit(self):
+        model = mock.Mock()
+        model.parameters.return_value = [SimpleNamespace(
+            requires_grad=True, numel=lambda: 50_000_000)]
+        handler = SimpleNamespace(all_specs=SimpleNamespace(batch_size=4150))
+        for requested, expected in [(128, 128), (1000, 1000), (1000000, 1000)]:
+            with self.subTest(requested=requested):
+                config = {'solver': {'build_batch_size': requested}}
+                with mock.patch.object(custom_adhoc_tuning.arguments, 'Config', config):
+                    custom_adhoc_tuning.customized_nn4sys_tuning(model, handler)
+                self.assertEqual(config['solver']['build_batch_size'], expected)
+
+
+class TestSoundnessAttackBudget(unittest.TestCase):
+    """Slow refinement leaves time for backstop without bypassing validation."""
+
+    def test_refinement_respects_budget_and_returns_validated_success(self):
+        for can_succeed in [False, True]:
+            with self.subTest(can_succeed=can_succeed):
+                clock = SimpleNamespace(now=0.)
+
+                class SlowSurrogate(nn.Module):
+                    def forward(self, value):
+                        clock.now += 0.05
+                        return value * 0 + 1e-7
+
+                def replay(value):
+                    clock.now += 0.05
+                    # ORT becomes valid only in the reserved final portion;
+                    # the differentiable surrogate never claims success.
+                    output = -2e-7 if can_succeed and clock.now >= 9.5 else 0.
+                    return np.full((len(value), 1), output, dtype=np.float32)
+
+                config = {'attack': {'pgd_steps': 1, 'pgd_restarts': 2,
+                                     'pgd_lr_decay': 0.99},
+                          'general': {'seed': 100},
+                          'specification': {'vnnlib_path': None}}
+                module = custom_soundness_attack
+                with mock.patch.object(module.arguments, 'Config', config), \
+                     mock.patch.object(module, 'time', SimpleNamespace(time=lambda: clock.now)), \
+                     mock.patch.object(module, '_ort_out', side_effect=replay):
+                    ret = module.soundness_attack(
+                        SlowSurrogate(), torch.zeros(1, 1), -torch.ones(1, 1),
+                        torch.ones(1, 1), torch.ones(1, 1), torch.zeros(1),
+                        torch.ones(1, dtype=torch.long), time_budget=10.,
+                        ils_hops=0, verbose=False)
+                self.assertEqual(bool(ret[0].item()), can_succeed)
+                self.assertLessEqual(clock.now, 10.5)
+                self.assertTrue(torch.isfinite(ret[4]).all())
+                if can_succeed:
+                    self.assertTrue(torch.all(ret[4] <= -5e-8))
+
+    def test_round_cutoff_preserves_candidates_within_total_budget(self):
+        """Validate existing PGD candidates after the round, not total, cutoff."""
+        class SlowLinearModel(nn.Module):
+            def __init__(self, clock, pgd_seconds):
+                super().__init__()
+                self.clock = clock
+                self.pgd_seconds = pgd_seconds
+
+            def forward(self, value):
+                # The PGD step and final candidate evaluation exhaust
+                # the round budget; subsequent evaluations are cheap.
+                self.clock.forwards += 1
+                self.clock.now += (self.pgd_seconds / 2
+                                   if self.clock.forwards <= 2 else 0.01)
+                return 0.25 - value
+
+        for pgd_seconds, can_succeed in [(9.1, True), (10.1, False)]:
+            with self.subTest(pgd_seconds=pgd_seconds):
+                clock = SimpleNamespace(now=0., forwards=0)
+
+                def replay(value, current_clock=clock):
+                    current_clock.now += 0.01
+                    return (np.float32(0.25) - value).astype(np.float32)
+
+                config = {'attack': {'pgd_steps': 1, 'pgd_restarts': 2,
+                                     'pgd_lr_decay': 0.99},
+                          'general': {'seed': 100},
+                          'specification': {'vnnlib_path': None}}
+                module = custom_soundness_attack
+                with mock.patch.object(module.arguments, 'Config', config), \
+                     mock.patch.object(module, 'time', SimpleNamespace(
+                         time=lambda current_clock=clock: current_clock.now)), \
+                     mock.patch.object(module, '_ort_out', side_effect=replay):
+                    ret = module.soundness_attack(
+                        SlowLinearModel(clock, pgd_seconds), torch.zeros(1, 1), -torch.ones(1, 1),
+                        torch.ones(1, 1), torch.ones(1, 1), torch.zeros(1),
+                        torch.ones(1, dtype=torch.long), time_budget=10.,
+                        ils_hops=0, drill_steps=0, verbose=False)
+                self.assertEqual(bool(ret[0].item()), can_succeed)
+                self.assertLessEqual(clock.now, pgd_seconds + 0.1)
+                if can_succeed:
+                    self.assertTrue(torch.all(ret[2] > 0.25))
+                    self.assertTrue(torch.all(ret[4] <= -5e-8))
 
 
 class TestConvOutputShapeCustom(unittest.TestCase):
@@ -135,6 +238,50 @@ class TestTransposeLinearLayers(unittest.TestCase):
         result = transpose_linear_layers(model)
 
         self.assertIsInstance(result[0], nn.Linear)
+
+
+class TestCustomizedTestLoader(unittest.TestCase):
+    """Tests for the VNN-COMP test benchmark loader."""
+
+    def test_vnnlib2_specs_use_vnnlib2_loader(self):
+        """VNN-LIB 2.0 specs should not be sent to the legacy parser."""
+        calls = {}
+        original_model = nn.Identity()
+        transformed_model = nn.Sequential(original_model, nn.ReLU())
+
+        class DummyWrapper(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.models = nn.ModuleDict({"f": original_model})
+
+        def fake_vnnlib2_loader(file_root, onnx_path, vnnlib_path):
+            calls["args"] = (file_root, onnx_path, vnnlib_path)
+            return DummyWrapper(), (-1, 1), ["vnnlib"]
+
+        def fake_transpose(model):
+            calls["transposed_model"] = model
+            return transformed_model
+
+        with mock.patch.object(
+                custom_model_loader, "is_vnnlib2_file",
+                return_value=True) as detect_vnnlib2, mock.patch.object(
+                    custom_model_loader, "vnnlib2_onnx_and_vnnlib_loader",
+                    side_effect=fake_vnnlib2_loader), mock.patch.object(
+                        custom_model_loader, "transpose_linear_layers",
+                        side_effect=fake_transpose), mock.patch.object(
+                        custom_model_loader, "read_vnnlib",
+                        side_effect=AssertionError(
+                            "legacy parser should not be used")):
+            model, shape, vnnlib = custom_model_loader.customized_TEST_loader(
+                "/bench", "model.onnx", "spec.vnnlib")
+
+        self.assertEqual(shape, (-1, 1))
+        self.assertEqual(vnnlib, ["vnnlib"])
+        detect_vnnlib2.assert_called_once_with(
+            os.path.join("/bench", "spec.vnnlib"))
+        self.assertEqual(calls["args"], ("/bench", "model.onnx", "spec.vnnlib"))
+        self.assertIs(calls["transposed_model"], original_model)
+        self.assertIs(model.models["f"], transformed_model)
 
 
 class TestLinearMaskedReluOp(unittest.TestCase):

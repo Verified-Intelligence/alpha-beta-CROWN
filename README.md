@@ -19,22 +19,24 @@ such as [Lyapunov stability](https://arxiv.org/pdf/2404.07956) in control.
 α,β-CROWN is the **winning verifier** in [VNN-COMP
 2021](https://sites.google.com/view/vnn2021), [VNN-COMP
 2022](https://sites.google.com/view/vnn2022), [VNN-COMP
-2023](https://sites.google.com/view/vnn2023), [VNN-COMP 2024](https://sites.google.com/view/vnn2024), and [VNN-COMP 2025](https://sites.google.com/view/vnn2025) (International Verification of
+2023](https://sites.google.com/view/vnn2023), [VNN-COMP 2024](https://sites.google.com/view/vnn2024), [VNN-COMP 2025](https://sites.google.com/view/vnn2025), and [VNN-COMP 2026](https://github.com/VNN-COMP/vnncomp2026_results) (International Verification of
 Neural Networks Competition) with the highest total score, outperforming many
-other neural network verifiers on a wide range of benchmarks over 5 years.
+other neural network verifiers on a wide range of benchmarks over 6 years.
 Details of competition results can be found in [VNN-COMP 2021
 slides](https://docs.google.com/presentation/d/1oM3NqqU03EUqgQVc3bGK2ENgHa57u-W6Q63Vflkv000/edit#slide=id.ge4496ad360_14_21),
 [report](https://arxiv.org/abs/2109.00498),
 [VNN-COMP 2022 report](https://arxiv.org/pdf/2212.10376.pdf),
 [VNN-COMP 2023 slides](https://github.com/ChristopherBrix/vnncomp2023_results/blob/main/SCORING/slides.pdf) and [report](https://arxiv.org/abs/2312.16760),
-and [VNN-COMP 2024 slides](https://docs.google.com/presentation/d/1RvZWeAdTfRC3bNtCqt84O6IIPoJBnF4jnsEvhTTxsPE/edit) and [report](https://www.arxiv.org/pdf/2412.19985), [VNN-COMP 2025 slides](https://docs.google.com/presentation/d/1ep-hGGotgWQF6SA0JIpQ6nFqs2lXoyuLMM-bORzNvrQ/edit?slide=id.p#slide=id.p).
+[VNN-COMP 2024 slides](https://docs.google.com/presentation/d/1RvZWeAdTfRC3bNtCqt84O6IIPoJBnF4jnsEvhTTxsPE/edit) and [report](https://www.arxiv.org/pdf/2412.19985), [VNN-COMP 2025 slides](https://docs.google.com/presentation/d/1ep-hGGotgWQF6SA0JIpQ6nFqs2lXoyuLMM-bORzNvrQ/edit?slide=id.p#slide=id.p),
+and [VNN-COMP 2026 results](https://github.com/VNN-COMP/vnncomp2026_results).
 
 The α,β-CROWN team is created and led by Prof. [Huan Zhang](https://huan-zhang.com/) at UIUC with contributions from multiple institutions. See the **list of contributors** [below](#developers-and-copyright).
 α,β-CROWN combines our efforts in neural network verification in a series of
 papers building up the bound propagation framework since 2018. See [Publications](#publications) below.
 
-News (2025 - )
+News (2025 - 2026)
 ----------------------
+- α,β-CROWN is the winner of [VNN-COMP 2026](https://github.com/VNN-COMP/vnncomp2026_results). (08/2026)
 - α,β-CROWN now provides a **new Python API** that allows users to run the verifier programmatically in Python **without** manually exporting ONNX models, writing VNNLIB specifications, or preparing config files. A good set of **default configuration automatically handles diverse verification scenarios**, while all options remain fully customizable through the API. (**See [API documentation](complete_verifier/docs/abcrown_api.md)**).
 - α,β-CROWN is the winner of [VNN-COMP 2025](https://sites.google.com/view/vnn2025) and is **ranked top-1** in all [scored benchmarks](https://github.com/VNN-COMP/vnncomp2025_results/blob/main/SCORING-SMALL-TOL/latex/main.pdf). (08/2025)
 - Bounding of computation graphs containing Jacobian operators now supports more nonlinear operators (e.g., ```tanh```, ```sigmoid```), enabling verification of [continuous-time Lyapunov stability](https://github.com/Verified-Intelligence/Two-Stage_Neural_Controller_Training). (12/2025)
@@ -91,7 +93,8 @@ Installation and Setup
 ----------------------
 
 α,β-CROWN is tested on Python 3.11 and PyTorch 2.11 (recent versions may also work).
-We use [`uv`](https://docs.astral.sh/uv/) for installation (Requirement: CUDA>=12.6).
+We use [`uv`](https://docs.astral.sh/uv/) for installation. Choose the PyTorch
+build that matches your GPU driver; a CPU-only installation is also available.
 
 Install `uv`:
 ```bash
@@ -113,7 +116,8 @@ uv sync
 source .venv/bin/activate
 ```
 
-If you use NVIDIA Volta GPUs eg. `V100` or encountered `CUDA error: no kernel image is available for execution on the device`, please downgrade to PyTorch 2.11.0 with CUDA 12.6.
+Available extras are `cpu`, `cu126`, `cu128`, and `cu130`. Select one per
+environment. For NVIDIA Volta GPUs such as the V100, use the CUDA 12.6 build:
 
 ```bash
 uv pip install --reinstall torch==2.11.0 torchvision --index-url https://download.pytorch.org/whl/cu126
@@ -142,14 +146,58 @@ guide](/complete_verifier/docs/vnn_comp.md).
 Instructions
 ----------------------
 
-The verifier can be invoked through the 
-**[new Python API](complete_verifier/docs/abcrown_api.md)** or through 
-the command-line interface with configuration files. Checkout the 
-[API documentation](complete_verifier/docs/abcrown_api.md) for API usage.
-For the command-line interface, we provide a 
-unified front-end for the verifier, `abcrown.py`.  All parameters
-for the verifier are defined in a `yaml` config file. For example, to run
-robustness verification on a CIFAR-10 ResNet network, you just run:
+Use the Python API to verify a PyTorch model by describing the input region and
+desired output property with Python expressions, then calling `verify()`.
+The API supplies default verifier settings and lets you customize them in Python.
+
+The following example checks whether a two-class model keeps its predicted class
+throughout an L-infinity input box:
+
+```python
+import torch
+from abcrown import (
+    ABCrownSolver, ConfigBuilder, IOConstraints, input_vars, output_vars,
+)
+
+# Small example model; replace it with your trained PyTorch model.
+model = torch.nn.Sequential(
+    torch.nn.Linear(2, 16), torch.nn.ReLU(), torch.nn.Linear(16, 2),
+).eval()
+sample = torch.tensor([0.5, -0.5])
+eps = 0.01
+with torch.no_grad():
+    label = model(sample.unsqueeze(0)).argmax(dim=1).item()
+
+x = input_vars(2)
+y = output_vars(2)
+constraints = IOConstraints(
+    input_vars=x,
+    output_vars=y,
+    input_constraint=(x >= sample - eps) & (x <= sample + eps),
+    output_constraint=y[label] > y[1 - label],
+)
+
+# Use CPU for this small example; choose "cuda" for GPU verification.
+config = ConfigBuilder.from_defaults().set("general/device", "cpu")
+solver = ABCrownSolver(model, x, y, config=config)
+result = solver.verify(constraints=constraints)
+print(result.status)
+```
+
+A `verified` result certifies the property throughout the input
+region. A `falsified` result reports a counterexample;
+`unknown` means the verifier has not resolved the property within its limits.
+
+The API also provides `compute_bounds()`, `minimize()`, and `maximize()`.
+See the [Python API documentation](complete_verifier/docs/abcrown_api.md) and
+[Python examples](complete_verifier/examples_abcrown) for more applications
+and configuration options.
+
+### Command-Line Benchmark Runs
+
+For existing YAML configurations and VNNLIB benchmark properties, use the
+`abcrown.py` command-line front-end. For example, the supplied CIFAR-10 ResNet
+configuration runs with:
 
 ```bash
 source .venv/bin/activate  # activate the uv environment
@@ -310,19 +358,30 @@ Team leaders:
 * Faculty: Huan Zhang (huan@huan-zhang.com), UIUC
 * Student: Xiangru Zhong (xiangru4@illinois.edu), UIUC
 
-Current developers (* indicates members of VNN-COMP 2025 team):
+Current developers (* indicates members of VNN-COMP 2026 team):
 * \*Duo Zhou (duozhou2@illinois.edu), UIUC
-* \*Keyi Shen (keyis2@illinois.edu), UIUC (graduated, now at Georgia Tech)
-* \*Hesun Chen (hesunc2@illinois.edu), UIUC
-* \*Haoyu Li (haoyuli5@illinois.edu), UIUC
-* \*Ruize Gao (ruizeg2@illinois.edu), UIUC
-* \*Hao Cheng (haoc539@illinois.edu), UIUC
-* Zhouxing Shi (zhouxingshichn@gmail.com), UCLA/UC Riverside
-* Lei Huang (leih5@illinois.edu), UIUC
+* \*Lei Huang (leih5@illinois.edu), UIUC
+* Hesun Chen (hesunc2@illinois.edu), UIUC (graduated)
+* Haoyu Li (haoyuli5@illinois.edu), UIUC
+* Ruize Gao (ruizeg2@illinois.edu), UIUC (graduated)
+* Hao Cheng (haoc539@illinois.edu), UIUC (graduated)
+* \*Yifei Li (yifei28@illinois.edu), UIUC
+* \*Jingyi Wang (jingyi66@illinois.edu), UIUC
+* \*Xuanle Li (xuanlel2@illinois.edu), UIUC
+* \*Ashmit Dutta (ashmitd2@illinois.edu), UIUC
+* \*Lingyin Zhang (emilyz5@illinois.edu), UIUC
 * Taobo Liao (taobol2@illinois.edu), UIUC
-* Jorge Chavez (jorgejc2@illinois.edu), UIUC
+* Robert Bates (rbates8@gatech.edu), Georgia Tech / VISS
+* Ketan Bhardwaj (ketanbj@cc.gatech.edu), Georgia Tech / VISS
+* Yanheng Zhuang (yzhua2@illinois.edu), UIUC
+* Zhongyue Yang (ky23@illinois.edu), UIUC
+* Jiuru Lin (jiurul2@illinois.edu), UIUC
+* William Lu (willlu2@illinois.edu), UIUC
 
 Past developers:
+* Zhouxing Shi (zhouxingshichn@gmail.com), UCLA/UC Riverside
+* Keyi Shen (keyis2@illinois.edu), UIUC (graduated, now at Georgia Tech)
+* Jorge Chavez (jorgejc2@illinois.edu), UIUC
 * Hongji Xu (hx84@duke.edu), Duke University (intern with Prof. Huan Zhang)
 * Christopher Brix (brix@cs.rwth-aachen.de), RWTH Aachen University
 * Hao Chen (haoc8@illinois.edu), UIUC
@@ -337,9 +396,8 @@ Past developers:
 * Yihan Wang (yihanwang@ucla.edu), UCLA
 * Jinqi (Kathryn) Chen (jinqic@cs.cmu.edu), CMU
 
-α,β-CROWN is currently supported in part by the National Science Foundation (NSF; award 2331967, 2525287), the AI2050 program at Schmidt Science, the Virtual Institute for Scientific Software (VISS) at Georgia Tech, the University Research Program at Toyota Research Institute (TRI), and a Mathworks research award.
+α,β-CROWN is currently supported in part by the National Science Foundation (NSF; award 2331967, 2525287), the AI2050 program at Schmidt Science, the Virtual Institute for Scientific Software (VISS) at Georgia Tech, the University Research Program at Toyota Research Institute (TRI), a Mathworks research award, and an NSF CAREER award.
 
 The team acknowledges the financial and advisory support (2021 - 2023) from Prof. Zico Kolter (zkolter@cs.cmu.edu), Prof. Cho-Jui Hsieh (chohsieh@cs.ucla.edu), Prof. Suman Jana (suman@cs.columbia.edu), Prof. Bo Li (lbo@illinois.edu), and Prof. Xue Lin (xue.lin@northeastern.edu) during the years 2021 - 2023.
 
 Our library is released under the BSD 3-Clause license. A copy of the license is included [here](LICENSE).
-

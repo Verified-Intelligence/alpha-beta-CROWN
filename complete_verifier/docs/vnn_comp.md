@@ -6,8 +6,8 @@ benchmarks using the latest version of our verifier.
 
 ## Installation
 
-We assume `conda` is available on your system; if not, you should first install
-[miniconda](https://docs.conda.io/en/latest/miniconda.html).
+Install [`uv`](https://docs.astral.sh/uv/) and use Python 3.11. Select a
+PyTorch extra (`cpu`, `cu126`, `cu128`, or `cu130`) for your machine.
 
 First, clone and install our α,β-CROWN verifier:
 
@@ -15,14 +15,12 @@ First, clone and install our α,β-CROWN verifier:
 # Clone verifier code.
 git clone --recursive https://github.com/Verified-Intelligence/alpha-beta-CROWN.git
 cd alpha-beta-CROWN
-# Remove the old environment, if necessary.
-conda deactivate; conda env remove --name alpha-beta-crown
-# Create conda environment with fixed package versions.
-conda env create -f complete_verifier/environment.yaml --name alpha-beta-crown
-conda activate alpha-beta-crown
+# Create the verifier environment.
+uv sync
+source .venv/bin/activate
 
 # Get python installation path. You will need to use this path in later steps.
-export VNNCOMP_PYTHON_PATH=$(python -c 'import os; print(os.path.dirname(os.path.realpath("/proc/self/exe")))')
+export VNNCOMP_PYTHON_PATH=$(pwd)/.venv/bin
 echo "Please run \"export VNNCOMP_PYTHON_PATH=${VNNCOMP_PYTHON_PATH}\" before you run vnncomp scripts."
 ```
 
@@ -77,6 +75,9 @@ git clone https://github.com/VNN-COMP/vnncomp2024_benchmarks.git
 git clone https://github.com/VNN-COMP/vnncomp2025_benchmarks.git
 # Unzip and download necessary files
 (cd vnncomp2025_benchmarks; ./setup.sh)
+
+git clone https://github.com/VNN-COMP/vnncomp2026_benchmarks.git
+# Follow this repository's setup instructions for benchmark downloads.
 ```
 
 Then, change directory to the folder for the year you want to use. For example,
@@ -88,15 +89,13 @@ cd vnncomp2023_benchmarks
 ## Run VNN-COMP benchmarks via VNN-COMP scripts
 
 To run with the VNN-COMP scripts, provide the correct paths to the
-verifier and conda environment via **setting the `VNNCOMP_PYTHON_PATH` environment
-variable**. Here we assume the alpha-beta-crown conda environment is installed
-to `${HOME}/miniconda3/envs/alpha-beta-crown` (the command in the section above
-should print the right value for `VNNCOMP_PYTHON_PATH`), and the verifier code
-is cloned to `${HOME}/alpha-beta-CROWN`:
+verifier environment via **setting the `VNNCOMP_PYTHON_PATH` environment
+variable**. Here the verifier and its environment are installed under
+`${HOME}/alpha-beta-CROWN`:
 
 ```bash
 # Please set this environment variable properly, see above instructions
-export VNNCOMP_PYTHON_PATH=${HOME}/miniconda3/envs/alpha-beta-crown/bin
+export VNNCOMP_PYTHON_PATH=${HOME}/alpha-beta-CROWN/.venv/bin
 # Please check the path to the alpha-beta-CROWN repository and change it accordingly
 ./run_all_categories.sh v1 ${HOME}/alpha-beta-CROWN/vnncomp_scripts $(pwd) results_vit.csv counterexamples_vit "vit" all  # Example to run the vit benchmark
 ```
@@ -143,7 +142,10 @@ with less running time compare to those with the `./run_all_categories.sh` scrip
 (in the competitions, the overhead was measured and excluded from scoring).
 
 All the config files are stored at `exp_configs/vnncomp21`, `exp_configs/vnncomp22`,
-`exp_configs/vnncomp23`, `exp_configs/vnncomp24`, and `exp_configs/vnncomp25` for the five years of VNN-COMP respectively.
+`exp_configs/vnncomp23`, `exp_configs/vnncomp24`, `exp_configs/vnncomp25`, and
+`exp_configs/vnncomp26` for VNN-COMP 2021 through 2026. The current benchmark
+category-to-configuration mapping is in
+[`vnncomp_main.py`](../vnncomp_main.py).
 
 ## Original code used in the competitions
 

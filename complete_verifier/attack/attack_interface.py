@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 
@@ -20,7 +20,8 @@ import arguments
 from load_model import Customized
 from auto_LiRPA import BoundedTensor
 from attack.attack_utils import (default_adv_saver, default_adv_verifier,
-                                process_data_for_attack, check_and_save_cex)
+                                process_data_for_attack, check_and_save_cex,
+                                invalid_attack_success_mask)
 
 
 def attack(model_ori, x: BoundedTensor, c: torch.Tensor, rhs: torch.Tensor, or_spec_size: torch.Tensor, 
@@ -38,9 +39,11 @@ def attack(model_ori, x: BoundedTensor, c: torch.Tensor, rhs: torch.Tensor, or_s
     x, data_min, data_max, c, rhs = process_data_for_attack(x, c, rhs, or_spec_size)
 
     attack_function = eval(attack_config["attack_func"])
+    attack_kwargs = dict(
+        initialization=initialization, GAMA_loss=GAMA_loss, vnnlib=vnnlib)
     attack_ret, best_or_idx, adv_input, adv_output, adv_margins, all_adv_candidates = attack_function(
         model_ori, x, data_min, data_max, c, rhs, or_spec_size,
-        initialization=initialization, GAMA_loss=GAMA_loss)
+        **attack_kwargs)
     # attack_ret, best_or_idx: [1].
     # adv_input shape: [num_or, *input_shape], adv_output shape: [num_or, num_output]
     # adv_margins shape: [num_spec]
@@ -61,7 +64,8 @@ def attack(model_ori, x: BoundedTensor, c: torch.Tensor, rhs: torch.Tensor, or_s
 
 
 def attack_with_general_specs(model, x, data_min, data_max, C_mat, rhs_mat, or_spec_size,
-                              initialization="uniform", GAMA_loss=False):
+                              initialization="uniform", GAMA_loss=False,
+                              vnnlib=None):
     r""" Interface to PGD attack.
 
         :param model (torch.nn.Module): PyTorch model under attack.
@@ -164,12 +168,40 @@ def attack_with_general_specs(model, x, data_min, data_max, C_mat, rhs_mat, or_s
         return_best_idx=True
     )
 
-    # If the clean input is already adversarial, we skip the attack.
+    def exclude_invalid_successes():
+        # A lowered OR candidate with margin <= attack_tolerance may still fail
+        # concrete validation, for example when it lies exactly on an open
+        # VNN-LIB bound. Such candidates are removed from the current best list.
+        invalid_successes = invalid_attack_success_mask(
+            adv_input_per_or, adv_output_per_or, adv_margin_per_or, vnnlib,
+            arguments.Config["attack"]["attack_tolerance"])
+        if not invalid_successes.any():
+            return False
+
+        # Margins are minimized when selecting the best OR candidate, so +inf
+        # excludes invalid candidates from later best_or_idx selection.
+        adv_margin_per_or[invalid_successes] = float("inf")
+        # adv_margin_per_or is indexed by OR clause. adv_margin_per_spec is
+        # indexed by all AND rows concatenated across OR clauses, so expand the
+        # OR mask by each OR clause size before updating per-row margins.
+        invalid_specs = invalid_successes.repeat_interleave(
+            or_spec_size.to(invalid_successes.device), dim=-1)
+        adv_margin_per_spec[invalid_specs] = float("inf")
+        return True
+
+    # If the clean input is already a valid counterexample, we skip PGD.
     if attack_success.all():
-        print("Clean input adversarial, attack skipped.")
-        return (attack_success, best_or_idx,
-                adv_input_per_or.squeeze(0).detach(), adv_output_per_or.squeeze(0).detach(),
-                adv_margin_per_or.squeeze(0).detach(), None)
+        invalid_found = exclude_invalid_successes()
+        adv_margin_best, best_or_idx = adv_margin_per_or.min(dim=-1)
+        attack_success = (
+            adv_margin_best <= arguments.Config["attack"]["attack_tolerance"])
+        if attack_success.all():
+            print("Clean input adversarial, attack skipped.")
+            return (attack_success, best_or_idx,
+                    adv_input_per_or.squeeze(0).detach(), adv_output_per_or.squeeze(0).detach(),
+                    adv_margin_per_or.squeeze(0).detach(), None)
+        if invalid_found:
+            print("Clean input candidate rejected by concrete validation, continuing PGD.")
 
     # Main attack loop
     total_batches = (num_restarts + batch_size - 1) // batch_size
@@ -180,7 +212,8 @@ def attack_with_general_specs(model, x, data_min, data_max, C_mat, rhs_mat, or_s
             model, batched_x, batched_data_min, batched_data_max,
             batched_C_mat, batched_rhs_mat, or_spec_size, alpha,
             initialization=initialization, GAMA_loss=GAMA_loss,
-            use_adam=use_adam, num_restarts=min(batch_size, num_restarts)
+            use_adam=use_adam, num_restarts=min(batch_size, num_restarts),
+            vnnlib=vnnlib
         )
 
         # Step 7: Save the best adversarial examples
@@ -195,8 +228,17 @@ def attack_with_general_specs(model, x, data_min, data_max, C_mat, rhs_mat, or_s
         adv_margin_best, best_or_idx = adv_margin_per_or.min(dim=-1)
 
         # Step 8: Check if the attack is successful
-        attack_success = adv_margin_best <= 0.0
+        attack_success = adv_margin_best <= arguments.Config["attack"]["attack_tolerance"]
         assert (attack_success == ret.attack_success).all(), "inconsistent attack success status"
+
+        if attack_success.any():
+            invalid_found = exclude_invalid_successes()
+            if invalid_found:
+                print("PGD candidate rejected by concrete validation, continuing PGD.")
+                adv_margin_best, best_or_idx = adv_margin_per_or.min(dim=-1)
+                attack_success = (
+                    adv_margin_best
+                    <= arguments.Config["attack"]["attack_tolerance"])
         # If the attack is successful, we can stop early
         if attack_success.all():
             break

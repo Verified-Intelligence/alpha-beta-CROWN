@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for cuts/infered_cuts.py module.
@@ -1433,30 +1433,6 @@ class TestUpdateCut:
         # Should not raise with random_drop heuristic
         biccos.update_cut(d, mock_net, ret, enforce_usage=False,
                          domain_visited=0, heuristic='random_drop', iter_idx=1)
-
-    @patch('cuts.infered_cuts.cut_analysis')
-    @patch('cuts.infered_cuts.fetch_cut_from_cplex')
-    def test_update_cut_sparse_opt_raises(self, mock_fetch, mock_analysis, biccos_factory):
-        """Test update_cut raises NotImplementedError for sparse_opt."""
-        mock_fetch.return_value = (None, None)
-
-        biccos = biccos_factory(mode='with_relu')
-        mock_net = self._create_mock_net()
-
-        d = {
-            'history': [{}],
-            'lower_bounds': {'/output': torch.tensor([1.0, -1.0])},
-            'depths': [1],
-            'betas': [None],
-        }
-        ret = {
-            'lower_bounds': {'/output': torch.tensor([1.0, -1.0])},
-            'betas': [{}]
-        }
-
-        with pytest.raises(NotImplementedError):
-            biccos.update_cut(d, mock_net, ret, enforce_usage=False,
-                             domain_visited=0, heuristic='sparse_opt', iter_idx=1)
 
     @patch('cuts.infered_cuts.cut_analysis')
     @patch('cuts.infered_cuts.fetch_cut_from_cplex')

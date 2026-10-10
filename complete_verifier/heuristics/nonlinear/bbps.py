@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import copy
@@ -25,7 +25,6 @@ from heuristics.nonlinear.babsr import BaBSRNonlinearBranching
 from heuristics.nonlinear.utils import set_roots
 from heuristics.nonlinear.bp_opt import BranchingPointOpt
 from utils import get_reduce_op, expand_batch
-from auto_LiRPA import BoundedTensor
 from auto_LiRPA.bound_ops import *
 from auto_LiRPA.utils import stop_criterion_batch_any, multi_spec_keep_func_all
 
@@ -37,6 +36,8 @@ class NonlinearBranching(NeuronBranchingHeuristic):
     corresponding operator. We also want to implement optimizable branching
     point not limited to 0.
     """
+
+    supports_decision_sub_batch_size = True
 
     def __init__(self, net, **kwargs):
         super().__init__(net)
@@ -80,6 +81,65 @@ class NonlinearBranching(NeuronBranchingHeuristic):
         split_masks = domains['mask']
         self.update_batch_size_and_device(domains['lower_bounds'])
 
+        sub_batch_size = arguments.Config['bab']['branching']['decision_sub_batch_size']
+        batch = self.batch_size
+        if sub_batch_size is None or batch <= sub_batch_size:
+            chunk_bounds = [(0, batch)]
+        else:
+            num_chunks = (batch + sub_batch_size - 1) // sub_batch_size
+            chunk_bounds = [
+                (c * sub_batch_size, min((c + 1) * sub_batch_size, batch))
+                for c in range(num_chunks)
+            ]
+            print(f'Chunked branching decisions: {num_chunks} chunks of at '
+                  f'most {sub_batch_size} domains')
+
+        if len(chunk_bounds) == 1:
+            return self._heuristic_decisions_for_chunk(
+                domains, split_masks, verbose=verbose,
+                branching_point_method=branching_point_method)
+
+        # The heavy intermediate tensors (e.g. margin_after in _fast_heuristic,
+        # the full per-neuron score dict, and the top-k buffers) all scale with
+        # the domain batch. When decision_sub_batch_size is set we run the
+        # entire heuristic query -- scores, top-k selection and branching point
+        # gathering -- per chunk and only concatenate the (small) final
+        # decisions, so the peak memory is bounded by a single chunk.
+        layers_chunks, indices_chunks, points_chunks = [], [], []
+        for i, j in chunk_bounds:
+            sub_domains = self._slice_domains_for_scoring(domains, i, j)
+            sub_masks = {k: v[i:j] for k, v in split_masks.items()}
+            chunk_layers, chunk_indices, chunk_points = (
+                self._heuristic_decisions_for_chunk(
+                    sub_domains, sub_masks, verbose=verbose,
+                    branching_point_method=branching_point_method))
+            layers_chunks.append(chunk_layers)
+            indices_chunks.append(chunk_indices)
+            points_chunks.append(chunk_points)
+
+        # All domains in the returned batch must share the same split depth.
+        # Each chunk's depth is the min number of valid neurons within that
+        # chunk; the global min over chunks equals the min over the full batch,
+        # so slicing every chunk to it reproduces the un-chunked result.
+        min_depth = min(layer.shape[1] for layer in layers_chunks)
+        layers = torch.cat([l[:, :min_depth] for l in layers_chunks], dim=0)
+        indices = torch.cat([idx[:, :min_depth] for idx in indices_chunks], dim=0)
+        if self.relu_only:
+            points = None
+        else:
+            points = torch.cat([p[:, :min_depth] for p in points_chunks], dim=0)
+
+        return layers, indices, points
+
+    def _heuristic_decisions_for_chunk(self, domains, split_masks, verbose=False,
+                                       branching_point_method=None):
+        """Run the full heuristic query (scores, top-k, points) for one chunk.
+
+        `domains` and `split_masks` must already be sliced to this chunk. The
+        chunk batch size (read by find_topk_scores) is derived dynamically from
+        `domains` rather than relying on a caller-set self.batch_size.
+        """
+        self.update_batch_size_and_device(domains['lower_bounds'])
         scores = {}
         if not self.relu_only:
             points = {}
@@ -87,12 +147,10 @@ class NonlinearBranching(NeuronBranchingHeuristic):
             name = node.name
             if verbose:
                 print(f'Computing branching score for {name}')
-
             ret = self.compute_branching_scores(
                 node, domains=domains,
                 branching_point_method=branching_point_method)
-
-            scores[name] = ret['scores'].flatten(1) * split_masks[node.name]
+            scores[name] = ret['scores'].flatten(1) * split_masks[name]
             scores[name] += split_masks[name] * 1e-10
             if not self.relu_only:
                 points[name] = ret['points'].flatten(1, -2)
@@ -121,6 +179,23 @@ class NonlinearBranching(NeuronBranchingHeuristic):
 
         return layers, indices, points
 
+    def _slice_domains_for_scoring(self, domains, i, j):
+        """Slice the domain dict over the batch dimension for score computation.
+
+        Only the entries read by compute_branching_scores / _fast_heuristic are
+        sliced (intermediate bounds, lA matrices and thresholds). net.A_saved is
+        reduced to its first element internally, so it does not need slicing
+        here; the per-neuron masks are sliced separately by the caller.
+        """
+        sub_domains = {
+            'lower_bounds': {k: v[i:j] for k, v in domains['lower_bounds'].items()},
+            'upper_bounds': {k: v[i:j] for k, v in domains['upper_bounds'].items()},
+            'lAs': {k: v[i:j] for k, v in domains['lAs'].items()},
+        }
+        if domains.get('thresholds', None) is not None:
+            sub_domains['thresholds'] = domains['thresholds'][i:j]
+        return sub_domains
+
     def compute_branching_decisions(self, domains, split_depth=1,
                                 branching_candidates=1, verbose=False,
                                 branching_reduceop='min', **kwargs):
@@ -146,39 +221,72 @@ class NonlinearBranching(NeuronBranchingHeuristic):
             iterations = self.filter_iterations
 
         lb, ub = domains['lower_bounds'], domains['upper_bounds']
-        args_update_bounds = {
-            'lower_bounds': lb, 'upper_bounds': ub,
-            'alphas': domains['alphas'], 'cs': domains['cs'],
-            'thresholds': domains.get('thresholds', None)
-        }
-        if self.filter_beta:
-            args_update_bounds.update({
-                'betas': domains['betas'],
-                'history': domains['history']
-            })
-        print('Start filtering...')
-        split = {
-            'decision': decisions.branching_decision,
-            'points': decisions.branching_points,
-        }
-        self.net.build_history_and_set_bounds(
-            args_update_bounds, split, mode='breadth')
+        num_domain = domains['cs'].shape[0]
+        decision_list = decisions.branching_decision
+        points_all = decisions.branching_points
+        # Number of candidate splits evaluated per domain. Decisions are laid
+        # out candidate-major: index = cur_split * num_domain + domain_idx.
+        num_split = len(decision_list) // num_domain
 
-        total_candidates = args_update_bounds['cs'].shape[0]
-        num_batches = (
-            total_candidates + self.filter_batch_size - 1
-        ) // self.filter_batch_size
+        # `build_history_and_set_bounds(mode='breadth')` expands the working set
+        # to (num_split * num_branches * num_domain) rows all at once, which is
+        # the dominant memory consumer (it materializes repeated copies of every
+        # intermediate bound / alpha). To bound peak memory we chunk along the
+        # candidate dimension so each build expands at most ~filter_batch_size
+        # rows. Concatenating the per-chunk results in candidate order
+        # reproduces the exact same [num_split, num_branches, num_domain] layout
+        # that a single full build would have produced.
+        rows_per_cand = self.num_branches * num_domain
+        cand_per_chunk = max(1, self.filter_batch_size // max(rows_per_cand, 1))
+        num_cand_chunks = (num_split + cand_per_chunk - 1) // cand_per_chunk
+
+        print(f'Start filtering... ({num_split} candidates, '
+              f'{cand_per_chunk} candidate(s)/chunk, {num_cand_chunks} chunk(s))')
+
         ret_lbs = []
         iterations_bak = arguments.Config['solver']['beta-crown']['iteration']
         arguments.Config['solver']['beta-crown']['iteration'] = iterations
-        for i in tqdm.tqdm(range(num_batches)):
-            args_update_bounds_ = self._take_filter_batch(args_update_bounds, i)
-            ret_lbs_ = self.net.update_bounds(
-                copy.deepcopy(args_update_bounds_),
-                shortcut=True, beta=self.filter_beta, beta_bias=True,
-                stop_criterion_func=stop_criterion_batch_any(args_update_bounds_['thresholds']),
-                multi_spec_keep_func=multi_spec_keep_func_all)
-            ret_lbs.append(ret_lbs_.detach())
+        for c in tqdm.tqdm(range(num_cand_chunks)):
+            c0 = c * cand_per_chunk
+            c1 = min((c + 1) * cand_per_chunk, num_split)
+            # Slice the candidate-major decision/point tensors for this chunk.
+            sub_split = {
+                'decision': decision_list[c0 * num_domain:c1 * num_domain],
+                'points': (points_all[c0 * num_domain:c1 * num_domain]
+                           if points_all is not None else None),
+            }
+            # Rebuild the (un-expanded) arg dict from the original per-domain
+            # tensors each chunk; build_history_and_set_bounds reassigns the
+            # top-level keys with freshly repeated tensors and never mutates the
+            # originals, so this is safe to repeat.
+            args_update_bounds = {
+                'lower_bounds': lb, 'upper_bounds': ub,
+                'alphas': domains['alphas'], 'cs': domains['cs'],
+                'thresholds': domains.get('thresholds', None)
+            }
+            if self.filter_beta:
+                args_update_bounds.update({
+                    'betas': domains['betas'],
+                    'history': domains['history']
+                })
+            self.net.build_history_and_set_bounds(
+                args_update_bounds, sub_split, mode='breadth')
+
+            # The expanded chunk may still exceed filter_batch_size when a single
+            # candidate's expansion (num_branches * num_domain) is large; keep
+            # sub-batching the update_bounds call as before.
+            chunk_total = args_update_bounds['cs'].shape[0]
+            num_batches = (
+                chunk_total + self.filter_batch_size - 1
+            ) // self.filter_batch_size
+            for i in range(num_batches):
+                args_update_bounds_ = self._take_filter_batch(args_update_bounds, i)
+                ret_lbs_ = self.net.update_bounds(
+                    copy.deepcopy(args_update_bounds_),
+                    shortcut=True, beta=self.filter_beta, beta_bias=True,
+                    stop_criterion_func=stop_criterion_batch_any(args_update_bounds_['thresholds']),
+                    multi_spec_keep_func=multi_spec_keep_func_all)
+                ret_lbs.append(ret_lbs_.detach())
         arguments.Config['solver']['beta-crown']['iteration'] = iterations_bak
         ret_lbs = torch.concat(ret_lbs, dim=0)
         return ret_lbs
@@ -286,11 +394,7 @@ class NonlinearBranching(NeuronBranchingHeuristic):
                 mask_unstable = torch.logical_and(lb_ori < 0, ub_ori > 0)
                 points[mask_unstable, :] = 0
             elif isinstance(start_node, BoundMultiPiecewiseNonlinear):
-                offset = (
-                    start_node.inputs[2].forward_value
-                    if hasattr(start_node.inputs[2], 'forward_value')
-                    else start_node.inputs[2].forward()
-                )
+                offset = self.model.get_forward_value(start_node.inputs[2])
                 mask = (lb_ori.unsqueeze(-1) < offset) & (ub_ori.unsqueeze(-1) > offset)
                 mask_cumsum = mask.cumsum(dim=-1)
                 index = (mask_cumsum[:, :, -1] + 1) // 2
@@ -321,7 +425,6 @@ class NonlinearBranching(NeuronBranchingHeuristic):
             lAs, lb, ub, node, start_nodes)
         dim_output, batch_size, num_neurons = bound_before.shape
         assert isinstance(self.roots[0], BoundInput)
-        assert isinstance(self.roots[0].value, BoundedTensor)
         x_new = expand_batch(self.net.x, batch_size)
         set_roots(self.roots, x_new, A_before)
         # (batch_size, dim_output)

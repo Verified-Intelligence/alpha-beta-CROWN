@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -38,6 +38,7 @@ from domain_clipper import (
     DomainClipScorer,
 )
 from state import AlphaValueData, BetaFullData
+from state.alpha import resolve_alpha_storage_dtype
 from utils import expand_batch, Timer
 
 from activation_split.return_types import (
@@ -46,6 +47,7 @@ from activation_split.return_types import (
     UpdateBoundPreReturn,
     UpdateBoundPostReturn,
 )
+from activation_split.debug_utils import _check_mixed_precision_bound_soundness
 
 
 if TYPE_CHECKING:
@@ -73,6 +75,7 @@ def update_bounds_pre(
     final_name: str,
     net_c,
     net_x,
+    dtype_map: dict[str, torch.dtype],
     *,
     timer: Timer,
     device,
@@ -91,6 +94,7 @@ def update_bounds_pre(
     - final_name: the name of the final layer
     - net_c: the C matrix for the final layer. 
     - net_x: the input x of the 
+    - dtype_map: computation dtype owned by each split node
     - timer: a Timer object
     - device: device that contruct alpha and betas to
     - beta_bias: mark if there is non-zero bias term in beta
@@ -129,6 +133,7 @@ def update_bounds_pre(
         betas_by_layer, nums_effective_beta_per_domain = BetaFullData.from_domain_dict(
             d,
             bias=beta_bias,
+            dtype_map=dtype_map,
             device=device
         )
 
@@ -195,6 +200,19 @@ def update_bounds_core(
     ###### 1. Extract options and data
     beta_args = arguments.Config["solver"]["beta-crown"]
     bab_args = arguments.Config["bab"]
+    # The dtype spec ('fp16', 'bf16', 'tf32', 'fp16+tf32', 'bf16+tf32') is
+    # parsed by auto_LiRPA (see parse_mixed_precision_dtype); 'none' disables
+    # mixed precision.
+    enable_bab_bound_mixed_precision = bab_args["mixed_precision"][
+        "enable_bab_bound_mixed_precision"]
+    dtype_spec = bab_args["mixed_precision"]["bab_bound_mixed_precision_dtype"]
+    if not enable_bab_bound_mixed_precision or dtype_spec in ("none", ""):
+        bab_bound_dtype = None
+    else:
+        bab_bound_dtype = dtype_spec
+    prune_even_under_low_precision = bab_args["mixed_precision"][
+        "prune_even_under_low_precision"]
+    check_soundness = bab_args["mixed_precision"]["check_mixed_decision_bound_soundness"]
     # alpha is always enabled for all current test suites.
     enable_alpha = True
     enable_beta = beta_args["beta"]
@@ -283,6 +301,10 @@ def update_bounds_core(
                 "stop_criterion_func": stop_criterion_func,
                 "multi_spec_keep_func": multi_spec_keep_func,
                 "iteration": iteration,
+                "mixed_precision_dtype": bab_bound_dtype,
+                "low_precision_prune_in_iter": prune_even_under_low_precision,
+                "low_precision_prune_margin_abs":
+                    bab_args["mixed_precision"]["low_precision_prune_margin_abs"],
             },
             "enable_opt_interm_bounds": enable_opt_interm_bounds,
         }
@@ -316,9 +338,8 @@ def update_bounds_core(
     ######### Clip and Verify Domains Start ########
     if enable_clip_domains and net.domain_clipper is not None:
         if net.domain_clipper.clip_input_domain:
-            ret_clipper = net.domain_clipper.domain_clip_ReLU(d, new_x, interm_bounds)
-            new_x_Ls, new_x_Us, interm_bounds, d, batch_mask = ret_clipper
-            new_x = net.expand_x_diff_batch(new_x_Ls, new_x_Us)
+            new_x, interm_bounds, d, batch_mask = (
+                net.domain_clipper.domain_clip_ReLU(d, new_x, interm_bounds))
             if net.domain_clipper.prune and batch_mask is not None:
                 ret_prune = net.prune_setting(
                     d,
@@ -369,6 +390,11 @@ def update_bounds_core(
 
     A = tmp_ret[2] if temp_return_A else None
     lb, _ = tmp_ret[0], tmp_ret[1]
+
+    if check_soundness:
+        _check_mixed_precision_bound_soundness(
+            net, new_x, c, enable_opt_interm_bounds, lb, decision_thresh)
+
 
     # Using output constraints to clip input region.
     # TODO: clean up implementation, and make it more general.
@@ -498,12 +524,13 @@ def update_bounds_post(
     This function aims to do all the offloaded tensor work from update_bounds_core.
     """
 
-    beta_args = arguments.Config["solver"]["beta-crown"]
+    solver_args = arguments.Config["solver"]
+    beta_args = solver_args["beta-crown"]
     bab_args = arguments.Config["bab"]
     # alpha is always enabled for all current test suites.
     enable_alpha = True
     enable_beta = beta_args["beta"]
-    deterministic_opt = arguments.Config["general"]["deterministic_opt"]
+    reproduce_alpha_bounds = solver_args["reproduce_alpha_bounds"]
     get_upper_bound = bab_args["get_upper_bound"]
 
     (
@@ -556,8 +583,12 @@ def update_bounds_post(
         timer.start("finalize")
         if enable_alpha:
             assert not isinstance(working_alpha, ValueError)
+            alpha_storage_dtype = resolve_alpha_storage_dtype(
+                arguments.Config["solver"]["alpha-crown"]["alpha_dtype"],
+                reproduce_alpha_bounds=reproduce_alpha_bounds,
+            )
             ret_alphas = working_alpha.to(
-                device="cpu", dtype=torch.float16 if not deterministic_opt else None
+                device="cpu", dtype=alpha_storage_dtype
             )
         else:
             ret_alphas = AlphaValueData({})
@@ -584,7 +615,7 @@ def update_bounds_post(
             )
         else:
             unstable_bounds = {}
-        if not deterministic_opt:
+        if not reproduce_alpha_bounds:
             ret_l[final_name] = torch.max(ret_l[final_name], lb_last.cpu())
             if not get_upper_bound:
                 # Do not set to min so the primal is always corresponding
@@ -621,5 +652,3 @@ def update_bounds_post(
         sub_domain_clip_decisions=sub_domain_clip_decisions,
         # SubDomainClipDecisions
     )
-
-

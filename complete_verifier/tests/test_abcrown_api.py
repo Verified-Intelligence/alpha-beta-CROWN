@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for abcrown_api/api.py"""
@@ -1273,7 +1273,6 @@ class TestABCrownSolverSolvingModeAttackSemantics(unittest.TestCase):
         spec = VerificationSpec.build_from_input_bounds(lower, upper, clauses)
         config = default_config()
         config["general"]["device"] = "cpu"
-        config["general"]["enable_incomplete_verification"] = False
         config["general"]["complete_verifier"] = "skip"
         config["attack"]["pgd_order"] = pgd_order
         config["solving"]["solving_mode"] = solving_mode
@@ -1297,6 +1296,7 @@ class TestABCrownSolverSolvingModeAttackSemantics(unittest.TestCase):
             patch.object(solver, "_prepare_environment"),
             patch.object(solver, "_prepare_model", return_value=solver.computing_graph),
             patch.object(solver, "_build_vnnlib_handler", return_value=self._mock_handler()),
+            patch("api.incomplete_verifier_core", return_value=("unknown", {})),
             patch.object(solver, "_attack", return_value=("unsafe-pgd", True, None, None, None)) as mock_attack,
         ):
             result = solver.solve(return_reference=False)
@@ -1311,6 +1311,7 @@ class TestABCrownSolverSolvingModeAttackSemantics(unittest.TestCase):
             patch.object(solver, "_prepare_environment"),
             patch.object(solver, "_prepare_model", return_value=solver.computing_graph),
             patch.object(solver, "_build_vnnlib_handler", return_value=self._mock_handler()),
+            patch("api.incomplete_verifier_core", return_value=("unknown", {})),
             patch.object(solver, "_attack", return_value=("unsafe-pgd", True, None, None, None)) as mock_attack,
         ):
             result = solver.solve(return_reference=False)

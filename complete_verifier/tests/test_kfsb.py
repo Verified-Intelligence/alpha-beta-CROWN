@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for heuristics/kfsb.py - KfsbBranching class."""
@@ -20,6 +20,27 @@ import sys
 import importlib
 from unittest.mock import MagicMock, patch, PropertyMock
 from collections import defaultdict
+
+
+def setUpModule():
+    import arguments
+    global _original_config
+    _original_config = arguments.Config
+    new_config = arguments.ConfigHandler()
+    new_config.construct_config_dict(new_config.default_args)
+    new_config.file = None
+    arguments.Config = new_config
+
+
+setup_module = setUpModule
+
+
+def tearDownModule():
+    import arguments
+    arguments.Config = _original_config
+
+
+teardown_module = tearDownModule
 
 import torch
 import numpy as np
@@ -66,7 +87,15 @@ def create_mock_net(batch_size, num_layers=2, layer_names=None, activation_prefi
 
     # Default mock methods
     mock_net.build_history_and_set_bounds = MagicMock()
-    mock_net.update_bounds = MagicMock(return_value=torch.ones(batch_size * 2, 1))
+
+    # kfsb now calls compute_lower_bounds_chunks (standalone import), not net.update_bounds.
+    # Default return: (batch*2, 1) — the split doubles effective batch size.
+    csb_patcher = patch(
+        'heuristics.kfsb.compute_lower_bounds_chunks',
+        return_value=torch.ones(batch_size * 2, 1)
+    )
+    mock_net._mock_csb = csb_patcher.start()
+    mock_net._csb_patcher = csb_patcher
 
     return mock_net
 
@@ -154,6 +183,9 @@ def create_domains(batch_size, num_neurons, num_layers=2, layer_names=None,
 class TestGetBranchingDecisionsInvalidMethod(unittest.TestCase):
     """Test invalid method handling in compute_branching_decisions."""
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_invalid_method_raises_value_error(self):
         """Test that invalid method raises ValueError."""
         from heuristics.kfsb import KfsbBranching
@@ -183,6 +215,9 @@ class TestGetBranchingDecisionsKfsbInterceptOnly(unittest.TestCase):
         self.batch_size = 2
         self.num_neurons = 5
         self.topk = 3
+
+    def tearDown(self):
+        patch.stopall()
 
     def test_intercept_only_calls_score_function(self):
         """Test that intercept-only method calls babsr_score_intercept_only."""
@@ -214,12 +249,16 @@ class TestGetBranchingDecisionsKfsb(unittest.TestCase):
         self.num_neurons = 5
         self.topk = 3
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_kfsb_calls_babsr_score(self):
         """Test that kfsb method calls babsr_score."""
         from heuristics.kfsb import KfsbBranching
 
         mock_net = create_mock_net(self.batch_size)
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(self.batch_size * 4, 1))
+        # kfsb doubles the batch before calling shortcut bounds, so return is batch*4
+        mock_net._mock_csb.return_value = torch.ones(self.batch_size * 4, 1)
         branching = KfsbBranching(mock_net)
         domains = create_domains(self.batch_size, self.num_neurons)
 
@@ -246,7 +285,7 @@ class TestGetBranchingDecisionsKfsb(unittest.TestCase):
         def capture_args(args, split):
             captured_args.append(dict(args))
         mock_net.build_history_and_set_bounds = MagicMock(side_effect=capture_args)
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(self.batch_size * 4, 1))
+        mock_net._mock_csb.return_value = torch.ones(self.batch_size * 4, 1)
 
         branching = KfsbBranching(mock_net)
         domains = create_domains(self.batch_size, self.num_neurons)
@@ -281,6 +320,9 @@ class TestGetBranchingDecisionsUseBeta(unittest.TestCase):
         self.num_neurons = 5
         self.topk = 3
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_use_beta_true_passes_betas_to_update_bounds(self):
         """Test that use_beta=True passes betas to update_bounds."""
         from heuristics.kfsb import KfsbBranching
@@ -301,11 +343,11 @@ class TestGetBranchingDecisionsUseBeta(unittest.TestCase):
                 use_beta=True, method='kfsb-intercept-only'
             )
 
-        # Verify update_bounds was called
-        mock_net.update_bounds.assert_called()
-        # Check that betas were included in the call
-        call_args = mock_net.update_bounds.call_args
-        self.assertIn('betas', call_args[0][0])
+        # Verify compute_lower_bounds_chunks was called with betas in the domain dict.
+        # Signature: compute_lower_bounds_chunks(net, d, ...) so d is args[1].
+        mock_net._mock_csb.assert_called()
+        call_args = mock_net._mock_csb.call_args
+        self.assertIn('betas', call_args[0][1])
 
 
 class TestGetBranchingDecisionsKeepAllDecision(unittest.TestCase):
@@ -316,6 +358,9 @@ class TestGetBranchingDecisionsKeepAllDecision(unittest.TestCase):
         self.batch_size = 2
         self.num_neurons = 5
         self.topk = 3
+
+    def tearDown(self):
+        patch.stopall()
 
     def test_keep_all_decision_true_returns_list_of_lists(self):
         """Test that keep_all_decision=True returns decisions per batch."""
@@ -383,6 +428,9 @@ class TestGetBranchingDecisionsReduceOp(unittest.TestCase):
         self.num_neurons = 5
         self.topk = 3
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_min_reduce_op(self):
         """Test with branching_reduceop='min'."""
         from heuristics.kfsb import KfsbBranching
@@ -417,6 +465,9 @@ class TestGetBranchingDecisionsReturnValues(unittest.TestCase):
         self.batch_size = 2
         self.num_neurons = 5
         self.topk = 3
+
+    def tearDown(self):
+        patch.stopall()
 
     def test_returns_three_values(self):
         """Test that compute_branching_decisions returns three values."""
@@ -478,6 +529,9 @@ class TestGetBranchingDecisionsScoreLengthCalculation(unittest.TestCase):
         self.num_neurons_layer2 = 3
         self.topk = 3
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_score_length_handles_different_layer_sizes(self):
         """Test that score_length correctly handles different layer sizes."""
         from heuristics.kfsb import KfsbBranching
@@ -520,6 +574,9 @@ class TestGetBranchingDecisionsMaskUpdate(unittest.TestCase):
         self.num_neurons = 5
         self.topk = 3
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_mask_is_updated_for_selected_neurons(self):
         """Test that mask is set to 0 for selected neurons."""
         from heuristics.kfsb import KfsbBranching
@@ -560,13 +617,16 @@ class TestGetBranchingDecisionsRandomFallback(unittest.TestCase):
         self.num_neurons = 5
         self.topk = 3
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_random_fallback_used_for_invalid_scores(self):
         """Test that random decisions are used when scores are invalid."""
         from heuristics.kfsb import KfsbBranching
 
         mock_net = create_mock_net(self.batch_size)
         # Return very negative values to make thres < -10000
-        mock_net.update_bounds = MagicMock(return_value=torch.full((self.batch_size * 2, 1), -20000.0))
+        mock_net._mock_csb.return_value = torch.full((self.batch_size * 2, 1), -20000.0)
         branching = KfsbBranching(mock_net)
         domains = create_domains(self.batch_size, self.num_neurons)
 
@@ -598,6 +658,9 @@ class TestGetBranchingDecisionsCsNone(unittest.TestCase):
         self.batch_size = 2
         self.num_neurons = 5
         self.topk = 3
+
+    def tearDown(self):
+        patch.stopall()
 
     def test_cs_none_sets_number_bounds_to_one(self):
         """Test that cs=None results in number_bounds=1."""
@@ -634,12 +697,15 @@ class TestGetBranchingDecisionsMultipleBounds(unittest.TestCase):
         self.num_bounds = 3  # Multiple bounds
         self.topk = 3
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_multiple_bounds_handled_correctly(self):
         """Test that multiple bounds (cs with multiple columns) work correctly."""
         from heuristics.kfsb import KfsbBranching
 
         mock_net = create_mock_net(self.batch_size)
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(self.batch_size * 2, self.num_bounds))
+        mock_net._mock_csb.return_value = torch.ones(self.batch_size * 2, self.num_bounds)
         branching = KfsbBranching(mock_net)
         domains = create_domains(self.batch_size, self.num_neurons, num_bounds=self.num_bounds)
 
@@ -669,12 +735,15 @@ class TestGetBranchingDecisionsKfsbSplitAlphas(unittest.TestCase):
         self.num_neurons = 5
         self.topk = 3
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_kfsb_restores_alpha_shape_after_processing(self):
         """Test that kfsb method restores alpha to original batch size."""
         from heuristics.kfsb import KfsbBranching
 
         mock_net = create_mock_net(self.batch_size)
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(self.batch_size * 4, 1))
+        mock_net._mock_csb.return_value = torch.ones(self.batch_size * 4, 1)
         branching = KfsbBranching(mock_net)
 
         # Create domains and add custom alphas
@@ -714,6 +783,9 @@ class TestGetBranchingDecisionsTorchNoGrad(unittest.TestCase):
         self.num_neurons = 8
         self.topk = 5
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_no_grad_during_execution(self):
         """Test that gradients are disabled during method execution."""
         from heuristics.kfsb import KfsbBranching
@@ -722,11 +794,11 @@ class TestGetBranchingDecisionsTorchNoGrad(unittest.TestCase):
         branching = KfsbBranching(mock_net)
         domains = create_domains(self.batch_size, self.num_neurons)
 
-        # Track whether grad was enabled during update_bounds call
+        # Track whether grad was enabled during compute_lower_bounds_chunks call
         grad_enabled_during_call = []
 
         # kfsb method doubles batch: batch_size * 2 for score + intercept,
-        # then update_bounds is called with batch_size * 4 total
+        # then compute_lower_bounds_chunks is called with batch_size * 4 total
         # and result needs to match torch.cat([rhs, rhs]) which is batch_size * 4
         doubled_batch = self.batch_size * 4
 
@@ -734,7 +806,7 @@ class TestGetBranchingDecisionsTorchNoGrad(unittest.TestCase):
             grad_enabled_during_call.append(torch.is_grad_enabled())
             return torch.ones(doubled_batch, 1)
 
-        mock_net.update_bounds = MagicMock(side_effect=track_grad_state)
+        mock_net._mock_csb.side_effect = track_grad_state
 
         with patch('heuristics.kfsb.babsr_score') as mock_score_func:
             mock_score = [torch.rand(self.batch_size, self.num_neurons) for _ in range(2)]
@@ -749,13 +821,16 @@ class TestGetBranchingDecisionsTorchNoGrad(unittest.TestCase):
                 )
 
         # Verify that grad was disabled during the method execution
-        self.assertTrue(len(grad_enabled_during_call) > 0, "update_bounds should have been called")
+        self.assertTrue(len(grad_enabled_during_call) > 0, "compute_lower_bounds_chunks should have been called")
         for was_enabled in grad_enabled_during_call:
             self.assertFalse(was_enabled, "Gradients should be disabled inside compute_branching_decisions")
 
 
 class TestGetBranchingDecisionsEdgeCases(unittest.TestCase):
     """Test edge cases in compute_branching_decisions."""
+
+    def tearDown(self):
+        patch.stopall()
 
     def test_single_batch_element(self):
         """Test with batch size of 1."""
@@ -851,6 +926,9 @@ class TestGetBranchingDecisionsTopK(unittest.TestCase):
         self.num_neurons = 10
         self.topk = 5
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_topk_limited_by_unstable_neurons(self):
         """Test that topk is limited by the number of unstable neurons."""
         from heuristics.kfsb import KfsbBranching
@@ -897,6 +975,9 @@ class TestGetBranchingDecisionsAlphaHandling(unittest.TestCase):
         self.batch_size = 2
         self.num_neurons = 5
         self.topk = 3
+
+    def tearDown(self):
+        patch.stopall()
 
     def test_alphas_set_on_first_iteration_only(self):
         """Test that alphas are only set on the first iteration."""

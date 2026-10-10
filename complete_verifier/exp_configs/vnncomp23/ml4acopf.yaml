@@ -8,7 +8,7 @@ model:
   onnx_optimization_flags: ["remove_matmul_inplace"]
 attack:
   pgd_restarts: 100
-  attack_tolerance: 0.0001
+  attack_tolerance: -0.0001
 solver:
   batch_size: 128
   min_batch_size_ratio: 0.0

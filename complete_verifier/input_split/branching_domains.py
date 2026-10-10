@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 
@@ -400,7 +400,8 @@ class UnsortedInputDomainList(InputDomainList):
             for key0, val0 in self.alpha.items():
                 alpha[key0] = {}
                 for key1, val1 in val0.items():
-                    alpha[key0][key1] = val1.pop(batch_size).to(device=device, dtype=lb.dtype, non_blocking=True)
+                    alpha[key0][key1] = val1.pop(batch_size).to(
+                        device=device, non_blocking=True)
         cs = self.cs.pop(batch_size).to(device=device, non_blocking=True)
         threshold = self.threshold.pop(batch_size).to(device=device, non_blocking=True)
         constraints = None

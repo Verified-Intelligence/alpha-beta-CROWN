@@ -8,7 +8,7 @@ attack:
   pgd_restarts: 10
 solver:
   auto_enlarge_batch_size: True
-  batch_size: 256
+  batch_size: 128
   beta-crown:
     lr_alpha: 0.1
     lr_beta: 0.2
@@ -18,8 +18,17 @@ solver:
     iteration: 20
     full_conv_alpha: False
 bab:
-  interm_transfer: False
+  shared_slope_bab:
+    enabled: true
   branching:
     method: kfsb
     candidates: 7
     reduceop: max
+    decision_sub_batch_size: 1280
+  mixed_precision:
+    enable_bab_bound_mixed_precision: true
+    bab_bound_mixed_precision_dtype: tf32
+    low_precision_prune_margin_abs: 0.01
+  clip_n_verify:
+    clip_interm_domain:
+      enabled: True

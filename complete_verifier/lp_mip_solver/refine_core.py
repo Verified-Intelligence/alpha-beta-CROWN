@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """MIP refinement utilities extracted from legacy lp_mip_solver."""
@@ -40,6 +40,12 @@ if TYPE_CHECKING:
 multiprocess_mip_model = None
 mip_refine_time_start = None
 mip_refine_timeout = 230
+
+
+def _new_mip_refinement_beta(net, node, shape, *, device):
+    """Create MIP-refinement beta state in the owning node's dtype."""
+    return SparseBeta(
+        shape, device=device, dtype=net.get_output_dtype(node))
 
 
 def build_the_model_mip_refine(
@@ -260,13 +266,18 @@ def build_the_model_mip_refine(
                         adv, max_values, min_values = _intermediate_PGD_attack(m, relu_idx + 1, restarts=3, attack_iters=50, alpha=None)
                     if not arguments.Config['solver']['beta-crown']['enable_opt_interm_bounds']:
                         for relu_layer in m.net.relus:
-                            relu_layer.sparse_betas = [SparseBeta((1, 0), device=device)]
+                            relu_layer.sparse_betas = [
+                                _new_mip_refinement_beta(
+                                    m.net, relu_layer, (1, 0), device=device)]
                     else:
                         max_splits_per_layer = [0 for _ in range(len(m.net.relus))]
                         for relu_layer in m.net.relus:
                             relu_layer.sparse_betas = {}
                             for key in relu_layer.alpha.keys():
-                                relu_layer.sparse_betas[key] = SparseBeta((1, 0), device=device)
+                                relu_layer.sparse_betas[key] = (
+                                    _new_mip_refinement_beta(
+                                        m.net, relu_layer, (1, 0),
+                                        device=device))
                     # Find the A_dict for the linear layer correspond to the input.
                     if window_size:
                         lb_refined, ub_refined, A_dict = m.net.compute_bounds(x=(x,),
@@ -303,7 +314,10 @@ def build_the_model_mip_refine(
                         refined_relu_layer = m.net.relus[relu_idx-1]
                         if not arguments.Config['solver']['beta-crown']['enable_opt_interm_bounds']:
                             # Init all regular betas.
-                            refined_relu_layer.sparse_betas = [SparseBeta((1, max_splits_per_layer), device=device)]
+                            refined_relu_layer.sparse_betas = [
+                                _new_mip_refinement_beta(
+                                    m.net, refined_relu_layer,
+                                    (1, max_splits_per_layer), device=device)]
                             # Assign split constraint into regular betas.
                             for neuron_idx, (refined_neuron, sign) in enumerate(unstable_to_stable[relu_idx-1]):
                                 refined_relu_layer.sparse_betas[0].loc[0, neuron_idx] = refined_neuron
@@ -311,7 +325,11 @@ def build_the_model_mip_refine(
                         else:
                             for key in refined_relu_layer.sparse_betas.keys():
                                 # Init all intermediate betas.
-                                refined_relu_layer.sparse_betas[key] = SparseBeta((1, max_splits_per_layer), device=device)
+                                refined_relu_layer.sparse_betas[key] = (
+                                    _new_mip_refinement_beta(
+                                        m.net, refined_relu_layer,
+                                        (1, max_splits_per_layer),
+                                        device=device))
                             for neuron_idx, (stable_neuron_idx, sign) in enumerate(unstable_to_stable[relu_idx-1]):
                                 for key in refined_relu_layer.sparse_betas.keys():
                                     # Assign split constraint into all intermdiate betas

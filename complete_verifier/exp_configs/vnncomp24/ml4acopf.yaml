@@ -9,15 +9,15 @@ model:
 attack:
   pgd_order: before
   pgd_restarts: 50
-  attack_tolerance: 0.0001
+  attack_tolerance: -0.0001
 solver:
   batch_size: 8
   auto_enlarge_batch_size: true
   min_batch_size_ratio: 0.0
   early_stop_patience: 200
   alpha-crown:
-    lr_alpha: 0.2
-    lr_decay: 0.99
+    lr_alpha: 3.0
+    lr_decay: 0.96
     iteration: 200
   beta-crown:
     lr_alpha: 0.5
@@ -31,3 +31,7 @@ bab:
     nonlinear_split:
       filter: true
       filter_beta: true
+      # Bound the first-iteration branching-filter working set so large models
+      # (e.g. 300_ieee) do not OOM; the candidate-chunked filter in
+      # heuristics/nonlinear/bbps.py keeps peak memory near this many rows.
+      filter_batch_size: 4000

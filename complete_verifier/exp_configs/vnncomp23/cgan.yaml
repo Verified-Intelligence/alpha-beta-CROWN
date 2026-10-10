@@ -6,6 +6,7 @@ model:
   onnx_optimization_flags: ["remove_squeeze_in_last_layer", "merge_gemm_reshape_bn", "merge_bn_reshape_gemm", "check_duplicate_upsample_initializers"]
   onnx_quirks: "{'Reshape': {'fix_batch_size': True}}"
   cache_onnx_conversion: True
+  bound_opts: "{'clampmult_patches_padding_pos_masked': True}"
 attack:
   pgd_order: before
   pgd_restarts: 100

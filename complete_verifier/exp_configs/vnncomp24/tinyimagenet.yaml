@@ -13,11 +13,15 @@ solver:
     lr_beta: 0.15
     iteration: 8
   alpha-crown:
-    lr_alpha: 0.25
-    iteration: 20
+    lr_alpha: 0.1
+    iteration: 50
 bab:
-  interm_transfer: False
+  shared_slope_bab:
+    enabled: true
   branching:
     method: kfsb
     candidates: 7
     reduceop: max
+  clip_n_verify:
+    clip_interm_domain:
+      enabled: True

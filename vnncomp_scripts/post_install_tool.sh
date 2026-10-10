@@ -32,8 +32,9 @@ EOF
 # Default location can be found in the license
 sudo mkdir -p /opt/gurobi
 sudo mv gurobi.lic /opt/gurobi/
-
-gurobi_output=$(${HOME}/gurobi1302/linux64/bin/gurobi_cl)
+export PATH=${HOME}/gurobi1302/linux64/bin/:$PATH
+export LD_LIBRARY_PATH=${HOME}/gurobi1302/linux64/lib/:$LD_LIBRARY_PATH
+gurobi_output=$(gurobi_cl)
 if grep -q "Using license file /opt/gurobi/gurobi.lic" <<< "$gurobi_output" && grep -q "Academic license" <<< "$gurobi_output"; then
 	echo "Gurobi license setup is successful!"
 else

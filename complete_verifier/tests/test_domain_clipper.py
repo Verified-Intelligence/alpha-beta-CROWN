@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for domain_clipper.py module."""
@@ -46,6 +46,8 @@ def _setup_mock_config():
 # Apply mock config
 arguments.Config = _setup_mock_config()
 
+from auto_LiRPA import BoundedTensor
+from auto_LiRPA.perturbations import PerturbationLpNorm
 from domain_clipper import (
     pad_first_dim, concretize_bounds, expand_x_batch,
     update_interm_bounds, _all_dist, dimensionwise_shrinkage_stats,
@@ -56,6 +58,60 @@ from domain_clipper import (
 def tearDownModule():
     """Restore original config after all tests."""
     arguments.Config = _original_config
+
+
+# ============================================================================
+# DomainClipper.domain_clip_ReLU tests
+# ============================================================================
+
+class TestDomainClipReLU(unittest.TestCase):
+    """Tests for the input returned after clipping a ReLU domain."""
+
+    def test_returns_bounded_tensor_for_clipped_box(self):
+        """The returned input should consistently represent the new box."""
+        source = torch.zeros(1, 2)
+        x = BoundedTensor(
+            source,
+            PerturbationLpNorm(
+                norm=float('inf'), x_L=source - 1, x_U=source + 1),
+        )
+
+        for dtype in (torch.float32, torch.float64):
+            with self.subTest(dtype=dtype):
+                x_L = torch.tensor(
+                    [[-2.0, 1.0], [0.0, 4.0]], dtype=dtype)
+                x_U = torch.tensor(
+                    [[2.0, 3.0], [6.0, 10.0]], dtype=dtype)
+
+                clipper = DomainClipper.__new__(DomainClipper)
+                clipper.timer = MagicMock()
+                clipper.prune = False
+                A = torch.empty(0, dtype=dtype)
+                bias = torch.empty(0, dtype=dtype)
+                clipper.get_constraints = MagicMock(return_value=(A, bias))
+                clipper.intersection_check = MagicMock()
+                interm_bounds = {}
+                clipper.clip_domains = MagicMock(
+                    return_value=(x_L, x_U, None, interm_bounds))
+                domain = {'history': {}}
+
+                result, returned_bounds, returned_domain, prune_mask = (
+                    clipper.domain_clip_ReLU(domain, x, interm_bounds))
+
+                expected_center = (x_L + x_U) / 2
+                expected_radius = (x_U - x_L) / 2
+                self.assertIsInstance(result, BoundedTensor)
+                self.assertTrue(torch.equal(result.data, expected_center))
+                self.assertTrue(torch.equal(result.ptb.x_L, x_L))
+                self.assertTrue(torch.equal(result.ptb.x_U, x_U))
+                self.assertTrue(torch.equal(result.ptb.x0, expected_center))
+                self.assertTrue(torch.equal(result.ptb.eps, expected_radius))
+                self.assertEqual(result.ptb.norm, float('inf'))
+                self.assertEqual(result.dtype, dtype)
+                self.assertEqual(result.device, x_L.device)
+                self.assertIs(returned_bounds, interm_bounds)
+                self.assertIs(returned_domain, domain)
+                self.assertIsNone(prune_mask)
 
 
 # ============================================================================

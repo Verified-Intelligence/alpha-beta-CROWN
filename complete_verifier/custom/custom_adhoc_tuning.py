@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import arguments
@@ -21,6 +21,8 @@ def customized_vit_tuning(model_ori, vnnlib_handler):
     if num_matmul >= 6:
         print('Sharing alpha due to model size')
         arguments.Config['solver']['alpha-crown']['share_alphas'] = True
+        print('Setting smaller sub batch size')
+        arguments.Config['bab']['branching']['decision_sub_batch_size'] = 96
 
 
 def customized_nn4sys_tuning(model_ori, vnnlib_handler):
@@ -28,7 +30,9 @@ def customized_nn4sys_tuning(model_ori, vnnlib_handler):
     num_specs = vnnlib_handler.all_specs.batch_size
     if num_params > 1e7 and num_specs > 1000:
         print(f"Shrinking build_batch_size on model with {num_params} params and {num_specs} specs")
-        arguments.Config['solver']['build_batch_size'] = 1000
+        # This is an upper limit; retain smaller batches requested for GPU memory.
+        arguments.Config['solver']['build_batch_size'] = min(
+            arguments.Config['solver']['build_batch_size'], 1000)
 
 
 def customized_vggnet16_tuning(model_ori, vnnlib_handler):

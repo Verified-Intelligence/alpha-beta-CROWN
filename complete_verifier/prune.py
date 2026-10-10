@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Pruning: After CROWN pass, prune verified OR specs before starting the alpha-CROWN pass."""
@@ -112,7 +112,8 @@ class PruneAfterCROWN:
         full_shape = list(data.shape)
         full_shape[recover_dim] = full_size
         new_data = torch.full(full_shape, fill_value, device=data.device, dtype=data.dtype)
-        new_data.index_copy_(recover_dim, self.unverified_indices, data)
+        indices = self.unverified_indices.to(device=data.device)
+        new_data.index_copy_(recover_dim, indices, data)
         return new_data
 
     @torch.no_grad()

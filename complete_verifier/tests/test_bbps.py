@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for heuristics/nonlinear/bbps.py (NonlinearBranching)."""
@@ -867,6 +867,85 @@ class TestGetHeuristicDecisions(unittest.TestCase):
         layers, indices, points = heuristic.get_heuristic_decisions(domains)
 
         self.assertIsNone(points)
+
+    def _make_domains(self, batch, num_neurons=4):
+        """Build a domain dict whose per-node scores are derived from the
+        lower bounds, so chunking over the batch must reproduce the full-batch
+        result exactly."""
+        layer_names = ['layer1', 'layer2']
+        domains = {
+            'mask': {n: torch.ones(batch, num_neurons) for n in layer_names},
+            'lower_bounds': {
+                n: torch.randn(batch, num_neurons) for n in layer_names},
+            'upper_bounds': {
+                n: torch.randn(batch, num_neurons) for n in layer_names},
+            'lAs': {n: torch.randn(batch, 1, num_neurons) for n in layer_names},
+            'thresholds': torch.randn(batch, 1),
+        }
+        return domains
+
+    def test_get_heuristic_decisions_chunking_matches_full(self):
+        """decision_sub_batch_size must not change the heuristic decisions:
+        chunked scoring + a single global top-k selection should reproduce the
+        un-chunked result."""
+        heuristic = self._create_heuristic(relu_only=False)
+        heuristic.branching_candidates = 2
+        heuristic.reduce_op = torch.Tensor.min
+
+        # Scores/points depend only on the (possibly sliced) per-domain lower
+        # bounds, so concatenating chunk results reconstructs the full batch.
+        def fake_scores(node, domains, branching_point_method=None):
+            lb = domains['lower_bounds'][node.name]
+            b, n = lb.shape
+            return {'scores': lb.clone(), 'points': lb.reshape(b, n, 1, 1).clone()}
+
+        heuristic.compute_branching_scores = MagicMock(side_effect=fake_scores)
+
+        batch = 7
+        domains = self._make_domains(batch)
+
+        original = arguments.Config['bab']['branching']['decision_sub_batch_size']
+        try:
+            arguments.Config['bab']['branching']['decision_sub_batch_size'] = None
+            full = heuristic.get_heuristic_decisions(domains)
+            # A chunk size that does not evenly divide the batch (7 -> 3+3+1).
+            arguments.Config['bab']['branching']['decision_sub_batch_size'] = 3
+            chunked = heuristic.get_heuristic_decisions(domains)
+        finally:
+            arguments.Config['bab']['branching']['decision_sub_batch_size'] = original
+
+        layers_f, indices_f, points_f = full
+        layers_c, indices_c, points_c = chunked
+        torch.testing.assert_close(layers_c, layers_f)
+        torch.testing.assert_close(indices_c, indices_f)
+        torch.testing.assert_close(points_c, points_f)
+
+    def test_get_heuristic_decisions_chunk_larger_than_batch(self):
+        """sub_batch_size >= batch should take the single-pass fast path and
+        still produce the same result as no chunking."""
+        heuristic = self._create_heuristic(relu_only=False)
+        heuristic.branching_candidates = 2
+        heuristic.reduce_op = torch.Tensor.min
+
+        def fake_scores(node, domains, branching_point_method=None):
+            lb = domains['lower_bounds'][node.name]
+            b, n = lb.shape
+            return {'scores': lb.clone(), 'points': lb.reshape(b, n, 1, 1).clone()}
+
+        heuristic.compute_branching_scores = MagicMock(side_effect=fake_scores)
+
+        domains = self._make_domains(batch=4)
+        original = arguments.Config['bab']['branching']['decision_sub_batch_size']
+        try:
+            arguments.Config['bab']['branching']['decision_sub_batch_size'] = None
+            full = heuristic.get_heuristic_decisions(domains)
+            arguments.Config['bab']['branching']['decision_sub_batch_size'] = 100
+            chunked = heuristic.get_heuristic_decisions(domains)
+        finally:
+            arguments.Config['bab']['branching']['decision_sub_batch_size'] = original
+
+        for a, b in zip(chunked, full):
+            torch.testing.assert_close(a, b)
 
 
 class TestFormatDecisionsIntegration(unittest.TestCase):

@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 
@@ -184,7 +184,8 @@ def clip_domains(
 ) -> Tuple[Tensor, Tensor]:
     """
     Takes a batch of subdomains and shrinks along dimensions to remove verified portions of the input domain
-    to remove redundancy and allow for more effective splits.
+    to remove redundancy and allow for more effective splits. Domains already verified before clipping are
+    represented as empty input boxes in the returned tensors.
     @param x_L:                 The lower bound on the inputs of the subdomains
     @param x_U:                 The upper bound on the inputs of the subdomains
     @param thresholds:          The specification threshold where dom_lb > thresholds implies the subdomain is verified
@@ -217,60 +218,85 @@ def clip_domains(
         # if lbias is not given, we cannot concretize dm_lb, so we assume it is already correct
         assert lbias is not None, "lbias must be given if dm_lb is not given"
 
-    v_mask = (dm_lb > thresholds).any(1)
-    num_verified = v_mask.sum().item()
-    nv_mask = torch.logical_not(v_mask)
-    num_unverified = nv_mask.sum().item()
+    certified_mask = (dm_lb > thresholds).any(1)
+    num_verified = certified_mask.sum().item()
+    unresolved_mask = torch.logical_not(certified_mask)
+    num_unverified = batches - num_verified
+
+    # A certified domain has no region left to search, so encode it directly as
+    # an empty input box for domain-list filtering. Do not rely on
+    # _clip_main_fn to make it empty: zero affine coefficients cannot shrink
+    # the box, and finite-precision rounding can leave a boundary point even
+    # when the relevant coefficient is nonzero.
+    if num_verified:
+        certified_x_U = x_U[certified_mask, 0]
+        x_L[certified_mask, 0] = torch.nextafter(
+            certified_x_U, torch.full_like(certified_x_U, torch.inf))
 
     if num_unverified == 0:
-        print(f"All {batches} domains are already verified, no clipping will be performed.")
+        print(
+            f"All {batches} domains are already verified; "
+            "returning empty input boxes.")
         return x_L.view(x_L_shape), x_U.view(x_U_shape)
 
-    nv_batches = nv_mask.sum().item()  # number of domains in batch that are not verified
+    # Avoid gather/scatter overhead on the common path where every domain still
+    # needs clipping. Mixed batches only clip their unresolved residuals.
+    if num_verified == 0:
+        x_L, x_U = _clip_main_fn(
+            x_L, x_U, lA, lbias, thresholds, dm_lb, num_iters, is_lower)
+    else:
+        unresolved_lbias = (
+            lbias[unresolved_mask] if lbias is not None else None)
+        x_L[unresolved_mask], x_U[unresolved_mask] = _clip_main_fn(
+            x_L[unresolved_mask], x_U[unresolved_mask],
+            lA[unresolved_mask], unresolved_lbias,
+            thresholds[unresolved_mask], dm_lb[unresolved_mask],
+            num_iters, is_lower)
 
-    # perform the main clipping algorithm
-    x_L, x_U = _clip_main_fn(x_L, x_U, lA, lbias, thresholds, dm_lb, num_iters, is_lower)
-
-    # extract the domains that were not already verified pre-clipping
-    nv_x_L = x_L[nv_mask]
-    nv_x_U = x_U[nv_mask]
-    nv_ori_x_L = original_x_L[nv_mask]
-    nv_ori_x_U = original_x_U[nv_mask]
+    # Extract domains that were unresolved before clipping for statistics.
+    unresolved_x_L = x_L[unresolved_mask]
+    unresolved_x_U = x_U[unresolved_mask]
+    original_unresolved_x_L = original_x_L[unresolved_mask]
+    original_unresolved_x_U = original_x_U[unresolved_mask]
+    # Each true entry selects a nonempty residual for optional volume metrics.
+    volume_mask = unresolved_mask
 
     # on these unverified domains, calculate the number of domains that became verified after clipping
     # (this scenario is only possible if there are at least 2 constraints, otherwise it will always be 0)
     if num_spec > 1:
-        sav_mask = (nv_x_L > nv_x_U).any(1)
-        shrunken_and_verified = sav_mask.sum().item()
+        clipped_empty_mask = (unresolved_x_L > unresolved_x_U).any(1)
+        shrunken_and_verified = clipped_empty_mask.sum().item()
         if calculate_volume:
-            # nv_mask holds domains that were not verified before clipping, but should now be updated
-            # to hold domains that were not verified after clipping. If not updated, NaN will occur when
-            # performing volume calculations on this batch due to the presence of negative values
-            # in the new input domain.
-            nv_mask[nv_mask.clone()] = torch.logical_not(sav_mask)
+            # Volume metrics include only domains with a nonempty residual box.
+            volume_mask = unresolved_mask.clone()
+            volume_mask[unresolved_mask] = torch.logical_not(
+                clipped_empty_mask)
     else:
         shrunken_and_verified = 0
 
     # on these unverified domains, calculate the number that were clipped along any dimension
-    num_shrunken = torch.logical_or((nv_x_L > nv_ori_x_L).any(1), (nv_x_U < nv_ori_x_U).any(1)).sum(0).item()
+    num_shrunken = torch.logical_or(
+        (unresolved_x_L > original_unresolved_x_L).any(1),
+        (unresolved_x_U < original_unresolved_x_U).any(1)).sum(0).item()
 
-    shrunken_str = (f"Domain clipping ({num_iters} iterations): shrunken {num_shrunken}/{nv_batches} "
-                    f"({100 * (num_shrunken / nv_batches) if nv_batches > 0 else 0.:.2f}%), ")
+    shrunken_str = (f"Domain clipping ({num_iters} iterations): shrunken {num_shrunken}/{num_unverified} "
+                    f"({100 * (num_shrunken / num_unverified):.2f}%), ")
     batch_str = (f"Of {batches} batches, {num_verified} were verified before clipping, {num_shrunken} domains "
                  f"were shrunken, and {shrunken_and_verified} were shrunken and additionally verified.")
     domain_str = shrunken_str + batch_str
     print(domain_str)
 
     if calculate_volume:
-        if nv_mask.sum() > 0:
+        if volume_mask.sum() > 0:
             # calculate the total volume of this batch of subdomains before and after clipping
-            _in_depth_volume_metrics(original_x_L, original_x_U, x_L, x_U, nv_mask, lA, thresholds, dm_lb, is_lower)
+            _in_depth_volume_metrics(
+                original_x_L, original_x_U, x_L, x_U,
+                volume_mask, lA, thresholds, dm_lb, is_lower)
         else:
             print(f"Domain clipping (input dim {input_dim}, spec dim {num_spec}): No volume calculations to perform; "
                   f"Some (potentially none) domains were verified before clipping, but all domains became verified "
                   f"after clipping.")
 
-    # reshape x_L,x_U to originally given shape and discover how many batches were shrunken
     return x_L.view(x_L_shape), x_U.view(x_U_shape)
 
 def concretize_bounds(xhat: Tensor, eps: Tensor, lA: Tensor, lbias: Tensor, is_lower: bool = True):

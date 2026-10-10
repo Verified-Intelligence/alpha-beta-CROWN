@@ -9,15 +9,18 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for utils.py"""
+import importlib.util
+import inspect
 import os
 import sys
 import tempfile
 import unittest
 
+import pytest
 import torch
 
 # Add complete_verifier to path
@@ -28,10 +31,109 @@ from utils import (
     check_infeasible_bounds, get_batch_size_from_masks,
     _take_batch_Tensor, _expand_batch, transfer_obj,
     pad_list_of_input_to_tensor, unpad_to_list_of_tensors,
-    Stats, Logger, expand_path, take_batch, expand_batch
+    Stats, Logger, expand_path, take_batch, expand_batch,
+    model_uses_jacobian_op, auto_enable_jacobian_mode
 )
 from auto_LiRPA import BoundedTensor
+from auto_LiRPA.jacobian import JacobianOP
 from auto_LiRPA.perturbations import PerturbationLpNorm
+
+
+class SquareJacobian(torch.nn.Module):
+    """Model referencing the Jacobian placeholder in its forward method."""
+
+    def forward(self, x):
+        return JacobianOP.apply(x * x, x)
+
+
+class SymbolicJacobian(torch.nn.Module):
+    """Model declaring the ONNX Jacobian operator outside its forward method."""
+
+    @staticmethod
+    def symbolic(graph, x):
+        return graph.op('grad::jacobian', x)
+
+    def forward(self, x):
+        return x
+
+
+class OrdinaryModel(torch.nn.Module):
+    """Non-Jacobian model sharing a source file with Jacobian models."""
+
+    def forward(self, x):
+        return x * x
+
+
+class InheritedJacobian(SquareJacobian):
+    """A module whose forward implementation comes from another class."""
+
+
+@pytest.mark.parametrize('model, expected', [
+    (torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.ReLU()), False),
+    (OrdinaryModel(), False),
+    (SquareJacobian(), True),
+    (SymbolicJacobian(), True),
+    (torch.nn.Sequential(torch.nn.Identity(), SquareJacobian()), True),
+    (InheritedJacobian(), True),
+    (torch.nn.Module(), False),
+    (None, False),
+])
+def test_model_uses_jacobian_op(model, expected):
+    assert model_uses_jacobian_op(model) is expected
+
+
+@pytest.mark.parametrize('body, expected', [
+    ('JacobianOP.apply(x * x, x)', True),
+    ('x * x', False),
+])
+def test_jacobian_detection_without_source(body, expected):
+    # Notebook/dynamically generated forward methods can lack inspectable source.
+    namespace = {'JacobianOP': JacobianOP}
+    exec(compile(f'def forward(self, x):\n    return {body}\n',
+                 '<generated-jacobian>', 'exec'), namespace)
+    model_type = type('GeneratedJacobian', (torch.nn.Module,), {
+        'forward': namespace['forward'],
+    })
+    assert model_uses_jacobian_op(model_type()) is expected
+
+
+def test_jacobian_forward_from_another_source_file(monkeypatch):
+    # A marker-free class source does not rule out an externally supplied forward.
+    monkeypatch.setattr(torch.nn.Identity, 'forward', SquareJacobian.forward)
+    assert model_uses_jacobian_op(torch.nn.Identity())
+
+
+def test_jacobian_detection_matches_class_unwrapping(tmp_path, monkeypatch):
+    # The wrapper file contains no operator markers. Python versions differ on
+    # whether source inspection follows a class's __wrapped__; detection must
+    # agree with the active inspect semantics rather than require unwrapping.
+    path = tmp_path / 'wrapper.py'
+    path.write_text(
+        'import torch\n\n'
+        'class WrappedModel(torch.nn.Module):\n'
+        '    def forward(self, x):\n'
+        '        return self.__wrapped__()(x)\n', encoding='utf-8')
+    spec = importlib.util.spec_from_file_location('jacobian_detection_wrapper', path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    module.WrappedModel.__wrapped__ = SquareJacobian
+
+    expected = inspect.unwrap(module.WrappedModel) is SquareJacobian
+    config = {'model': {'with_jacobian': False}}
+    assert auto_enable_jacobian_mode(config, module.WrappedModel()) is expected
+    assert config['model']['with_jacobian'] is expected
+
+
+@pytest.mark.parametrize('model, explicit, expected', [
+    (torch.nn.Identity(), False, False),
+    (torch.nn.Identity(), True, True),
+    (SquareJacobian(), False, True),
+])
+def test_auto_enable_jacobian_mode(model, explicit, expected):
+    config = {'model': {'with_jacobian': explicit}}
+    assert auto_enable_jacobian_mode(config, model) is expected
+    assert config['model']['with_jacobian'] is expected
 
 
 class TestTimer(unittest.TestCase):
@@ -699,19 +801,6 @@ class TestTimerPrint(unittest.TestCase):
 
 class TestLoggerFinish(unittest.TestCase):
     """Tests for Logger.finish method."""
-
-    def test_finish_batch_mode_no_results(self):
-        """Test finish in batch mode with no results."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            save_path = os.path.join(tmpdir, 'test.pkl')
-            logger = Logger('batch', save_path, 100.0)
-            # No samples verified, should handle gracefully
-            # Calling finish with count=0 would cause division by zero
-            # but the code guards against this
-            logger.count = 0
-            # We can't easily call finish() because it would print and divide by zero
-            # Just verify initialization is correct
-            self.assertEqual(logger.count, 0)
 
     def test_finish_batch_mode_with_results(self):
         """Test finish in batch mode with some results."""

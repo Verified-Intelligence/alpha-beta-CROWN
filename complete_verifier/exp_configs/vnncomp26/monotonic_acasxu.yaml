@@ -1,0 +1,25 @@
+# Configuration for the VNN-COMP 2026 monotonic ACAS Xu benchmark.
+#
+# This benchmark uses a small ACAS input domain but was harder in local complete
+# runs. Keep the ACAS input-splitting strategy and run PGD before BaB.
+general:
+  root_path: ../../vnncomp2026_benchmarks/benchmarks/monotonic_acasxu_2026/2.0
+  csv_name: instances.csv
+  complete_verifier: bab
+  verify_onnxruntime_output: true
+solver:
+  batch_size: 16384
+  bound_prop_method: crown
+bab:
+  branching:
+    method: naive
+    input_split:
+      enable: true
+      reorder_bab: true
+  clip_n_verify:
+    clip_input_domain:
+      enabled: true
+attack:
+  pgd_order: before
+  pgd_restarts: 10000
+  pgd_restart_when_stuck: true

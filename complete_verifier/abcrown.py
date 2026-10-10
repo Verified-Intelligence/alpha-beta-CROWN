@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """α,β-CROWN (alpha-beta-CROWN) verifier main interface."""
@@ -96,9 +96,6 @@ class ABCROWN:
         timeout_threshold = bab_args['timeout']
         select_instance = arguments.Config['data']['select_instance']
         complete_verifier = arguments.Config['general']['complete_verifier']
-        # FIXME: We always enable incomplete verification by default.
-        # Maybe this flag can be removed in the future.
-        enable_incomplete = arguments.Config['general']['enable_incomplete_verification']
 
         # FIXME: Remove this check when bab attack is fixed.
         bab_attack_enabled = arguments.Config['bab']['attack']['enabled']
@@ -143,7 +140,9 @@ class ABCROWN:
                     # model, vnnlib, timeout
                     model_ori, shape, vnnlib, onnx_path = load_model_and_vnnlib(
                         file_root, csv_item)
-                    arguments.Config['model']['onnx_path'] = os.path.join(file_root, csv_item[0])
+                    arguments.Config['model']['onnx_path'] = (
+                        os.path.join(file_root, onnx_path)
+                        if onnx_path is not None else None)
                     arguments.Config['specification']['vnnlib_path'] = os.path.join(
                         file_root, csv_item[1])
                 else:
@@ -295,9 +294,9 @@ class ABCROWN:
                     model_ori, x, data_ub=data_max, data_lb=data_min, vnnlib=vnnlib
                 )
 
-            # Incomplete verification is enabled by default. The intermediate lower
-            # and upper bounds will be reused in bab and mip.
-            if (not verified_success and enable_incomplete):
+            # Run incomplete verification to produce bounds and a model that can be
+            # reused by complete verification.
+            if not verified_success:
                 verified_status, ret = self.incomplete_verifier(
                     model_ori, interm_bounds
                 )
@@ -358,8 +357,7 @@ class ABCROWN:
                 # expand the interm bounds and alphas if needed.
                 # NOTE: ideally, we can do it in incomplete_verifier().
                 # But to be compatible with the MIP interface, we do it here.
-                if enable_incomplete:
-                    self.spec_handler_incomplete.expand_intermediate(ret)
+                self.spec_handler_incomplete.expand_intermediate(ret)
 
                 if bab_attack_enabled:
                     ret['attack_examples'] = all_adv_candidates

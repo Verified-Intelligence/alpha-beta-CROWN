@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -125,7 +125,7 @@ class BatchedDomainList(AbstractDomainList):
             for kk, v in alphas[k].items():
                 if kk not in self.all_alphas[k]:
                     self.all_alphas[k][kk] = get_tensor_storage(
-                        v[:, :].cpu(), concat_dim=2)
+                        v[:, :].cpu(), dtype=v.dtype, concat_dim=2)
                 else:
                     self.all_alphas[k][kk].append(v[:, :].cpu())
         if thresholds.numel() > 1:
@@ -548,7 +548,8 @@ class BatchedDomainList(AbstractDomainList):
             for kk, vv in v.items():
                 if kk not in self.all_alphas[k]:
                     # This is the first time to create these alpha TensorStorage
-                    self.all_alphas[k][kk] = get_tensor_storage(vv[:,:,indexer].cpu(), concat_dim=2)
+                    self.all_alphas[k][kk] = get_tensor_storage(
+                        vv[:, :, indexer].cpu(), dtype=vv.dtype, concat_dim=2)
                     alpha_new = True
                 else:
                     # Reusing existing TensorStorage

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Installation script used for VNN-COMP. The tool is only compatible with Ubuntu 24.04.
+# Installation script used for VNN-COMP. Targets Ubuntu 24.04/26.04.
 
 TOOL_NAME=alpha-beta-CROWN
 VERSION_STRING=v1
@@ -23,7 +23,9 @@ sudo -E DEBIAN_FRONTEND=noninteractive apt purge -y snapd unattended-upgrades mo
 sudo killall -9 unattended-upgrade-shutdown
 sudo -E DEBIAN_FRONTEND=noninteractive apt update
 sudo -E DEBIAN_FRONTEND=noninteractive apt upgrade -y
-sudo -E DEBIAN_FRONTEND=noninteractive apt install -y sudo vim-gtk3 curl wget git cmake tmux aria2 build-essential netcat-openbsd expect dkms aria2
+# linux-headers-$(uname -r) is required for the NVIDIA DKMS module build;
+# default-jre provides a working JVM for the CPLEX (InstallAnywhere) installer.
+sudo -E DEBIAN_FRONTEND=noninteractive apt install -y sudo vim-gtk3 curl wget git cmake tmux aria2 build-essential netcat-openbsd expect dkms default-jre patchelf "linux-headers-$(uname -r)"
 
 sudo systemctl stop cron.service chrony.service multipathd.service multipathd.socket udisks2.service packagekit.service polkit.service networkd-dispatcher.service
 sudo systemctl disable cron.service chrony.service multipathd.service multipathd.socket udisks2.service packagekit.service polkit.service networkd-dispatcher.service
@@ -41,9 +43,15 @@ export PATH=${PATH}:$HOME/.local/bin
 # Install NVIDIA driver
 DRIVER_VERSION=610.43.02
 aria2c -x 10 -s 10 -k 1M https://us.download.nvidia.com/XFree86/Linux-x86_64/$DRIVER_VERSION/NVIDIA-Linux-x86_64-$DRIVER_VERSION.run
-sudo nvidia-smi -pm 0
+# The nouveau driver must be unloaded/blacklisted first; otherwise the .run
+# installer aborts ("The Nouveau kernel driver is currently in use ...").
+sudo bash -c 'printf "blacklist nouveau\noptions nouveau modeset=0\n" > /etc/modprobe.d/blacklist-nouveau.conf'
+sudo rmmod nouveau 2>/dev/null || true
+sudo update-initramfs -u
 chmod +x ./NVIDIA-Linux-x86_64-$DRIVER_VERSION.run
-sudo ./NVIDIA-Linux-x86_64-$DRIVER_VERSION.run --silent --dkms
+# --dkms builds the kernel module (needs linux-headers, installed above);
+# --disable-nouveau lets the installer tear down nouveau on its own.
+sudo ./NVIDIA-Linux-x86_64-$DRIVER_VERSION.run --silent --dkms --disable-nouveau
 # Remove old driver (if already installed) and reload the new one.
 sudo rmmod nvidia_uvm; sudo rmmod nvidia_drm; sudo rmmod nvidia_modeset; sudo rmmod nvidia
 sudo modprobe nvidia; sudo nvidia-smi -e 0; sudo nvidia-smi -r -i 0
@@ -68,7 +76,8 @@ cat > response.txt <<EOF
 INSTALLER_UI=silent
 LICENSE_ACCEPTED=true
 EOF
-sudo ./cplex_studio2211.linux_x86_64.bin -f response.txt
+
+sudo GLIBC_TUNABLES=glibc.rtld.execstack=2 ./cplex_studio2211.linux_x86_64.bin -f response.txt
 
 # Build CPLEX interface
 make -C ${TOOL_DIR}/complete_verifier/cuts/CPLEX_cuts/
@@ -95,6 +104,11 @@ CORES=$(echo $grbprobe_output | grep -Po "(?<=CORES=)(.*?)(?= )")
 echo "Please obtain a gurobi KEY from https://portal.gurobi.com/iam/licenses/request/?type=academic"
 KEY=to-be-filled
 
+echo "Your gurobi KEY is a long string, looking like 9c4a7e52-6f1d-4a8b-9c73-2e5d1f0b8a6e"
+echo 'To obtain a licence file, replace "to-be-filled" with your key in the URL below,'
+echo 'and visit the URL using a campus network'
 # The url can only be accessed with terminals which are connected to the university network
-probe_url="https://portal.gurobi.com/keyserver?id=${KEY}&hostname=${HOSTNAME}&hostid=${HOSTID}&username=${USERNAME}&os=linux&localdate=2024-05-17&version=10&cores=${CORES}"
+probe_url="https://portal.gurobi.com/keyserver?id=${KEY}&hostname=${HOSTNAME}&hostid=${HOSTID}&username=${USERNAME}&os=linux&localdate=2026-05-17&version=10&cores=${CORES}"
 echo $probe_url
+echo
+echo "Setup incomplete - please setup gurobi using the instructions above."

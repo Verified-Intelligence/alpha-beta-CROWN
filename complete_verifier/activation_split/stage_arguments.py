@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -17,6 +17,7 @@ Arguments for branch_and_bound_preprocess/solve/postprocess.
 """
 from dataclasses import dataclass
 
+import torch
 from torch import Tensor
 from auto_LiRPA import BoundedTensor
 from utils import Stats
@@ -34,6 +35,8 @@ class PreprocessConstArguments:
 
     split_nodes_names: list[str]
     "A list mapping split_node index to split_node name. Used for logging."
+    dtype_map: dict[str, torch.dtype]
+    "The computation dtype owned by each split node."
     final_name: str
     "The name of the final layer in BoundedModule."
     net_x: Tensor | BoundedTensor
@@ -49,6 +52,7 @@ class PreprocessConstArguments:
     def from_net(net: LiRPANet) -> "PreprocessConstArguments":
         return PreprocessConstArguments(
             split_nodes_names=[n.name for n in net.net.split_nodes],
+            dtype_map=net.get_split_node_dtype_map(),
             final_name=net.final_name,
             net_x=net.x,
             net_c=net.c,

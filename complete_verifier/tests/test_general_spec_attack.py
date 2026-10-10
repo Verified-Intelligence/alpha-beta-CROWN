@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for attack/general_spec_attack.py"""
@@ -215,11 +215,13 @@ class TestDefaultPgdLoss(unittest.TestCase):
 
         loss, _ = default_pgd_loss(
             None, output, C_mat, rhs_mat, self.or_spec_size,
-            gama_lambda=0, threshold=-1e-5, mode='hinge'
+            gama_lambda=0, threshold=-1.0, mode='hinge'
         )
 
-        # With tolerance 1e-3, margin = 0 + 1e-3 = 1e-3, clamped and negated = -1e-3
-        expected = torch.full_like(loss, -1e-3)
+        # raw_margin = C @ output - rhs = 0. With tolerance 1e-3,
+        # adjusted_margin = raw_margin - tolerance = -1e-3.
+        # No clipping occurs, so the negated loss is exactly 1e-3.
+        expected = torch.full_like(loss, 1e-3)
         self.assertTrue(torch.allclose(loss, expected, atol=1e-6))
 
 
@@ -279,6 +281,44 @@ class TestTestConditions(unittest.TestCase):
 
         # With large positive margins, attack should fail
         self.assertFalse(result.all())
+
+    @patch('arguments.Config', {
+        'attack': {'attack_tolerance': 1e-3}
+    })
+    def test_attack_tolerance_relaxes_success_condition(self):
+        """A positive margin within attack_tolerance is accepted."""
+        from attack.general_spec_attack import test_conditions
+
+        input_tensor = torch.rand(self.batch_size, self.num_or, self.num_restarts, *self.input_shape)
+        data_min = torch.zeros(self.batch_size, self.num_or, 1, *self.input_shape)
+        data_max = torch.ones(self.batch_size, self.num_or, 1, *self.input_shape)
+        output = torch.zeros(self.batch_size, self.num_or, self.num_restarts, self.num_output)
+        C_mat = torch.zeros(self.batch_size, self.num_spec, self.num_output)
+        rhs_mat = torch.full((self.batch_size, self.num_spec), -5e-4)
+
+        result = test_conditions(input_tensor, output, data_min, data_max,
+                                 C_mat, rhs_mat, self.or_spec_size)
+
+        self.assertTrue(result.all())
+
+    @patch('arguments.Config', {
+        'attack': {'attack_tolerance': -1e-3}
+    })
+    def test_negative_attack_tolerance_makes_success_condition_stricter(self):
+        """A negative tolerance preserves the legacy stricter attack check."""
+        from attack.general_spec_attack import test_conditions
+
+        input_tensor = torch.rand(self.batch_size, self.num_or, self.num_restarts, *self.input_shape)
+        data_min = torch.zeros(self.batch_size, self.num_or, 1, *self.input_shape)
+        data_max = torch.ones(self.batch_size, self.num_or, 1, *self.input_shape)
+        output = torch.zeros(self.batch_size, self.num_or, self.num_restarts, self.num_output)
+        C_mat = torch.zeros(self.batch_size, self.num_spec, self.num_output)
+        rhs_mat = torch.full((self.batch_size, self.num_spec), 5e-4)
+
+        result = test_conditions(input_tensor, output, data_min, data_max,
+                                 C_mat, rhs_mat, self.or_spec_size)
+
+        self.assertFalse(result.any())
 
     @patch('arguments.Config', {
         'attack': {'attack_tolerance': 0.0}
@@ -809,6 +849,48 @@ class TestPgdAttackEarlyStop(unittest.TestCase):
         )
 
         self.assertIsNotNone(result)
+
+    @patch('builtins.print')
+    @patch('arguments.Config', make_config_patch(**{
+        'attack.pgd_steps': 3,
+        'attack.pgd_early_stop': True,
+        'attack.early_stop_condition': 'always_early_stop_condition',
+    }))
+    def test_early_stop_rejected_candidate_continues_pgd(self, mock_print):
+        """Concrete-validation failure should not stop PGD early."""
+        import attack.general_spec_attack as general_spec_attack
+
+        def always_early_stop_condition(inputs, *args, **kwargs):
+            return torch.ones(
+                inputs.shape[0], dtype=torch.bool, device=inputs.device)
+
+        general_spec_attack.always_early_stop_condition = (
+            always_early_stop_condition)
+        try:
+            X = torch.rand(self.batch_size, self.num_or, *self.input_shape)
+            data_min = torch.zeros(self.batch_size, self.num_or, *self.input_shape)
+            data_max = torch.ones(self.batch_size, self.num_or, *self.input_shape)
+            C_mat = torch.randn(self.batch_size, self.num_spec, self.num_output)
+            rhs_mat = torch.randn(self.batch_size, self.num_spec)
+            alpha = 0.01
+
+            with patch.object(
+                    general_spec_attack.attack_utils,
+                    'are_attack_counterexamples_valid',
+                    return_value=False) as validator:
+                result = general_spec_attack.pgd_attack_with_general_specs(
+                    self.model, X, data_min, data_max, C_mat, rhs_mat,
+                    self.or_spec_size, alpha, use_adam=True,
+                    initialization='uniform', num_restarts=2, pgd_steps=3,
+                    vnnlib=[([[0.0, 1.0]], [])],
+                )
+        finally:
+            del general_spec_attack.always_early_stop_condition
+
+        self.assertIsNotNone(result)
+        self.assertEqual(validator.call_count, 3)
+        mock_print.assert_any_call(
+            "PGD early stop candidate rejected by concrete validation, continuing PGD.")
 
 
 class TestPgdAttackResultDataclass(unittest.TestCase):

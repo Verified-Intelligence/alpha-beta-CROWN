@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 r"""
@@ -89,12 +89,9 @@ class BoundLinearMaskedSigmoid(BoundSigmoid):
 
     def interval_propagate(self, x, mask, slope, bias):
         """Interval bound propagation (IBP)."""
-        # Each x, mask, slope, bias is a tuple, or a Interval object representing lower and upper bounds.
-        # We assume Linf norm perturbation on input.
-        assert Interval.get_perturbation(x)[0] == float("inf")
-        x_L, x_U = x[0], x[1]  # The inputs (x)
+        x_L, x_U = x.lower, x.upper
         # We assume no perturbations on mask, slope and bias.
-        mask, slope, bias = mask[0], slope[0], bias[0]
+        mask, slope, bias = mask.lower, slope.lower, bias.lower
         # Lower and upper bounds when Sigmoid is selected.
         sigmoid_lb = torch.sigmoid(x_L)
         sigmoid_ub = torch.sigmoid(x_U)
@@ -106,7 +103,7 @@ class BoundLinearMaskedSigmoid(BoundSigmoid):
         # Select the final bounds according to the mask.
         final_lb = mask * linear_lb + (1.0 - mask) * sigmoid_lb
         final_ub = mask * linear_ub + (1.0 - mask) * sigmoid_ub
-        return final_lb, final_ub
+        return Interval(final_lb, final_ub)
 
     def bound_relax(self, x, init=False, dim_opt=None):
         """Element-wise CROWN relaxation for our special Sigmoid activation function."""
@@ -168,4 +165,3 @@ class linear_masked_sigmoid_model(nn.Module):
         # out = torch.nn.functional.sigmoid(out)
         out = self.linear2(out)
         return out
-

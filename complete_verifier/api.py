@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from __future__ import annotations
@@ -3133,7 +3133,6 @@ class ABCrownSolver:
             eval(general_args['adhoc_tuning'])(model_ori, self.vnnlib_handler)
 
         complete_verifier = general_args['complete_verifier']
-        enable_incomplete = general_args['enable_incomplete_verification']
         bab_attack_enabled = arguments.Config['bab']['attack']['enabled']
         if bab_attack_enabled:
             raise AssertionError('BaB attack is not yet supported in the new API.')
@@ -3197,7 +3196,7 @@ class ABCrownSolver:
                 model_ori, x, data_ub=data_max, data_lb=data_min, vnnlib=self.vnnlib_handler.vnnlib
             )
 
-        if not verified_success and enable_incomplete:
+        if not verified_success:
             verified_status, reference = incomplete_verifier_core(self, model_ori, interm_bounds)
             if self.spec_handler_incomplete is not None:
                 attack_examples, attack_margins, all_adv_candidates = (
@@ -3237,7 +3236,7 @@ class ABCrownSolver:
         if (not verified_success
                 and complete_verifier != 'skip'
                 and verified_status != 'unknown-mip'):
-            if enable_incomplete and self.spec_handler_incomplete is not None:
+            if self.spec_handler_incomplete is not None:
                 self.spec_handler_incomplete.expand_intermediate(reference)
             if arguments.Config['bab']['attack']['enabled']:
                 reference['attack_examples'] = all_adv_candidates

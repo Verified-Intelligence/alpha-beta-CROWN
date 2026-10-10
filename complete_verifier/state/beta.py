@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -72,7 +72,7 @@ class BetaFullData(DictLikeMixIn):
 
     @staticmethod
     def from_domain_dict(
-        d: dict, *, bias: bool, device="cpu"
+        d: dict, *, bias: bool, dtype_map: dict[str, torch.dtype], device="cpu"
     ) -> Tuple["BetaFullData", "NumsEffectiveBetasPerDomain"]:
         """
         Extract beta values from a domain's beta dict.
@@ -80,6 +80,7 @@ class BetaFullData(DictLikeMixIn):
         Args:
             d: The domain's beta dict. Required keys: "history", "betas".
             bias: If true, turn on bias in SparseBeta.
+            dtype_map: Computation dtype owned by each split node name.
             device: The device to put the tensors on.
         Returns:
             A BetaFullData instance containing the extracted beta values, and a NumsEffectiveBetasPerDomain instance.
@@ -99,13 +100,26 @@ class BetaFullData(DictLikeMixIn):
 
         sparse_beta_by_layer = {}
         for layer_name, max_splits in max_splits_per_layer.items():
+            try:
+                dtype = dtype_map[layer_name]
+            except KeyError as exc:
+                raise RuntimeError(
+                    f"Cannot restore beta for {layer_name} without its "
+                    "computation dtype."
+                ) from exc
             shape = (batch_size, max_splits)
             betas_ = [
                 (d["betas"][bi][layer_name] if d["betas"][bi] is not None else None)
                 for bi in range(batch_size)
             ]
             sparse_beta_by_layer[layer_name] = [
-                SparseBeta(shape=shape, bias=bias, betas=betas_, device=device)
+                SparseBeta(
+                    shape=shape,
+                    bias=bias,
+                    betas=betas_,
+                    device=device,
+                    dtype=dtype,
+                )
             ]
             for sparse_beta in sparse_beta_by_layer[layer_name]:
                 sparse_beta.apply_splits(d["history"], layer_name)

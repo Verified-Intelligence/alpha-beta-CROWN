@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for bab.py module."""
@@ -152,6 +152,28 @@ class TestAutoBatchSize:
         )
         auto_bs.record_actual_batch_size(32)
         # Should not raise
+
+    @pytest.mark.parametrize(
+        'device', (torch.device('cpu'), torch.device('meta')))
+    def test_non_cuda_devices_do_not_query_memory(self, device):
+        """CPU unit tests must not enter CUDA memory accounting."""
+        from auto_LiRPA.utils import AutoBatchSize
+
+        auto_bs = AutoBatchSize(
+            init_batch_size=4, device=device, enable=True)
+        auto_bs.record_actual_batch_size(4)
+
+        assert auto_bs.update() is None
+        assert auto_bs.batch_size == 4
+
+    def test_disabled_mode_accepts_no_device(self):
+        """A disabled batch-size controller does not require a device."""
+        from auto_LiRPA.utils import AutoBatchSize
+
+        auto_bs = AutoBatchSize(
+            init_batch_size=4, device=None, enable=False)
+
+        assert auto_bs.update() is None
 
 
 class TestBaBConfiguration:
@@ -352,6 +374,77 @@ class TestGeneralBaB:
         # Reset
         arguments.Config['debug']['lp_test'] = None
 
+    @patch('activation_split.bab_bootstrap.compute_first_iteration_decision')
+    @patch('activation_split.bab_bootstrap.get_unstable_neurons')
+    @patch('activation_split.bab_bootstrap.BatchedDomainList')
+    def test_general_bab_uses_nonlinear_branching(
+            self, mock_domain_list, mock_get_unstable,
+            mock_first_iteration_decision):
+        """Nonlinear networks should use the nonlinear BaB heuristic."""
+        import arguments
+        from activation_split.bab_bootstrap import general_bab
+        from heuristics.nonlinear import NonlinearBranching
+
+        domains = MagicMock()
+        domains.__len__.return_value = 0
+        mock_domain_list.return_value = domains
+
+        mask = {'/sin': torch.ones(1, 1, dtype=torch.bool)}
+        mock_get_unstable.return_value = (mask, 1)
+
+        mock_net = self._create_mock_net()
+        mock_net.nonlinear_split = True
+        mock_net.net.root_names = ['/input']
+        mock_net.net.roots.return_value = []
+        sin_node = MagicMock()
+        sin_node.name = '/sin'
+        mock_net.net.split_nodes = [sin_node]
+        mock_net.net.layers_requiring_bounds = []
+        mock_net.x = torch.zeros(1, 1)
+        mock_net.c = torch.ones(1, 1, 1)
+        mock_net.build_with_refined_bounds.return_value = {
+            'global_ub': torch.tensor([[0.5]]),
+            'global_lb': torch.tensor([[-0.1]]),
+            'mask': mask,
+            'lA': {'/output': torch.ones(1, 1, 1)},
+            'alphas': {},
+            'history': [{}],
+            'lower_bounds': {
+                '/input': torch.tensor([[-1.0]]),
+                '/sin': torch.tensor([[-0.5]]),
+                '/output': torch.tensor([[-0.1]]),
+            },
+            'upper_bounds': {
+                '/input': torch.tensor([[1.0]]),
+                '/sin': torch.tensor([[0.5]]),
+                '/output': torch.tensor([[0.5]]),
+            },
+        }
+        reference_dict = {
+            'lower_bounds': None,
+            'upper_bounds': None,
+            'lA': None,
+            'alphas': None,
+            'refined_betas': None,
+        }
+
+        branching_args = arguments.Config['bab']['branching']
+        with patch.dict(branching_args, {'method': 'nonlinear'}):
+            result = general_bab(
+                mock_net,
+                mock_net.x,
+                mock_net.c,
+                torch.tensor([[0.0]]),
+                reference_dict=reference_dict,
+                max_iterations=1,
+            )
+
+        mock_first_iteration_decision.assert_called_once()
+        heuristic = mock_first_iteration_decision.call_args.kwargs[
+            'branching_heuristic']
+        assert isinstance(heuristic, NonlinearBranching)
+        assert result[2] == 'safe'
+
 
 class TestBaBEdgeCases:
     """Edge case tests for BaB functions."""
@@ -538,31 +631,6 @@ class TestPruneAlphas:
 
         result = prune_alphas(alphas, start_nodes)
         assert result == {}
-
-
-class TestInputSplitIntegration:
-    """Tests for input split integration with BaB."""
-
-    def test_input_relu_splitter_split_condition(self):
-        """Test InputReluSplitter split_condition method.
-
-        Note: The current implementation of split_condition doesn't return a value
-        (it calculates use_input_split but only prints, returning None).
-        This test documents the current behavior - if it returns None, the test
-        passes, indicating this is a known limitation of the code.
-
-        In bab.py line 533, it's used as:
-            if input_relu_splitter and input_relu_splitter.split_condition(...)
-        Which means None is treated as falsy (no input split).
-        """
-        from input_split.input_split_on_relu_domains import InputReluSplitter
-
-        splitter = InputReluSplitter()
-        # Default condition check - returns None (bug in original code)
-        result = splitter.split_condition(0)
-        # The method currently returns None because it lacks a return statement
-        # When/if this is fixed, it should return a bool
-        assert result is None or isinstance(result, bool)
 
 
 if __name__ == '__main__':

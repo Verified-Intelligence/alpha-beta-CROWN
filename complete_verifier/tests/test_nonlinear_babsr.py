@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for heuristics/nonlinear/babsr.py - BaBSRNonlinearBranching class."""
@@ -311,16 +311,38 @@ class TestBaBSRNonlinearBranchingGetPartialBoundsBatch(unittest.TestCase):
 
         return mock_net, mock_model
 
-    def test_decorated_with_no_grad(self):
-        """Test that get_partial_bounds_batch is decorated with @torch.no_grad()."""
+    def test_output_does_not_track_gradients(self):
+        """Partial heuristic bounds should not build an autograd graph."""
         from heuristics.nonlinear.babsr import BaBSRNonlinearBranching
 
-        # Get the unbound method from the class
-        method = BaBSRNonlinearBranching.get_partial_bounds_batch
+        mock_net, mock_model = self._create_mock_net()
+        source = torch.ones(2, 3, requires_grad=True)
+        start_node = MagicMock()
+        start_node.name = 'start'
+        start_node.inputs = []
+        start_node.perturbed = True
+        start_node.zero_uA_mtx = False
+        start_node.zero_lA_mtx = False
+        mock_model.nodes.return_value = [start_node]
+        mock_model.__getitem__ = MagicMock(return_value=MagicMock())
 
-        # torch.no_grad() decorated functions have __wrapped__ attribute
-        self.assertTrue(hasattr(method, '__wrapped__'),
-                        "get_partial_bounds_batch should be decorated with @torch.no_grad()")
+        branching = BaBSRNonlinearBranching(mock_net, num_branches=2)
+        with patch(
+            'heuristics.nonlinear.babsr.expand_batch',
+            return_value=MagicMock(device='cpu'),
+        ), patch(
+            'heuristics.nonlinear.babsr.get_degrees', return_value={},
+        ), patch.object(
+            branching, '_backward_propagate', return_value=source * 2,
+        ):
+            result = branching.get_partial_bounds_batch(
+                lb={'input': source},
+                ub={'input': source + 1},
+                lAs={'start': torch.ones(2, 1)},
+                start_nodes=[start_node],
+            )
+
+        self.assertFalse(result.requires_grad)
 
     def test_sets_interm_bound_required(self):
         """Test that method initializes interm_bound_required as empty set."""

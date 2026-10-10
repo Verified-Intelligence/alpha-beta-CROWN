@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -205,12 +205,47 @@ def merge_sign(model: BoundedModule):
 
 
 def merge_relu_lookup_table(model: BoundedModule):
+    def is_reduce_over_last_dim(node):
+        """Whether a BoundReduce sums over the last dimension.
+
+        Across ONNX opsets the reduction axis is encoded either as a second
+        (constant) input equal to -1 (older opset, parsed as BoundConstant) or
+        as the node's ``axis`` attribute (newer opset, already normalized to be
+        non-negative). Handle both so the lookup-table pattern keeps matching.
+        """
+        if len(node.inputs) >= 2 and isinstance(node.inputs[1], BoundConstant):
+            return model.get_forward_value(node.inputs[1]).item() == -1
+        ax = getattr(node, 'axis', None)
+        if isinstance(ax, (tuple, list)):
+            if len(ax) != 1:
+                return False
+            ax = ax[0]
+        if ax is None:
+            return False
+        shape = node.inputs[0].output_shape
+        ndim = len(shape) if shape is not None else None
+        return ax == -1 or (ndim is not None and ax == ndim - 1)
+
+    def is_unsqueeze_last_dim(node):
+        """Whether a BoundUnsqueeze adds the new (last) axis.
+
+        Like ReduceSum, the axis is either a second input (== -1) or the
+        ``axes`` attribute on newer opsets.
+        """
+        if (len(node.inputs) >= 2 and not node.inputs[1].perturbed):
+            return model.get_forward_value(node.inputs[1]) == -1
+        ax = getattr(node, 'axes', None)
+        if ax is None:
+            return False
+        out_shape = node.output_shape
+        out_ndim = len(out_shape) if out_shape is not None else None
+        return ax == -1 or (out_ndim is not None and ax == out_ndim - 1)
+
     nodes = list(model.nodes())
     for node in nodes:
         if (isinstance(node, BoundReduceSum)
                 and isinstance(node.inputs[0], BoundMul)
-                and isinstance(node.inputs[1], BoundConstant)
-                and node.inputs[1].value.item() == -1):
+                and is_reduce_over_last_dim(node)):
             node_mul = node.inputs[0]
             if (isinstance(node_mul.inputs[1], BoundBuffers)
                     and node_mul.inputs[1].buffer.ndim == 1
@@ -222,8 +257,7 @@ def merge_relu_lookup_table(model: BoundedModule):
                 if (isinstance(node_sub.inputs[1], BoundBuffers)
                         and node_sub.inputs[1].buffer.ndim == 1
                         and isinstance(node_sub.inputs[0], BoundUnsqueeze)
-                        and not node_sub.inputs[0].inputs[1].perturbed
-                        and node_sub.inputs[0].inputs[1].value == -1
+                        and is_unsqueeze_last_dim(node_sub.inputs[0])
                         and len(node_sub.inputs[0].inputs[0].output_shape) == 2
                 ):
                     node_offset = node_sub.inputs[1]

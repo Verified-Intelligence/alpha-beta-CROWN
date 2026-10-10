@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Branch and bound for input space split."""
@@ -339,25 +339,15 @@ def input_bab_parallel(net: LiRPANet, x: BoundedTensor, c: Tensor, rhs: Tensor,
     if (dm_u - dm_l > 0).int().sum() == 1:
         branching_method = "naive"
 
-    # Since we always enable incomplete verification by default,
-    # it always has reference_dict.
-    if reference_dict:
-        ret = reference_dict
-        global_lb = ret['global_lb']
-        # format alphas. extract only alpha values from the complete alpha dict
-        alphas = {}
-        if use_alpha:
-            alphas = {k: {kk: vv for kk, vv in v['alpha'].items()} for k, v in ret['alphas'].items()}
+    # Input-split BaB requires bounds produced by incomplete verification.
+    assert reference_dict
+    ret = reference_dict
+    global_lb = ret['global_lb']
 
-    else:
-        # FIXME: This branch should not be used by default and is only for backup.
-        # Maybe it can be removed in the future.
-        assert arguments.Config['general']['enable_incomplete_verification'] is False
-        global_lb, ret = net.build(
-            x, c, rhs, stop_criterion,
-            bounding_method=init_bounding_method, return_A=False)
-        if use_alpha:
-            alphas = ret['alphas']
+    # format alphas. extract only alpha values from the complete alpha dict
+    alphas = {}
+    if use_alpha:
+        alphas = {k: {kk: vv for kk, vv in v['alpha'].items()} for k, v in ret['alphas'].items()}
 
     stats.visited += len(global_lb)
 
@@ -372,6 +362,8 @@ def input_bab_parallel(net: LiRPANet, x: BoundedTensor, c: Tensor, rhs: Tensor,
     # Please check auto_LiRPA/concretize_func.py
     for node in net.net.get_splittable_activations():
         for preact_node in node.inputs:
+            if not preact_node.perturbed:
+                continue
             if preact_node.output_activations is not None:
                 preact_node.output_activations.append(node)
             else:
@@ -479,7 +471,8 @@ def input_bab_parallel(net: LiRPANet, x: BoundedTensor, c: Tensor, rhs: Tensor,
             dm_l, dm_u = clip_domains(dm_l, dm_u, rhs, lA, None, global_lb, calculate_volume=clip_calculate_volume_metrics)
         domains.add(global_lb, dm_l.detach(), dm_u.detach(),
                     alphas, c, rhs, constraints=constraints, split_idx=split_idx,
-                    remaining_index=remaining_index, check_input_boxes=use_clip_domains,
+                    remaining_index=None, check_dm_lbs=True,
+                    check_input_boxes=use_clip_domains,
                     spec_sizes=or_spec_size
                     )
 

@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Optimizing computation graph in onnx file."""
@@ -807,6 +807,22 @@ def compress_onnx(onnx_model, old_path, save_path, onnx_optimization_flags: List
                 new_nodes[-1].output[0],
                 onnx.helper.make_tensor_type_proto(1, [1, 1]))]
             print("Remove the squeeze in the last layer.")
+        elif (len(new_nodes) >= 2
+                and new_nodes[-2].op_type == "Squeeze"
+                and len(new_nodes[-2].attribute) == 0
+                and new_nodes[-1].op_type == "Reshape"
+                and new_nodes[-1].input[0] == new_nodes[-2].output[0]
+                and new_nodes[-1].input[1] in initializers
+                and initializers[new_nodes[-1].input[1]].tolist() == [1, 1]):
+            reshape_shape = new_nodes[-1].input[1]
+            squeeze_input = new_nodes[-2].input[0]
+            new_nodes = new_nodes[:-2]
+            model_outputs = [onnx.helper.make_tensor_value_info(
+                squeeze_input, onnx.TensorProto.FLOAT, [1, 1])]
+            new_initializers = [
+                initializer for initializer in new_initializers
+                if initializer.name != reshape_shape]
+            print("Remove the Squeeze-Reshape output wrapper.")
 
     if "remove_relu_in_last_layer" in onnx_optimization_flags:
         if new_nodes[-1].op_type == "Relu":
@@ -860,6 +876,9 @@ def compress_onnx(onnx_model, old_path, save_path, onnx_optimization_flags: List
         model_def.opset_import[0].version = 13
     model_def = onnx.shape_inference.infer_shapes(model_def)
 
+    if "optimize_relu_relationship" in onnx_optimization_flags:
+        model_def = optimize_relu_relationship(model_def)
+
     onnx.checker.check_model(model_def)
     onnx.save(model_def, save_path)
 
@@ -893,6 +912,191 @@ def compress_onnx(onnx_model, old_path, save_path, onnx_optimization_flags: List
               f'{np.sum(errors)}/{np.mean(errors)}')
 
     return model_def
+
+
+def optimize_relu_relationship(onnx_model, atol=1e-6, rtol=1e-4, sanity_n=1000):
+    """Collapse a recognized affine-ReLU block into an equivalent smaller block.
+    """
+    import copy
+    import time
+    t_pass_start = time.time()
+    original_model = copy.deepcopy(onnx_model)
+
+    initializers = {init.name: init for init in onnx_model.graph.initializer}
+
+    def _w(name):
+        if name in initializers:
+            return nh.to_array(initializers[name])
+        return None
+
+    def _gemm_attrs(node):
+        attrs = {a.name: a for a in node.attribute}
+        transA = int(attrs['transA'].i) if 'transA' in attrs else 0
+        transB = int(attrs['transB'].i) if 'transB' in attrs else 0
+        alpha = float(attrs['alpha'].f) if 'alpha' in attrs else 1.0
+        beta = float(attrs['beta'].f) if 'beta' in attrs else 1.0
+        return transA, transB, alpha, beta
+
+    def _identify(W2_row, b2_i, W1, b1):
+        nz = np.where(np.abs(W2_row) > atol)[0]
+        if len(nz) != 2:
+            return None
+        idx_a, idx_b = int(nz[0]), int(nz[1])
+        va, vb = float(W2_row[idx_a]), float(W2_row[idx_b])
+        if va > 0 and vb < 0:
+            idx1, idx2 = idx_a, idx_b
+        elif va < 0 and vb > 0:
+            idx1, idx2 = idx_b, idx_a
+        else:
+            return None
+        s_pos = 1.0 / float(W2_row[idx1])
+        s_neg = 1.0 / float(W2_row[idx2])
+        tau = float(b2_i)
+        w_o = W1[idx1] / s_pos
+        b_o = tau + float(b1[idx1]) / s_pos
+        w_chk = W1[idx2] / s_neg
+        b_chk = tau + float(b1[idx2]) / s_neg
+        if not np.allclose(w_o, w_chk, atol=atol, rtol=rtol):
+            return None
+        if abs(b_o - b_chk) > atol + rtol * max(abs(b_o), abs(b_chk), 1.0):
+            return None
+        return idx1, idx2, w_o, b_o
+
+    nodes = list(onnx_model.graph.node)
+    new_nodes = []
+    new_inits = []
+    i = 0
+    n_merged = 0
+
+    while i < len(nodes):
+        if i + 3 < len(nodes):
+            A, B, C, D = nodes[i:i + 4]
+            if (A.op_type == "Gemm" and B.op_type == "Relu"
+                    and C.op_type == "Gemm" and D.op_type == "Relu"
+                    and len(B.input) == 1 and B.input[0] == A.output[0]
+                    and C.input[0] == B.output[0]
+                    and len(D.input) == 1 and D.input[0] == C.output[0]):
+
+                tA1, tB1, al1, be1 = _gemm_attrs(A)
+                tA2, tB2, al2, be2 = _gemm_attrs(C)
+                # The rewrite is derived for the common fully connected Gemm
+                # convention: Y = X @ W.T + b.
+                if not (tA1 == 0 and tB1 == 1 and tA2 == 0 and tB2 == 1
+                        and al1 == 1.0 and be1 == 1.0
+                        and al2 == 1.0 and be2 == 1.0):
+                    new_nodes.append(nodes[i]); i += 1; continue
+
+                W1 = _w(A.input[1]) if len(A.input) >= 2 else None
+                W2 = _w(C.input[1]) if len(C.input) >= 2 else None
+                if W1 is None or W2 is None or W1.ndim != 2 or W2.ndim != 2:
+                    new_nodes.append(nodes[i]); i += 1; continue
+
+                b1 = (_w(A.input[2]) if len(A.input) >= 3
+                      else np.zeros(W1.shape[0], dtype=W1.dtype))
+                b2 = (_w(C.input[2]) if len(C.input) >= 3
+                      else np.zeros(W2.shape[0], dtype=W2.dtype))
+
+                n_out, n_mid = W2.shape
+                if W1.shape[0] != n_mid or n_mid != 2 * n_out:
+                    new_nodes.append(nodes[i]); i += 1; continue
+
+                pairs = []
+                used = set()
+                ok = True
+                for k in range(n_out):
+                    r = _identify(W2[k], b2[k], W1, b1)
+                    if r is None:
+                        ok = False; break
+                    idx1, idx2, w_o, b_o = r
+                    if idx1 in used or idx2 in used:
+                        ok = False; break
+                    used.add(idx1); used.add(idx2)
+                    pairs.append((k, w_o, b_o))
+
+                if not ok or len(used) != n_mid:
+                    new_nodes.append(nodes[i]); i += 1; continue
+
+                n_in = W1.shape[1]
+                W_new = np.empty((n_out, n_in), dtype=W1.dtype)
+                b_new = np.empty((n_out,), dtype=b1.dtype)
+                for k, w_o, b_o in pairs:
+                    W_new[k] = w_o
+                    b_new[k] = b_o
+
+                W_new_name = f"{A.name}/merged/W"
+                b_new_name = f"{A.name}/merged/b"
+                new_inits.append(nh.from_array(W_new, name=W_new_name))
+                new_inits.append(nh.from_array(b_new, name=b_new_name))
+
+                fused_gemm = onnx.helper.make_node(
+                    "Gemm",
+                    inputs=[A.input[0], W_new_name, b_new_name],
+                    outputs=[C.output[0]],
+                    name=f"{A.name}/merged",
+                    alpha=1.0, beta=1.0, transA=0, transB=1,
+                )
+                fused_relu = onnx.helper.make_node(
+                    "Relu",
+                    inputs=[C.output[0]],
+                    outputs=[D.output[0]],
+                    name=f"{A.name}/merged/relu",
+                )
+                new_nodes.append(fused_gemm)
+                new_nodes.append(fused_relu)
+                i += 4
+                n_merged += 1
+                continue
+
+        new_nodes.append(nodes[i])
+        i += 1
+
+    if n_merged > 0:
+        del onnx_model.graph.node[:]
+        onnx_model.graph.node.extend(new_nodes)
+        onnx_model.graph.initializer.extend(new_inits)
+        t_rewrite = time.time() - t_pass_start
+        print(f"[optimize_relu_relationship] merged {n_merged} two-layer block(s) into one "
+              f"in {t_rewrite*1000:.1f} ms")
+
+    onnx_model.ir_version = onnx.helper.find_min_ir_version_for(
+        list(onnx_model.opset_import))
+
+    if n_merged > 0:
+        original_model.ir_version = onnx.helper.find_min_ir_version_for(
+            list(original_model.opset_import))
+        inp = original_model.graph.input[0]
+        shape = [d.dim_value if d.dim_value > 0 else 1
+                 for d in inp.type.tensor_type.shape.dim]
+
+        opts = ort.SessionOptions()
+        opts.log_severity_level = 3  
+        sess_orig = ort.InferenceSession(
+            original_model.SerializeToString(),
+            sess_options=opts, providers=['CPUExecutionProvider'])
+        sess_new = ort.InferenceSession(
+            onnx_model.SerializeToString(),
+            sess_options=opts, providers=['CPUExecutionProvider'])
+        in_name = sess_orig.get_inputs()[0].name
+
+        np.random.seed(0)
+        max_diff = 0.0
+        for _ in range(sanity_n):
+            x = np.random.randn(*shape).astype(np.float32)
+            y_orig = sess_orig.run(None, {in_name: x})[0]
+            y_new = sess_new.run(None, {in_name: x})[0]
+            d = float(np.max(np.abs(y_orig - y_new)))
+            if d > max_diff:
+                max_diff = d
+        if max_diff >= 1e-5:
+            raise RuntimeError(
+                f"[optimize_relu_relationship] sanity check FAILED: max forward diff over "
+                f"{sanity_n} random inputs = {max_diff:.3e} exceeds tolerance 1e-5; "
+                f"the rewrite is not numerically equivalent to the "
+                f"original model.")
+        print(f"[optimize_relu_relationship] sanity check OK: "
+              f"max forward diff over {sanity_n} random inputs = {max_diff:.3e} ")
+
+    return onnx_model
 
 
 if __name__ == '__main__':

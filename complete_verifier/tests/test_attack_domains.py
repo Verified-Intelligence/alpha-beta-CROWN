@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for attack/domains.py"""
@@ -1049,95 +1049,41 @@ class TestSortedReLUDomainListAddBasic(unittest.TestCase):
             ret, c, lAs, global_lbs, global_ubs, alphas, history, thresholds
         )
 
-    def test_add_raises_on_input_split(self):
-        """Test add raises when x_Ls is provided (input space branching unsupported)."""
-        domain_list = self._create_domain_list(2)
-
+    def test_add_rejects_input_split_state(self):
+        """Activation-domain storage requires activation-split child bounds."""
         batch = 1
         num_add = batch * 2
-        bounds = {
-            'lAs': [torch.randn(num_add, 3, 10)],
-            'lower_bounds': [torch.randn(num_add, 10), torch.zeros(num_add, 5) - 1.0],
-            'upper_bounds': [torch.randn(num_add, 10), torch.randn(num_add, 5)],
-            'split_history': [[] for _ in range(num_add)],
-            'alphas': {'layer1': {'inter1': torch.randn(2, 3, num_add, 5)}},
-            'betas': [None] * num_add,
-            'intermediate_betas': [None] * num_add,
-            'c': torch.randn(num_add, 1, 5),
-            'x_Ls': torch.randn(num_add, 10),  # Input space branching
-            'x_Us': None,
-            'input_split_idx': None,
+        cases = {
+            'x_Ls': torch.randn(num_add, 10),
+            'x_Us': torch.randn(num_add, 10),
+            'input_split_idx': [0, 1],
         }
-        histories = [{0: [[], []], 1: [[], []]} for _ in range(batch)]
-        depths = [1] * batch
-        branching_decisions = [(0, 0)]
-        decision_threshs = torch.zeros(batch)
-
-        with self.assertRaises(NotImplementedError):
-            domain_list.add(
-                bounds, histories, depths, branching_decisions, decision_threshs,
-                check_infeasibility=False
-            )
-
-    def test_add_raises_on_x_us_provided(self):
-        """Test add raises when x_Us is provided."""
-        domain_list = self._create_domain_list(2)
-
-        batch = 1
-        num_add = batch * 2
-        bounds = {
-            'lAs': [torch.randn(num_add, 3, 10)],
-            'lower_bounds': [torch.randn(num_add, 10), torch.zeros(num_add, 5) - 1.0],
-            'upper_bounds': [torch.randn(num_add, 10), torch.randn(num_add, 5)],
-            'split_history': [[] for _ in range(num_add)],
-            'alphas': {'layer1': {'inter1': torch.randn(2, 3, num_add, 5)}},
-            'betas': [None] * num_add,
-            'intermediate_betas': [None] * num_add,
-            'c': torch.randn(num_add, 1, 5),
-            'x_Ls': None,
-            'x_Us': torch.randn(num_add, 10),  # Input space branching
-            'input_split_idx': None,
-        }
-        histories = [{0: [[], []], 1: [[], []]} for _ in range(batch)]
-        depths = [1] * batch
-        branching_decisions = [(0, 0)]
-        decision_threshs = torch.zeros(batch)
-
-        with self.assertRaises(NotImplementedError):
-            domain_list.add(
-                bounds, histories, depths, branching_decisions, decision_threshs,
-                check_infeasibility=False
-            )
-
-    def test_add_raises_on_input_split_idx_provided(self):
-        """Test add raises when input_split_idx is provided."""
-        domain_list = self._create_domain_list(2)
-
-        batch = 1
-        num_add = batch * 2
-        bounds = {
-            'lAs': [torch.randn(num_add, 3, 10)],
-            'lower_bounds': [torch.randn(num_add, 10), torch.zeros(num_add, 5) - 1.0],
-            'upper_bounds': [torch.randn(num_add, 10), torch.randn(num_add, 5)],
-            'split_history': [[] for _ in range(num_add)],
-            'alphas': {'layer1': {'inter1': torch.randn(2, 3, num_add, 5)}},
-            'betas': [None] * num_add,
-            'intermediate_betas': [None] * num_add,
-            'c': torch.randn(num_add, 1, 5),
-            'x_Ls': None,
-            'x_Us': None,
-            'input_split_idx': [0, 1],  # Input split index
-        }
-        histories = [{0: [[], []], 1: [[], []]} for _ in range(batch)]
-        depths = [1] * batch
-        branching_decisions = [(0, 0)]
-        decision_threshs = torch.zeros(batch)
-
-        with self.assertRaises(NotImplementedError):
-            domain_list.add(
-                bounds, histories, depths, branching_decisions, decision_threshs,
-                check_infeasibility=False
-            )
+        for key, value in cases.items():
+            with self.subTest(key=key):
+                bounds = {
+                    'lAs': [torch.randn(num_add, 3, 10)],
+                    'lower_bounds': [
+                        torch.randn(num_add, 10),
+                        torch.zeros(num_add, 5) - 1.0],
+                    'upper_bounds': [
+                        torch.randn(num_add, 10), torch.randn(num_add, 5)],
+                    'split_history': [[] for _ in range(num_add)],
+                    'alphas': {'layer1': {
+                        'inter1': torch.randn(2, 3, num_add, 5)}},
+                    'betas': [None] * num_add,
+                    'intermediate_betas': [None] * num_add,
+                    'c': torch.randn(num_add, 1, 5),
+                    'x_Ls': None,
+                    'x_Us': None,
+                    'input_split_idx': None,
+                }
+                bounds[key] = value
+                with self.assertRaises(NotImplementedError):
+                    self._create_domain_list(2).add(
+                        bounds,
+                        [{0: [[], []], 1: [[], []]}],
+                        [1], [(0, 0)], torch.zeros(batch),
+                        check_infeasibility=False)
 
 
 class TestReLUDomainComparisonWithThreshold(unittest.TestCase):

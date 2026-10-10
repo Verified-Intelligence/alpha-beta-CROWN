@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
@@ -60,7 +60,7 @@ def precompile_jit_kernels():
     x = BoundedTensor(data, ptb).to(device)
 
     lb, ub, aux = model.net.init_alpha((x, ), share_alphas=True, c=c, bound_upper=False)
-    model.net.set_bound_opts({'optimize_bound_args': {'iteration': 2, 'use_float64_in_last_iteration': False}})
+    model.net.set_bound_opts({'optimize_bound_args': {'iteration': 2}})
     # Output constraints might be activated for use on the real model. But for this toy model it must not be used, as the settings won't fit
     model.net.set_bound_opts({'optimize_bound_args': {'apply_output_constraints_to': []}})
     ret = model.net.compute_bounds(x=(x,), method='CROWN-Optimized', C=c, bound_upper=False)

@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 
@@ -143,8 +143,8 @@ def enable_cuts(self: 'LiRPANet'):
     if self.needed_A_dict is None:
         self.needed_A_dict = defaultdict(set)
     self.needed_A_dict[self.net.output_name[0]].add(self.net.input_name[0])
-    for l in self.net.splittable_activations:
-        self.needed_A_dict[l.inputs[0].name].add(self.net.input_name[0])
+    for node in self.net.get_splittable_activations():
+        self.needed_A_dict[node.inputs[0].name].add(self.net.input_name[0])
 
 
 def create_cutter(self: 'LiRPANet', A, x):
@@ -165,7 +165,11 @@ def set_cut_params(self: 'LiRPANet', batch_size, batch_base, split_history):
     iteration = cut_iteration if cut_iteration > 0 else iteration
 
     # each general_beta: 2 (lA, uA), spec (out_c, out_h, out_w), batch, num_cuts
-    general_beta = self.cutter.beta_init * torch.ones((2, 1, batch_size, num_constrs), device=self.net.device)
+    final_node = self.net[self.net.final_name]
+    general_beta = self.cutter.beta_init * torch.ones(
+        (2, 1, batch_size, num_constrs),
+        dtype=self.net.get_output_dtype(final_node),
+        device=self.net.device)
     if split_history is not None:
         # general beta warm up
         for batch_sh, sh in enumerate(split_history):
@@ -182,7 +186,7 @@ def set_cut_params(self: 'LiRPANet', batch_size, batch_base, split_history):
     general_beta.requires_grad = True
     general_betas = {self.net.final_name: general_beta}
     self.net.cut_beta_params = [general_betas[self.net.final_name]]
-    for m in self.net.splittable_activations:
+    for m in self.net.get_splittable_activations():
         m.cut_module = self.net.cut_module
         m.cut_used = True
     self.net.cut_module.general_beta = general_betas
@@ -226,6 +230,6 @@ def disable_cut_for_branching(self: 'LiRPANet'):
     """
     print('cut disabled for branching node selection')
     self.net.cut_used = False
-    for m in self.net.splittable_activations:
+    for m in self.net.get_splittable_activations():
         m.cut_used = False
     self.net.cut_beta_params = []

@@ -9,21 +9,23 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import time
+from dataclasses import dataclass
 from typing import Optional
+
 import torch
 import arguments
 
+from auto_LiRPA import BoundedTensor, PerturbationLpNorm
 from utils import Timer, convert_history_from_list
 from tensor_storage import TensorStorage, get_tensor_storage
 from auto_LiRPA.patches import Patches
 from auto_LiRPA.concretize_func import constraints_solving, sort_out_constr_batches, construct_constraints
 from state.traits_mixin import DictLikeMixIn
 from state.intermediate_bounds import update_interm_bounds
-from dataclasses import dataclass
 
 
 @dataclass
@@ -425,6 +427,24 @@ class DomainClipScorer:
                 mask = torch.zeros_like(layer_scores, dtype=torch.bool)
                 clip_decisions[layer_name] = mask[:, true_indices[layer_name]]
         return clip_decisions
+
+
+def _rebuild_clipped_input(
+    x: BoundedTensor, x_L: torch.Tensor, x_U: torch.Tensor
+) -> BoundedTensor:
+    """Represent the clipped box while preserving the input's norm.
+
+    Args:
+        x: Input before clipping; its perturbation owns the norm.
+        x_L: Lower bounds of the clipped input batch.
+        x_U: Upper bounds of the clipped input batch.
+
+    Returns:
+        A bounded input centered at the midpoint of the clipped box.
+    """
+    center = (x_L + x_U) / 2
+    ptb = PerturbationLpNorm(norm=x.ptb.norm, x_L=x_L, x_U=x_U)
+    return BoundedTensor(center, ptb)
 
 
 class DomainClipper:
@@ -902,9 +922,11 @@ class DomainClipper:
         return new_interm_bounds
 
     def domain_clip_ReLU(self, d, x, interm_bounds):
-        """
-        Main function to clip the input domain based on the CROWN bounds
-        and update the intermediate bounds.
+        """Clip the input domain and update its intermediate bounds.
+
+        Returns:
+            The clipped bounded input, updated intermediate bounds, pruned
+            or unchanged domain state, and the optional pruning mask.
         """
         self.timer.start('domain_clip_ReLU')
 
@@ -931,7 +953,7 @@ class DomainClipper:
         self.timer.add('domain_clip_ReLU')
         self.timer.print()
         print('#######################################\n')
-        return x_L, x_U, interm_bounds, d, prune_mask
+        return _rebuild_clipped_input(x, x_L, x_U), interm_bounds, d, prune_mask
 
     def domain_clip_outputs(self, A, x, interm_bounds):
         """

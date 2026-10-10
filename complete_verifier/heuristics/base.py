@@ -9,12 +9,13 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 
 
 import torch
+import arguments
 
 from typing import TYPE_CHECKING
 from heuristics.decision_types import BranchingDecisions
@@ -24,10 +25,20 @@ if TYPE_CHECKING:
 class NeuronBranchingHeuristic():
     """Base class for branching heuristics."""
 
+    # Whether this heuristic supports splitting a large batch into sub-batches
+    # Subclasses that implement this feature should override this to True
+    supports_decision_sub_batch_size = False
+
     def __init__(self, net: 'LiRPANet'):
         self.net = net
         self.batch_size = None
         self.device = None
+        sub_batch_size = arguments.Config['bab']['branching']['decision_sub_batch_size']
+        if sub_batch_size is not None and not self.supports_decision_sub_batch_size:
+            print(
+                f'WARNING: decision_sub_batch_size={sub_batch_size} is set but '
+                f'not implemented for {type(self).__name__}. The setting will be ignored.'
+            )
 
     def layer_iterator(self, bounds):
         """

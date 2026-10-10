@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Interface of cutting plane methods, using GCP-CROWN as the solver."""
@@ -142,7 +142,9 @@ class Cutter:
         for start_node in self.start_nodes:
             # each general_beta: 2 (lA, uA), spec (out_c, out_h, out_w), batch, num_cuts
             general_betas[start_node.name] = self.beta_init * torch.ones(
-                (2, *start_node_shape[start_node.name][1:], 1, len(self.cuts)), device=self.device)
+                (2, *start_node_shape[start_node.name][1:], 1, len(self.cuts)),
+                dtype=self.net.get_output_dtype(start_node),
+                device=self.device)
             general_betas[start_node.name] = general_betas[start_node.name].detach()
             general_betas[start_node.name].requires_grad = True
         self.cut_module.general_beta = general_betas

@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for beta_CROWN_solver.py"""
@@ -21,6 +21,7 @@ from collections import defaultdict
 
 import torch
 import torch.nn as nn
+import pytest
 
 from .conftest import requires_cuda
 
@@ -36,6 +37,7 @@ from auto_LiRPA.perturbations import PerturbationLpNorm
 from auto_LiRPA.utils import stop_criterion_batch_any
 
 from beta_CROWN_solver import LiRPANet, BatchHandler
+from state import AlphaFullInfoData, AlphaValueData, BetaFullData
 from utils import Timer
 
 
@@ -402,6 +404,143 @@ class TestLiRPANetGetSplitNodes(unittest.TestCase):
         net.get_split_nodes()
 
         self.assertIsNotNone(net.split_activations)
+
+
+@pytest.fixture
+def build_reference_config(monkeypatch):
+    """Use an isolated CPU configuration and reference output for real builds."""
+    config = arguments.ConfigHandler()
+    config.parse_config(args=[], verbose=False)
+    config['general']['device'] = 'cpu'
+    config['general']['save_output'] = True
+    config['solver']['alpha-crown']['iteration'] = 2
+    config['solver']['prune_after_crown'] = True
+    config['solver']['optimize_disjuncts_separately'] = True
+    monkeypatch.setattr(arguments, 'Config', config)
+    out = {'init_crown_bounds': None, 'init_alpha_crown': None}
+    monkeypatch.setitem(arguments.Globals, 'out', out)
+    return config, out
+
+
+def reference_build_inputs():
+    """Outputs are ReLU(x) + 1 and ReLU(-x) - 2 for x in [-1, 1]."""
+    model = nn.Sequential(nn.Linear(1, 2), nn.ReLU(), nn.Linear(2, 2))
+    with torch.no_grad():
+        model[0].weight.copy_(torch.tensor([[1.0], [-1.0]]))
+        model[0].bias.zero_()
+        model[2].weight.copy_(torch.eye(2))
+        model[2].bias.copy_(torch.tensor([1.0, -2.0]))
+    x = BoundedTensor(torch.zeros(5, 1), PerturbationLpNorm(
+        norm=float('inf'), x_L=-torch.ones(5, 1), x_U=torch.ones(5, 1)))
+    # Each row is an independently optimized property; signs and scales give
+    # distinct bounds and interleave CROWN-verified and unverified properties.
+    c = torch.tensor([[[1.0, 0.0]], [[0.0, 1.0]], [[0.0, 2.0]],
+                      [[0.0, -1.0]], [[2.0, 0.0]]])
+    return LiRPANet(model, (1, 1), device='cpu'), x, c
+
+
+@pytest.mark.parametrize('rhs_value, solving_mode, nonlinear_method, needs_A', [
+    pytest.param(0.9, False, 'bbps', True, id='unverified-positive-bound'),
+    pytest.param(0.1, False, 'bbps', False, id='verified'),
+    pytest.param(0.1, True, 'bbps', True, id='solving-objective'),
+    pytest.param(0.9, False, 'babsr-like', False, id='babsr-like'),
+])
+def test_build_completes_saved_A_for_bbps(
+        build_reference_config, rhs_value, solving_mode,
+        nonlinear_method, needs_A):
+    """BBPS receives intermediate affine bounds when its search needs them."""
+    config, _ = build_reference_config
+    config['solver']['bound_prop_method'] = 'crown'
+    config['solving']['solving_mode'] = solving_mode
+    config['bab']['branching']['nonlinear_split']['method'] = nonlinear_method
+    model = nn.Sequential(nn.Sigmoid(), nn.Sigmoid())
+    net = LiRPANet(model, (1, 1), device='cpu')
+    x = BoundedTensor(torch.zeros(1, 1), PerturbationLpNorm(
+        norm=float('inf'), x_L=-torch.ones(1, 1), x_U=torch.ones(1, 1)))
+    c = torch.ones(1, 1, 1)
+    rhs = torch.full((1, 1), rhs_value)
+
+    bounds, _ = net.build(x, c, rhs, stop_criterion_batch_any)
+    assert bounds.item() > 0
+    assert bool(stop_criterion_batch_any(rhs)(bounds).all()) == (rhs_value == 0.1)
+
+    # The first Sigmoid is bounded by IBP. Its output is the second
+    # Sigmoid's split input, so BBPS needs an additional input-space A entry.
+    target = net.net.final_node().inputs[0]
+    if not needs_A:
+        assert target.name not in net.A_saved
+        return
+
+    entry = net.A_saved[target.name][net.net.input_name[0]]
+    assert entry['lA'].shape == entry['uA'].shape == (1, 1, 1)
+    assert entry['lbias'].shape == entry['ubias'].shape == (1, 1)
+    points = torch.tensor([[-1.0], [0.0], [1.0]])
+    exact = torch.sigmoid(points)
+    lower = points @ entry['lA'][0].T + entry['lbias']
+    upper = points @ entry['uA'][0].T + entry['ubias']
+    assert (lower <= exact + 1e-6).all()
+    assert (upper >= exact - 1e-6).all()
+
+
+@pytest.mark.parametrize('batch_size, optimized_bounds', [
+    (1, [1.0, -2.0, -4.0, 1.0, 2.0]),
+    (2, [float('inf'), -2.0, -4.0, float('inf'), 2.0]),
+    (1000000, [float('inf'), -2.0, -4.0, float('inf'), float('inf')]),
+])
+def test_build_reference_preserves_all_properties(
+        build_reference_config, batch_size, optimized_bounds):
+    """References preserve property order, including pruned and tail batches."""
+    config, out = build_reference_config
+    config['solver']['build_batch_size'] = batch_size
+    net, x, c = reference_build_inputs()
+    rhs = torch.zeros(c.shape[:2])
+    bounds, _ = net.build(x, c, rhs, stop_criterion_batch_any)
+    # Pruned properties are restored as +inf, except in CROWN-only batches
+    # where the finite bounds already prove every property in that batch.
+    expected = torch.tensor(optimized_bounds).unsqueeze(1)
+    torch.testing.assert_close(bounds, expected)
+    torch.testing.assert_close(out['init_crown_bounds'],
+                               torch.tensor([[1.0], [-2.0], [-4.0], [1.0], [2.0]]))
+    torch.testing.assert_close(out['init_alpha_crown'], expected)
+    assert out['init_crown_bounds'].device.type == 'cpu'
+    assert not out['init_alpha_crown'].requires_grad
+    # Recording must not change bounds compared with the production path.
+    config['general']['save_output'] = False
+    net, x, c = reference_build_inputs()
+    unsaved_bounds, _ = net.build(x, c, rhs, stop_criterion_batch_any)
+    torch.testing.assert_close(unsaved_bounds, bounds)
+
+
+def test_build_reference_initial_crown_fast_path(build_reference_config):
+    """A CROWN-only build does not retain optimized bounds from an earlier build."""
+    config, out = build_reference_config
+    config['solver']['build_batch_size'] = 1000000
+    net, x, c = reference_build_inputs()
+    net.build(x, c, torch.zeros(c.shape[:2]), stop_criterion_batch_any)
+    net.build(x[:1], c[:1], torch.zeros(1, 1), stop_criterion_batch_any)
+    torch.testing.assert_close(out['init_crown_bounds'], torch.tensor([[1.0]]))
+    assert out['init_alpha_crown'] is None
+
+
+def test_build_reference_middle_attack_keeps_computed_prefix(
+        build_reference_config, monkeypatch):
+    """A counterexample leaves only bounds actually computed before the return."""
+    config, out = build_reference_config
+    config['solver']['build_batch_size'] = 1
+    config['attack']['pgd_order'] = 'middle'
+    net, x, c = reference_build_inputs()
+    witness = torch.zeros(1, 1)
+    monkeypatch.setattr('beta_CROWN_solver.attack',
+                        lambda *args, **kwargs: (None, True, witness, None, None))
+    handler = MagicMock()
+    handler.vnnlib = []
+    bounds, result = net.build(
+        x, c, torch.zeros(c.shape[:2]), stop_criterion_batch_any,
+        vnnlib_handler=handler)
+    assert bounds is None
+    torch.testing.assert_close(result['attack_examples'], witness)
+    torch.testing.assert_close(out['init_crown_bounds'], torch.tensor([[1.0], [-2.0]]))
+    torch.testing.assert_close(out['init_alpha_crown'], torch.tensor([[1.0]]))
 
 
 class TestBatchHandlerInit(unittest.TestCase):
@@ -955,57 +1094,224 @@ class TestLiRPANetAlphaStartNodes(unittest.TestCase):
         self.assertIn(net.final_name, net.alpha_start_nodes)
 
 
-class TestLiRPANetExpandXDiffBatch(unittest.TestCase):
-    """Tests for LiRPANet.expand_x_diff_batch method."""
+class TestAlphaValueData(unittest.TestCase):
+    """Tests for restoring stored alpha values to a LiRPANet."""
 
-    @unittest.skip("expand_x_diff_batch uses PerturbationLpNorm which is not imported in beta_CROWN_solver.py")
-    def test_expand_x_diff_batch_creates_bounded_tensor(self):
-        """Test that expand_x_diff_batch creates a new BoundedTensor.
+    def test_attach_restores_per_node_dtype_and_optimizer_parameters(self):
+        """Storage precision must not become optimization precision."""
+        activations = []
+        for name, dtype in [('relu32', torch.float32),
+                            ('relu64', torch.float64)]:
+            activation = MagicMock()
+            activation.name = name
+            activation.alpha = {
+                'output': torch.ones(2, 1, 1, 3, dtype=dtype)
+            }
+            activation.output_dtype = dtype
+            activations.append(activation)
+        bounded_module = MagicMock()
+        bounded_module.get_enabled_opt_act.return_value = activations
+        net = MagicMock()
+        net.net = bounded_module
+        net.device = torch.device('cpu')
 
-        Note: This test is skipped because the expand_x_diff_batch method
-        uses PerturbationLpNorm which is not imported in beta_CROWN_solver.py.
-        This appears to be unused code or a missing import.
-        """
-        model = SimpleModel()
-        in_size = (1, 10)
-        net = LiRPANet(model, in_size)
+        stored = AlphaValueData.from_net(
+            net, starting_node_scope='all', move=True
+        ).to(device='cpu', dtype=torch.float16)
+        stored.attach_to_net(net)
 
-        # Create mock x with perturbation
-        data = torch.randn(2, 10)
-        ptb = PerturbationLpNorm(norm=float('inf'), x_L=data - 0.1, x_U=data + 0.1)
-        net.x = BoundedTensor(data, ptb)
+        restored = [activation.alpha['output'] for activation in activations]
+        self.assertEqual(restored[0].dtype, torch.float32)
+        self.assertEqual(restored[1].dtype, torch.float64)
+        for activation, alpha in zip(activations, restored):
+            self.assertEqual(alpha.device, net.device)
+            self.assertTrue(alpha.requires_grad)
+            self.assertTrue(alpha.is_leaf)
+            self.assertEqual(stored[activation.name]['output'].dtype, torch.float16)
 
-        x_L = torch.randn(2, 10) - 0.1
-        x_U = torch.randn(2, 10) + 0.1
+        optimizer = torch.optim.Adam(restored, lr=0.1)
+        before = [alpha.detach().clone() for alpha in restored]
+        sum(alpha.sum() for alpha in restored).backward()
+        optimizer.step()
+        for old, alpha in zip(before, restored):
+            self.assertFalse(torch.equal(old, alpha))
 
-        result = net.expand_x_diff_batch(x_L, x_U)
+    def test_full_info_compacts_alpha_and_restores_graph_dtype(self):
+        """Full-info export compacts alpha but not its integer metadata."""
+        activation = MagicMock()
+        activation.name = 'relu'
+        original = torch.ones(2, 1, 1, 3, dtype=torch.float64)
+        activation.alpha = {'output': original}
+        activation.output_dtype = torch.float64
+        activation.dump_alpha.return_value = {
+            'alpha': {'output': original.detach()},
+            'alpha_lookup_idx': {
+                'output': torch.tensor([0, 1], dtype=torch.int64)
+            },
+        }
+        bounded_module = MagicMock()
+        bounded_module.get_enabled_opt_act.return_value = [activation]
+        net = MagicMock()
+        net.net = bounded_module
+        net.device = torch.device('cpu')
 
-        self.assertIsInstance(result, BoundedTensor)
+        full_info = AlphaFullInfoData.from_net(
+            net, starting_node_scope='all', move=False
+        ).to(device='cpu', dtype=torch.float16)
+        stored = AlphaValueData(
+            _data={activation.name: full_info[activation.name]['alpha']}
+        )
+        activation.alpha = {}
+        stored.attach_to_net(net)
 
-    @unittest.skip("expand_x_diff_batch uses PerturbationLpNorm which is not imported in beta_CROWN_solver.py")
-    def test_expand_x_diff_batch_correct_data(self):
-        """Test that expand_x_diff_batch computes correct mean.
+        restored = activation.alpha['output']
+        self.assertEqual(stored[activation.name]['output'].dtype, torch.float16)
+        self.assertEqual(
+            full_info[activation.name]['alpha_lookup_idx']['output'].dtype,
+            torch.int64)
+        self.assertEqual(restored.dtype, torch.float64)
+        self.assertEqual(restored.device, net.device)
+        self.assertTrue(restored.requires_grad)
+        self.assertTrue(restored.is_leaf)
 
-        Note: This test is skipped because the expand_x_diff_batch method
-        uses PerturbationLpNorm which is not imported in beta_CROWN_solver.py.
-        This appears to be unused code or a missing import.
-        """
-        model = SimpleModel()
-        in_size = (1, 10)
-        net = LiRPANet(model, in_size)
+    def test_attach_requires_graph_output_dtype(self):
+        """Alpha restoration must not fall back to a global default dtype."""
+        activation = MagicMock()
+        activation.name = 'relu'
+        activation.output_dtype = None
+        activation.alpha = {}
+        bounded_module = MagicMock()
+        bounded_module.get_enabled_opt_act.return_value = [activation]
+        net = MagicMock()
+        net.net = bounded_module
+        net.device = torch.device('cpu')
+        stored = AlphaValueData(
+            _data={'relu': {'output': torch.ones(1, dtype=torch.float16)}}
+        )
 
-        data = torch.randn(2, 10)
-        ptb = PerturbationLpNorm(norm=float('inf'), x_L=data - 0.1, x_U=data + 0.1)
-        net.x = BoundedTensor(data, ptb)
+        with self.assertRaisesRegex(
+                RuntimeError, 'without its graph output dtype'):
+            stored.attach_to_net(net)
 
-        x_L = torch.zeros(2, 10)
-        x_U = torch.ones(2, 10)
 
-        result = net.expand_x_diff_batch(x_L, x_U)
+class TestBetaFullData(unittest.TestCase):
+    """Tests for restoring stored sparse beta values to a LiRPANet."""
 
-        # New data should be (x_L + x_U) / 2
-        expected = (x_L + x_U) / 2
-        self.assertTrue(torch.allclose(result.data, expected))
+    def test_restore_uses_split_node_dtype_and_optimizer_parameters(self):
+        """Domain storage must not replace each beta's graph dtype."""
+        nodes = {}
+        for name, dtype in [('layer32', torch.float32),
+                            ('layer64', torch.float64)]:
+            node = MagicMock()
+            node.name = name
+            node.output_dtype = dtype
+            nodes[name] = node
+
+        bounded_module = MagicMock()
+        bounded_module.__getitem__.side_effect = nodes.__getitem__
+        bounded_module.get_output_dtype.side_effect = (
+            lambda node: node.output_dtype)
+
+        def accept_beta(beta_data):
+            for name, sparse_betas in beta_data.items():
+                nodes[name].sparse_betas = sparse_betas
+
+        bounded_module.accept_beta.side_effect = accept_beta
+        net = MagicMock()
+        net.net = bounded_module
+
+        history = [{
+            'layer32': ([0], [1.0]),
+            'layer64': ([1], [-1.0]),
+        }]
+        domain = {
+            'history': history,
+            'betas': [{
+                'layer32': torch.tensor([0.25], dtype=torch.float32),
+                'layer64': torch.tensor([0.75], dtype=torch.float64),
+            }],
+        }
+
+        restored, counts = BetaFullData.from_domain_dict(
+            domain, bias=False,
+            dtype_map={'layer32': torch.float32, 'layer64': torch.float64},
+            device='cpu')
+        restored.attach_to_net(net)
+
+        parameters = []
+        for name, dtype in [('layer32', torch.float32),
+                            ('layer64', torch.float64)]:
+            sparse_beta = nodes[name].sparse_betas[0]
+            self.assertEqual(sparse_beta.val.dtype, dtype)
+            self.assertEqual(sparse_beta.sign.dtype, dtype)
+            self.assertEqual(sparse_beta.loc.dtype, torch.int64)
+            self.assertTrue(sparse_beta.val.requires_grad)
+            self.assertTrue(sparse_beta.val.is_leaf)
+            parameters.append(sparse_beta.val)
+
+        optimizer = torch.optim.Adam(parameters, lr=0.1)
+        before = [parameter.detach().clone() for parameter in parameters]
+        sum(parameter.sum() for parameter in parameters).backward()
+        optimizer.step()
+        for old, parameter in zip(before, parameters):
+            self.assertFalse(torch.equal(old, parameter))
+
+        stored = restored.to_domain_dict(counts, device='cpu')
+        self.assertEqual(stored[0]['layer32'].dtype, torch.float32)
+        self.assertEqual(stored[0]['layer64'].dtype, torch.float64)
+
+        restored_again, _ = BetaFullData.from_domain_dict(
+            {'history': history, 'betas': stored},
+            bias=False,
+            dtype_map={'layer32': torch.float32, 'layer64': torch.float64},
+            device='cpu',
+        )
+        self.assertEqual(
+            restored_again['layer64'][0].val.dtype, torch.float64)
+        self.assertTrue(restored_again['layer64'][0].val.is_leaf)
+
+    def test_restore_requires_every_split_node_dtype(self):
+        domain = {
+            'history': [{'layer': ([0], [1.0])}],
+            'betas': [{'layer': torch.tensor([0.25])}],
+        }
+
+        with self.assertRaisesRegex(
+                RuntimeError, 'Cannot restore beta for layer'):
+            BetaFullData.from_domain_dict(
+                domain, bias=False, dtype_map={}, device='cpu')
+
+
+class TestPreprocessConstArguments(unittest.TestCase):
+    """Tests for data captured before activation-split preprocessing."""
+
+    def test_capture_split_node_dtypes(self):
+        from activation_split.stage_arguments import PreprocessConstArguments
+
+        nodes = []
+        for name, dtype in [('layer32', torch.float32),
+                            ('layer64', torch.float64)]:
+            node = MagicMock()
+            node.name = name
+            node.output_dtype = dtype
+            nodes.append(node)
+
+        net = object.__new__(LiRPANet)
+        net.net = MagicMock()
+        net.net.split_nodes = nodes
+        net.net.get_output_dtype.side_effect = lambda node: node.output_dtype
+        net.final_name = 'output'
+        net.x = torch.zeros(1)
+        net.c = torch.ones(1)
+        net.device = torch.device('cpu')
+        net.unstable_mask = {}
+
+        const_args = PreprocessConstArguments.from_net(net)
+
+        self.assertEqual(const_args.dtype_map, {
+            'layer32': torch.float32,
+            'layer64': torch.float64,
+        })
 
 
 class TestLiRPANetBuildHistoryAndSetBounds(unittest.TestCase):

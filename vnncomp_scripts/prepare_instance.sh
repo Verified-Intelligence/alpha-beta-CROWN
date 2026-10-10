@@ -1,5 +1,7 @@
 #!/bin/bash
 
+exec < /dev/null
+
 TOOL_NAME=alpha-beta-CROWN
 VERSION_STRING=v1
 
@@ -23,6 +25,14 @@ echo "Preparing $TOOL_NAME for benchmark instance in category '$CATEGORY' with o
 TOOL_DIR=$(dirname $(dirname $(realpath $0)))
 echo TOOL_DIR is $TOOL_DIR
 
+stop_abcrown_processes() {
+	pkill -TERM -f "${TOOL_DIR}/complete_verifier/" 2>/dev/null || true
+	pkill -TERM -x get_cuts 2>/dev/null || true
+	sleep 1
+	pkill -KILL -f "${TOOL_DIR}/complete_verifier/" 2>/dev/null || true
+	pkill -KILL -x get_cuts 2>/dev/null || true
+}
+
 export PYTHONPATH=${TOOL_DIR}
 export OMP_NUM_THREADS=1
 
@@ -30,13 +40,8 @@ export OMP_NUM_THREADS=1
 if [[ "${ABCROWN_TEST_RUN}" -ne "1" ]]; then
 
 	# kill any zombie processes
-	killall -q python
-	killall -q python3
-	killall -q get_cuts
-	killall -q -9 python
-	killall -q -9 python3
-	killall -q -9 get_cuts
-	sleep 3
+	stop_abcrown_processes
+	sleep 2
 	# Reset GPU, make sure nothing is running.
 	(sudo -n rmmod nvidia_uvm; sudo -n rmmod nvidia_drm; sudo -n rmmod nvidia_modeset; sudo -n nvidia-smi -e 0; sudo -n nvidia-smi -pm 0; sudo -n nvidia-smi -r -i 0) > /dev/null
 	sudo -n modprobe nvidia_uvm; sudo -n nvidia-smi -pm 1
@@ -45,7 +50,7 @@ if [[ "${ABCROWN_TEST_RUN}" -ne "1" ]]; then
 
 fi
 
-if [[ "$CATEGORY" == "cgan" || "$CATEGORY" == "cgan_2023" ]]; then
+if [[ "$CATEGORY" == *cgan* ]]; then
 	if [ -f "$ONNX_FILE.original" ]; then
 		echo 'cgan models previously simplified'
 	else
@@ -68,14 +73,8 @@ if [[ "${ABCROWN_TEST_RUN}" -ne "1" ]]; then
 	rm ${temp_file}
 
 	# kill any remaining python processes.
-	killall -q python
-	killall -q python3
-	killall -q get_cuts
-	sleep 1
-	killall -q -9 python
-	killall -q -9 python3
-	killall -q -9 get_cuts
-	sleep 3
+	stop_abcrown_processes
+	sleep 2
 fi
 
 echo "Preparation finished."

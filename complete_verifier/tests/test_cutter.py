@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for cuts/cutter.py - Cutter class for cutting plane methods."""
@@ -713,6 +713,8 @@ class TestCutterConstructBeta(unittest.TestCase):
             relu.name = f'relu_{i}'
             relu.inputs = [MagicMock()]
             relu.inputs[0].name = f'pre_relu_{i}'
+            relu.inputs[0].output_dtype = (
+                torch.float64 if i == 0 else torch.float32)
             relus.append(relu)
 
         solver = MagicMock()
@@ -720,6 +722,8 @@ class TestCutterConstructBeta(unittest.TestCase):
         solver.net.input_name = {'input'}
         solver.net.relus = relus
         solver.net.final_name = 'output'
+        solver.net.get_output_dtype.side_effect = (
+            lambda node: node.output_dtype)
 
         cutter = Cutter(solver, device=device)
         cutter.cuts = [{'dummy': True}]  # One cut
@@ -728,6 +732,7 @@ class TestCutterConstructBeta(unittest.TestCase):
         # Set up start_nodes
         output_node = MagicMock()
         output_node.name = 'output'
+        output_node.output_dtype = torch.float64
         cutter.start_nodes = [relus[0].inputs[0], relus[1].inputs[0], output_node]
 
         return cutter
@@ -772,6 +777,24 @@ class TestCutterConstructBeta(unittest.TestCase):
         for name, beta in cutter.cut_module.general_beta.items():
             self.assertTrue(beta.requires_grad, f"Beta for {name} should require grad")
 
+    def test_construct_beta_uses_each_start_node_dtype(self):
+        """Cut beta parameters use the dtype of their propagation start."""
+        cutter = self._create_cutter_for_beta()
+
+        cutter.construct_beta([(1, 10), (1, 20), (1, 5)])
+
+        betas = cutter.cut_module.general_beta
+        self.assertEqual(betas['pre_relu_0'].dtype, torch.float64)
+        self.assertEqual(betas['pre_relu_1'].dtype, torch.float32)
+        self.assertEqual(betas['output'].dtype, torch.float64)
+        for beta in betas.values():
+            self.assertTrue(beta.requires_grad)
+            self.assertTrue(beta.is_leaf)
+
+        optimizer = torch.optim.Adam(list(betas.values()), lr=0.1)
+        sum(beta.sum() for beta in betas.values()).backward()
+        optimizer.step()
+
     def test_construct_beta_with_beta_init(self):
         """Test construct_beta initializes with beta_init value."""
         cutter = self._create_cutter_for_beta()
@@ -808,39 +831,6 @@ class TestCutterConstructBeta(unittest.TestCase):
 
         # Last dimension should be num_cuts=5
         self.assertEqual(cutter.cut_module.general_beta['pre_relu_0'].shape[-1], 5)
-
-
-class TestCutterUpdateRefineStubs(unittest.TestCase):
-    """Test Cutter.update_cuts and Cutter.refine_cuts stub methods."""
-
-    def _create_cutter(self):
-        """Create a basic Cutter instance."""
-        from cuts.cutter import Cutter
-
-        solver = MagicMock()
-        solver.net = MagicMock()
-        solver.net.input_name = {'input'}
-        solver.net.relus = []
-
-        return Cutter(solver)
-
-    def test_update_cuts_is_callable(self):
-        """Test update_cuts can be called (stub method)."""
-        cutter = self._create_cutter()
-
-        # Should not raise
-        result = cutter.update_cuts()
-
-        self.assertIsNone(result)
-
-    def test_refine_cuts_is_callable(self):
-        """Test refine_cuts can be called (stub method)."""
-        cutter = self._create_cutter()
-
-        # Should not raise
-        result = cutter.refine_cuts()
-
-        self.assertIsNone(result)
 
 
 class TestCutterIntegration(unittest.TestCase):

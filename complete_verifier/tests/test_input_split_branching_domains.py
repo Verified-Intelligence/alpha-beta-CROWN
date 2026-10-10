@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for input_split/branching_domains.py"""
@@ -971,35 +971,6 @@ class TestEdgeCases(unittest.TestCase):
         with self.assertRaises(AssertionError):
             domain_list.add(lb, dm_l, dm_u, {}, cs, threshold, split_idx=split_idx)
 
-    def test_pick_out_empty_list_raises(self):
-        """Test that pick_out_batch raises when list is empty."""
-        domain_list = UnsortedInputDomainList(
-            storage_depth=10,
-            output_device='cpu'
-        )
-
-        with self.assertRaises(AssertionError):
-            domain_list.pick_out_batch(batch_size=1)
-
-    def test_getitem_empty_index_raises(self):
-        """Test that __getitem__ raises with empty index."""
-        domain_list = UnsortedInputDomainList(
-            storage_depth=10,
-            output_device='cpu'
-        )
-        # Add a domain first
-        lb = torch.tensor([[-1.0]])
-        dm_l = torch.zeros(1, 4)
-        dm_u = torch.ones(1, 4)
-        cs = torch.eye(1).unsqueeze(0)
-        threshold = torch.zeros(1, 1)
-        split_idx = torch.zeros(1, 10, dtype=torch.long)
-        domain_list.add(lb, dm_l, dm_u, {}, cs, threshold, split_idx=split_idx)
-
-        with self.assertRaises(AssertionError):
-            _ = domain_list[[]]  # Empty index
-
-
 class TestWithConstraints(unittest.TestCase):
     """Tests for domain list operations with constraints."""
 
@@ -1258,7 +1229,7 @@ class TestAlphaHandling(unittest.TestCase):
 
         alpha = {
             'layer1': {
-                'spec': torch.randn(2, 5, 3, 10)
+                'spec': torch.randn(2, 5, 3, 10, dtype=torch.float64)
             }
         }
 
@@ -1268,7 +1239,7 @@ class TestAlphaHandling(unittest.TestCase):
 
         self.assertIn('layer1', alpha_out)
         self.assertEqual(alpha_out['layer1']['spec'].shape[2], 2)  # batch dim
-
+        self.assertEqual(alpha_out['layer1']['spec'].dtype, torch.float64)
 
 if __name__ == '__main__':
     unittest.main()

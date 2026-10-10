@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -33,6 +33,7 @@ from activation_split.utils import (
     mask_tensor_first_dim,
     mask_tensor_first_dim_allow_none,
     mask_list,
+    tf32_ctx,
 )
 from activation_split.return_types import (
     UpdateBoundCoreContext,
@@ -227,6 +228,8 @@ def precompute_decision(
     solver_args = arguments.Config["solver"]
     bab_args = arguments.Config["bab"]
     branch_args = bab_args["branching"]
+    enable_tf32_branching_decision = bab_args["mixed_precision"]["enable_tf32_branching_decision"]
+    enable_tf32_clip_decision = bab_args["mixed_precision"]["enable_tf32_clip_decision"]
     device = lb.device
 
     # ==================================================
@@ -382,14 +385,15 @@ def precompute_decision(
     net.timer.start("decision_precompute.compute_branching_decisions")
     # Increase the maximum number of candidates for fsb and kfsb
     # if there are more splits needed.
-    _precomputed_wd = branching_heuristic.compute_branching_decisions(
-        precompute_d,
-        split_depth,
-        method=branch_args["method"],
-        branching_candidates=max(branch_args["candidates"], split_depth),
-        branching_reduceop=branch_args["reduceop"],
-        timer=net.timer,
-    )
+    with tf32_ctx(enable_tf32_branching_decision):
+        _precomputed_wd = branching_heuristic.compute_branching_decisions(
+            precompute_d,
+            split_depth,
+            method=branch_args["method"],
+            branching_candidates=max(branch_args["candidates"], split_depth),
+            branching_reduceop=branch_args["reduceop"],
+            timer=net.timer,
+        )
     split_depth = _precomputed_wd.split_depth
     net.timer.add("decision_precompute.compute_branching_decisions")
     # reorganization
@@ -416,12 +420,14 @@ def precompute_decision(
         reconstruct_from_masked_result = (
             SubDomainClipDecisions.reconstruct_from_masked_result
         )
+        with tf32_ctx(enable_tf32_clip_decision):
+            clip_decisions = domain_clip_scorer.compute_clip_decisions(
+                domains=domain_clip_precompute_d,
+                split_activations=net.net.split_activations,
+            )
         precompute_clip_decisions = reconstruct_from_masked_result(
             masked_result=SubDomainClipDecisions.from_clip_decisions(
-                splitted_domain_clip_decisions=domain_clip_scorer.compute_clip_decisions(
-                    domains=domain_clip_precompute_d,
-                    split_activations=net.net.split_activations,
-                ),
+                splitted_domain_clip_decisions=clip_decisions,
                 split_depth=split_depth,
                 batch_size=actual_needed_batch,
             ),

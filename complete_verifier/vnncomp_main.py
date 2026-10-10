@@ -9,157 +9,170 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import argparse
-import sys
 import os
 import shlex
+import sys
 
-parser = argparse.ArgumentParser()
-
-parser.add_argument("CATEGORY", type=str)
-parser.add_argument("ONNX_FILE", type=str, default=None, help='ONNX_FILE')
-parser.add_argument("VNNLIB_FILE", type=str, default=None, help='VNNLIB_FILE')
-parser.add_argument("RESULTS_FILE", type=str, default=None, help='RESULTS_FILE')
-parser.add_argument("TIMEOUT", type=float, default=180, help='timeout for one property')
-parser.add_argument("--DEBUG", action='store_true', help='whether to run in debug mode (checking saved adv example)')
-parser.add_argument("--PREPARE", action='store_true', help='whether in preparation phase')
-parser.add_argument("--NOPGD", action='store_true', help='do not use pdg attack')
-parser.add_argument("--TRY_CROWN", action='store_true', help='overwrite bound-prop-method to CROWN to save memory')
-
-args = parser.parse_args()
-
-python_path = sys.executable
-library_path = os.path.dirname(os.path.realpath(__file__))
-
-cmd = f"{python_path} {library_path}/abcrown.py --config {library_path}/"
-
-
-# vnncomp 2025
-
-if args.CATEGORY == "acasxu_2023":
-    cmd += "exp_configs/vnncomp21/acasxu.yaml"
-
-elif args.CATEGORY == "cctsdb_yolo_2023":
-    cmd += "exp_configs/vnncomp23/cctsdb_yolo.yaml"
-
-elif args.CATEGORY == "cersyve":
-    cmd += "exp_configs/vnncomp25/cersyve.yaml"
-
-elif args.CATEGORY == "cgan_2023":
-    cmd += "exp_configs/vnncomp23/cgan.yaml"
-
-elif args.CATEGORY == "cifar100_2024":
-    cmd += "exp_configs/vnncomp25/cifar100.yaml"
-
-elif args.CATEGORY == "collins_aerospace_benchmark":
-    cmd += "exp_configs/vnncomp23/collins_yolo_robustness.yaml"
-
-elif args.CATEGORY == "collins_rul_cnn_2022":
-    cmd += "exp_configs/vnncomp23/collins-rul-cnn.yaml"
-
-elif args.CATEGORY == "cora_2024":
-    cmd += "exp_configs/vnncomp25/cora.yaml"
-
-elif args.CATEGORY == "dist_shift_2023":
-    cmd += "exp_configs/vnncomp23/dist-shift.yaml"
-
-elif args.CATEGORY == "linearizenn_2024":
-    cmd += "exp_configs/vnncomp24/linearizenn.yaml"
-
-elif args.CATEGORY == "lsnc_relu":
-    cmd += "exp_configs/vnncomp25/lsnc_relu.yaml"
-
-elif args.CATEGORY == "malbeware":
-    cmd += "exp_configs/vnncomp25/malbeware.yaml"
-
-elif args.CATEGORY == "metaroom_2023":
-    cmd += "exp_configs/vnncomp23/metaroom.yaml"
-
-elif args.CATEGORY == "ml4acopf_2024":
-    cmd += "exp_configs/vnncomp24/ml4acopf.yaml"
-
-elif args.CATEGORY == "nn4sys":
-    cmd += "exp_configs/vnncomp23/nn4sys.yaml"
-
-elif args.CATEGORY == "relusplitter":
-    cmd += "exp_configs/vnncomp25/relusplitter.yaml"
-
-elif args.CATEGORY == "safenlp_2024":
-    cmd += "exp_configs/vnncomp24/safenlp.yaml"
-
-elif args.CATEGORY == "sat_relu":
-    cmd += "exp_configs/vnncomp25/sat_relu.yaml"
-
-elif args.CATEGORY == "soundnessbench":
-    cmd += "exp_configs/vnncomp25/soundnessbench.yaml"
-
-elif args.CATEGORY == "tinyimagenet_2024":
-    cmd += "exp_configs/vnncomp25/tinyimagenet.yaml"
-
-elif args.CATEGORY == "tllverifybench_2023":
-    cmd += "exp_configs/vnncomp23/tllVerifyBench.yaml"
-
-elif args.CATEGORY == "traffic_signs_recognition_2023":
-    cmd += "exp_configs/vnncomp23/gtrsb.yaml"
-
-elif args.CATEGORY == "vggnet16_2022":
-    cmd += "exp_configs/vnncomp23/vggnet16.yaml"
-
-elif args.CATEGORY == "vit_2023":
-    cmd += "exp_configs/vnncomp23/vit.yaml"
-
-elif args.CATEGORY == "yolo_2023":
-    cmd += "exp_configs/vnncomp24/yolo-xiangruzh.yaml"
-
-elif args.CATEGORY == "test":
-    pass
-
-else:
-    exit("CATEGORY {} not supported yet".format(args.CATEGORY))
-
-# test case may run in other args.CATEGORY at the end of them, so we parse them here to allow correct measurement of overhead.
-if os.path.split(args.VNNLIB_FILE)[-1] in ['test_' + f + '.vnnlib' for f in ['nano', 'tiny', 'small']]:
-    cmd = f"{python_path} {library_path}/abcrown.py --config {library_path}/exp_configs/vnncomp21/test.yaml"
-elif 'test_prop' in args.VNNLIB_FILE:
-    cmd = f"{python_path} {library_path}/abcrown.py --config {library_path}/exp_configs/vnncomp21/acasxu.yaml"
+# VNN-COMP 2026's runner selects the concrete benchmark version directory
+# (1.0 or 2.0) before invoking this wrapper. This table follows the
+# vnncomp2026_benchmarks/benchmarks directory order.
+CATEGORY_CONFIGS = {
+    "acasxu_2023": "exp_configs/vnncomp21/acasxu.yaml",
+    "adaptive_cruise_control_non_linear_2026": (
+        "exp_configs/vnncomp26/acc_non_linear.yaml"),
+    "cctsdb_yolo_2023": "exp_configs/vnncomp23/cctsdb_yolo.yaml",
+    "cersyve": "exp_configs/vnncomp25/cersyve.yaml",
+    "cgan2026": "exp_configs/vnncomp26/cgan2026.yaml",
+    "cgan_2023": "exp_configs/vnncomp23/cgan.yaml",
+    "challenging_certified_training_2026": (
+        "exp_configs/vnncomp26/challenging_certified_training.yaml"),
+    "cifar100_2024": "exp_configs/vnncomp24/cifar100.yaml",
+    "collins_aerospace_benchmark": (
+        "exp_configs/vnncomp23/collins_yolo_robustness.yaml"),
+    "collins_rul_cnn_2022": "exp_configs/vnncomp22/collins-rul-cnn.yaml",
+    "cora_2024": "exp_configs/vnncomp24/cora.yaml",
+    "dist_shift_2023": "exp_configs/vnncomp23/dist-shift.yaml",
+    "isomorphic_acasxu_2026": (
+        "exp_configs/vnncomp26/isomorphic_acasxu.yaml"),
+    "linearizenn_2024": "exp_configs/vnncomp24/linearizenn.yaml",
+    "lsnc_relu": "exp_configs/vnncomp25/lsnc_relu.yaml",
+    "malbeware": "exp_configs/vnncomp25/malbeware.yaml",
+    "metaroom_2023": "exp_configs/vnncomp23/metaroom.yaml",
+    "ml4acopf_2024": "exp_configs/vnncomp24/ml4acopf.yaml",
+    "monotonic_acasxu_2026": (
+        "exp_configs/vnncomp26/monotonic_acasxu.yaml"),
+    "nn4sys": "exp_configs/vnncomp23/nn4sys.yaml",
+    "relusplitter": "exp_configs/vnncomp25/relusplitter.yaml",
+    "relusplitter_2026": "exp_configs/vnncomp26/relusplitter.yaml",
+    "safenlp_2024": "exp_configs/vnncomp24/safenlp.yaml",
+    "sat_relu": "exp_configs/vnncomp25/sat_relu.yaml",
+    "smart_turn_multimodal_2026": (
+        "exp_configs/vnncomp26/smart_turn_multimodal.yaml"),
+    "soundnessbench": "exp_configs/vnncomp25/soundnessbench.yaml",
+    "soundnessbench_2026": "exp_configs/vnncomp26/soundnessbench.yaml",
+    "test": "exp_configs/vnncomp21/test.yaml",
+    "tinyimagenet_2024": "exp_configs/vnncomp24/tinyimagenet.yaml",
+    "tllverifybench_2023": "exp_configs/vnncomp23/tllVerifyBench.yaml",
+    "traffic_signs_recognition_2023": "exp_configs/vnncomp23/gtrsb.yaml",
+    "vggnet16_2022": "exp_configs/vnncomp22/vggnet16.yaml",
+    "vit_2023": "exp_configs/vnncomp23/vit.yaml",
+    "yolo_2023": "exp_configs/vnncomp23/yolo-xiangruzh.yaml",
+}
 
 
-cmd += " --precompile_jit"
-cmd += " --onnx_path " + shlex.quote(str(args.ONNX_FILE))
-cmd += " --vnnlib_path " + shlex.quote(str(args.VNNLIB_FILE))
-cmd += " --results_file " + shlex.quote(str(args.RESULTS_FILE))
-cmd += " --timeout " + str(args.TIMEOUT)
+EXPANDABLE_SEGMENTS_CATEGORIES = {
+    "vggnet16_2022",
+    "yolo_2023",
+    "cifar100_2024",
+    "tinyimagenet_2024",
+    "cgan2026",
+}
 
-# save adv example to args.RESULTS_FILE
-cmd += " --save_adv_example"
 
-# use CROWN bound propagation, when original run triggers OOM, run_instance.sh will add this flag
-if args.TRY_CROWN:
-    # This also disables the use of output constraints. They are only useful for alpha-CROWN
-    cmd += " --bound_prop_method crown --apply_output_constraints_to"
+def parse_args():
+    parser = argparse.ArgumentParser()
 
-# verify the adv example everytime it's saved
-if args.DEBUG:
-    cmd += " --eval_adv_example"
+    parser.add_argument("CATEGORY", type=str)
+    parser.add_argument("ONNX_FILE", type=str, default=None, help='ONNX_FILE')
+    parser.add_argument("VNNLIB_FILE", type=str, default=None,
+                        help='VNNLIB_FILE')
+    parser.add_argument("RESULTS_FILE", type=str, default=None,
+                        help='RESULTS_FILE')
+    parser.add_argument("TIMEOUT", type=float, default=180,
+                        help='timeout for one property')
+    parser.add_argument("--DEBUG", action='store_true',
+                        help='whether to run in debug mode '
+                             '(checking saved adv example)')
+    parser.add_argument("--PREPARE", action='store_true',
+                        help='whether in preparation phase')
+    parser.add_argument("--NOPGD", action='store_true',
+                        help='do not use pdg attack')
+    parser.add_argument("--TRY_CROWN", action='store_true',
+                        help='overwrite bound-prop-method to CROWN '
+                             'to save memory')
+    return parser.parse_args()
 
-# do not use pdg attack during verification
-if args.NOPGD:
-    cmd += " --pgd_order=skip"
 
-if args.PREPARE:
-    cmd += " --prepare_only"
+def get_config_path(category, vnnlib_file, library_path):
+    # Test cases may run after another category for overhead measurement.
+    vnnlib_basename = os.path.split(vnnlib_file)[-1]
+    test_vnnlibs = ['test_' + f + '.vnnlib' for f in ['nano', 'tiny', 'small']]
+    if vnnlib_basename in test_vnnlibs:
+        config = "exp_configs/vnncomp21/test.yaml"
+    elif 'test_prop' in vnnlib_file:
+        config = "exp_configs/vnncomp21/acasxu.yaml"
+    else:
+        try:
+            config = CATEGORY_CONFIGS[category]
+        except KeyError as exc:
+            raise SystemExit(
+                f"CATEGORY {category} not supported yet") from exc
+    return os.path.join(library_path, config)
 
-print("\n------------------------- COMMAND ------------------------------")
-print(cmd)
-print("----------------------------------------------------------------\n")
 
-ret = os.system(cmd)
-if ret != 0:
-    # avoid original return code to be > 255, reserve its non-zero feature
-    sys.exit(int(ret) % 255 + 1)
+def build_command(args):
+    python_path = sys.executable
+    library_path = os.path.dirname(os.path.realpath(__file__))
+    abcrown_path = os.path.join(library_path, "abcrown.py")
+    config_path = get_config_path(
+        args.CATEGORY, args.VNNLIB_FILE, library_path)
+
+    cmd = (
+        f"{shlex.quote(python_path)} {shlex.quote(abcrown_path)}"
+        f" --config {shlex.quote(config_path)}")
+    if args.CATEGORY in EXPANDABLE_SEGMENTS_CATEGORIES:
+        cmd = "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True " + cmd
+
+    cmd += " --precompile_jit"
+    cmd += " --onnx_path " + shlex.quote(str(args.ONNX_FILE))
+    cmd += " --vnnlib_path " + shlex.quote(str(args.VNNLIB_FILE))
+    cmd += " --results_file " + shlex.quote(str(args.RESULTS_FILE))
+    cmd += " --timeout " + str(args.TIMEOUT)
+
+    # save adv example to args.RESULTS_FILE
+    cmd += " --save_adv_example"
+
+    # use CROWN bound propagation, when original run triggers OOM,
+    # run_instance.sh will add this flag.
+    if args.TRY_CROWN:
+        # This also disables the use of output constraints. They are only useful
+        # for alpha-CROWN.
+        cmd += " --bound_prop_method crown --apply_output_constraints_to"
+
+    # verify the adv example everytime it's saved
+    if args.DEBUG:
+        cmd += " --eval_adv_example"
+
+    # do not use pdg attack during verification
+    if args.NOPGD:
+        cmd += " --pgd_order=skip"
+
+    if args.PREPARE:
+        cmd += " --prepare_only"
+
+    return cmd
+
+
+def main():
+    args = parse_args()
+    cmd = build_command(args)
+
+    print("\n------------------------- COMMAND ------------------------------")
+    print(cmd)
+    print("----------------------------------------------------------------\n")
+
+    ret = os.system(cmd)
+    if ret != 0:
+        # avoid original return code to be > 255, reserve its non-zero feature
+        sys.exit(int(ret) % 255 + 1)
+
+
+if __name__ == "__main__":
+    main()
 
 
 
@@ -362,3 +375,34 @@ if ret != 0:
 # elif args.CATEGORY == "yolo_2023":
 #     cmd += "exp_configs/vnncomp24/yolo-xiangruzh.yaml"
 
+
+#################### VNN-COMP 2025 CATEGORY_CONFIGS for reference ####################
+# CATEGORY_CONFIGS = {
+#     "acasxu_2023": "exp_configs/vnncomp21/acasxu.yaml",
+#     "cctsdb_yolo_2023": "exp_configs/vnncomp23/cctsdb_yolo.yaml",
+#     "cersyve": "exp_configs/vnncomp25/cersyve.yaml",
+#     "cgan_2023": "exp_configs/vnncomp23/cgan.yaml",
+#     "cifar100_2024": "exp_configs/vnncomp25/cifar100.yaml",
+#     "collins_aerospace_benchmark": (
+#         "exp_configs/vnncomp23/collins_yolo_robustness.yaml"),
+#     "collins_rul_cnn_2022": "exp_configs/vnncomp23/collins-rul-cnn.yaml",
+#     "cora_2024": "exp_configs/vnncomp25/cora.yaml",
+#     "dist_shift_2023": "exp_configs/vnncomp23/dist-shift.yaml",
+#     "linearizenn_2024": "exp_configs/vnncomp24/linearizenn.yaml",
+#     "lsnc_relu": "exp_configs/vnncomp25/lsnc_relu.yaml",
+#     "malbeware": "exp_configs/vnncomp25/malbeware.yaml",
+#     "metaroom_2023": "exp_configs/vnncomp23/metaroom.yaml",
+#     "ml4acopf_2024": "exp_configs/vnncomp24/ml4acopf.yaml",
+#     "nn4sys": "exp_configs/vnncomp23/nn4sys.yaml",
+#     "nn4sys_2023": "exp_configs/vnncomp23/nn4sys.yaml",
+#     "relusplitter": "exp_configs/vnncomp25/relusplitter.yaml",
+#     "safenlp_2024": "exp_configs/vnncomp24/safenlp.yaml",
+#     "sat_relu": "exp_configs/vnncomp25/sat_relu.yaml",
+#     "soundnessbench": "exp_configs/vnncomp25/soundnessbench.yaml",
+#     "tinyimagenet_2024": "exp_configs/vnncomp25/tinyimagenet.yaml",
+#     "tllverifybench_2023": "exp_configs/vnncomp23/tllVerifyBench.yaml",
+#     "traffic_signs_recognition_2023": "exp_configs/vnncomp23/gtrsb.yaml",
+#     "vggnet16_2022": "exp_configs/vnncomp23/vggnet16.yaml",
+#     "vit_2023": "exp_configs/vnncomp23/vit.yaml",
+#     "yolo_2023": "exp_configs/vnncomp24/yolo-xiangruzh.yaml",
+# }

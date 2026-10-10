@@ -1,0 +1,19 @@
+# Configuration for the VNN-COMP 2026 ACC nonlinear-properties benchmark.
+#
+# The model/input size is small, but the VNN-LIB constraints include nonlinear
+# arithmetic lowered into wrapper outputs. Use CROWN bounds and input BaB.
+general:
+  root_path: ../../vnncomp2026_benchmarks/benchmarks/adaptive_cruise_control_non_linear_2026/2.0
+  csv_name: instances.csv
+  complete_verifier: bab
+  verify_onnxruntime_output: true
+solver:
+  bound_prop_method: crown
+bab:
+  branching:
+    method: sb
+    input_split:
+      enable: true
+attack:
+  pgd_alpha: 0.05
+  pgd_restarts: 200

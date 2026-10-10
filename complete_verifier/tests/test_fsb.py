@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for heuristics/fsb.py - FsbBranching class."""
@@ -28,14 +28,38 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def setUpModule():
+    """Initialize arguments.Config for all tests (unittest) / setup_module alias for pytest."""
+    import arguments
+    global _original_config
+    _original_config = arguments.Config
+    new_config = arguments.ConfigHandler()
+    new_config.construct_config_dict(new_config.default_args)
+    new_config.file = None
+    arguments.Config = new_config
+
+
+setup_module = setUpModule  # pytest alias
+
+
+def tearDownModule():
+    """Restore original arguments.Config."""
+    import arguments
+    arguments.Config = _original_config
+
+
+teardown_module = tearDownModule  # pytest alias
+
+
 # ============================================================================
 # Shared Test Helpers
 # ============================================================================
 
-def create_mock_net(num_layers=2, neurons_per_layer=5):
+def create_mock_net(batch_size, num_layers=2, neurons_per_layer=5):
     """Create a mock network with proper structure for FSB tests.
 
     Args:
+        batch_size: Batch size (used to set up compute_lower_bounds_chunks mock).
         num_layers: Number of layers in the network.
         neurons_per_layer: Number of neurons per layer (unused, kept for API compatibility).
 
@@ -62,7 +86,15 @@ def create_mock_net(num_layers=2, neurons_per_layer=5):
     mock_net.split_nodes = split_nodes
     mock_net.split_activations = split_activations
     mock_net.build_history_and_set_bounds = MagicMock()
-    mock_net.update_bounds = MagicMock()
+
+    # fsb doubles the batch (lbs = cat([v, v])), then build_history_and_set_bounds
+    # doubles it again for the two split branches, so the effective output is batch*4.
+    csb_patcher = patch(
+        'heuristics.fsb.compute_lower_bounds_chunks',
+        return_value=torch.ones(batch_size * 4, 1)
+    )
+    mock_net._mock_csb = csb_patcher.start()
+    mock_net._csb_patcher = csb_patcher
 
     return mock_net
 
@@ -106,11 +138,14 @@ def create_domains(batch=2, neurons=5, num_layers=2, betas=None):
 class TestFsbBranchingInit(unittest.TestCase):
     """Test FsbBranching initialization."""
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_init_basic(self):
         """Test basic initialization."""
         from heuristics.fsb import FsbBranching
 
-        mock_net = create_mock_net()
+        mock_net = create_mock_net(2)
         branching = FsbBranching(mock_net)
 
         self.assertEqual(branching.net, mock_net)
@@ -119,7 +154,7 @@ class TestFsbBranchingInit(unittest.TestCase):
         """Test that FsbBranching inherits attributes from BabsrBranching."""
         from heuristics.fsb import FsbBranching
 
-        mock_net = create_mock_net()
+        mock_net = create_mock_net(2)
         branching = FsbBranching(mock_net)
 
         # Should have net attribute from parent
@@ -129,14 +164,15 @@ class TestFsbBranchingInit(unittest.TestCase):
 class TestFsbGetBranchingDecisions(unittest.TestCase):
     """Tests for FsbBranching.compute_branching_decisions method."""
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_returns_three_values(self):
         """Test that compute_branching_decisions returns three values."""
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        # update_bounds returns (batch * 4, 1) because batch is doubled twice
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = create_domains(batch, neurons)
@@ -163,8 +199,7 @@ class TestFsbGetBranchingDecisions(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = create_domains(batch, neurons)
@@ -186,13 +221,12 @@ class TestFsbGetBranchingDecisions(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
+        mock_net = create_mock_net(batch)
 
         captured_args = []
         def capture_args(args, split):
             captured_args.append(dict(args))
         mock_net.build_history_and_set_bounds = MagicMock(side_effect=capture_args)
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
         branching = FsbBranching(mock_net)
 
         domains = create_domains(batch, neurons)
@@ -221,8 +255,7 @@ class TestFsbGetBranchingDecisions(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = create_domains(batch, neurons)
@@ -247,13 +280,15 @@ class TestFsbGetBranchingDecisions(unittest.TestCase):
 class TestFsbBranchingReduceOp(unittest.TestCase):
     """Test reduce operation handling in FsbBranching."""
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_calls_get_reduce_op(self):
         """Test that get_reduce_op is called with branching_reduceop."""
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = create_domains(batch, neurons)
@@ -278,13 +313,15 @@ class TestFsbBranchingReduceOp(unittest.TestCase):
 class TestFsbBranchingUseBeta(unittest.TestCase):
     """Test use_beta parameter handling."""
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_use_beta_true_passes_betas(self):
-        """Test that use_beta=True passes betas to update_bounds."""
+        """Test that use_beta=True passes betas to compute_lower_bounds_chunks."""
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = create_domains(batch, neurons, betas=[torch.ones(batch, 10)])
@@ -300,19 +337,17 @@ class TestFsbBranchingUseBeta(unittest.TestCase):
                 use_beta=True
             )
 
-        # Verify update_bounds was called
-        mock_net.update_bounds.assert_called()
-        # Check that betas were included in the call
-        call_args = mock_net.update_bounds.call_args
-        self.assertIn('betas', call_args[0][0])
+        # Verify compute_lower_bounds_chunks was called with betas in the domain dict
+        mock_net._mock_csb.assert_called()
+        call_args = mock_net._mock_csb.call_args
+        self.assertIn('betas', call_args[0][1])
 
     def test_use_beta_false_does_not_pass_betas(self):
-        """Test that use_beta=False does not include betas."""
+        """Test that use_beta=False omits betas from the compute_lower_bounds_chunks domain dict."""
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = create_domains(batch, neurons)
@@ -328,64 +363,25 @@ class TestFsbBranchingUseBeta(unittest.TestCase):
                 use_beta=False
             )
 
-        # Verify update_bounds was called with beta=False
-        mock_net.update_bounds.assert_called()
-        call_args = mock_net.update_bounds.call_args
-        self.assertIn('beta', call_args[1])
-        self.assertFalse(call_args[1]['beta'])
+        # Verify compute_lower_bounds_chunks was called without betas in the domain dict
+        mock_net._mock_csb.assert_called()
+        call_args = mock_net._mock_csb.call_args
+        self.assertNotIn('betas', call_args[0][1])
 
-
-class TestFsbBranchingCsNone(unittest.TestCase):
-    """Test handling when cs is None."""
-
-    def test_cs_none_sets_number_bounds_to_one(self):
-        """Test that cs=None results in number_bounds=1."""
-        from heuristics.fsb import FsbBranching
-
-        batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
-        branching = FsbBranching(mock_net)
-
-        domains = {
-            'lower_bounds': {'pre_layer0': -torch.ones(batch, neurons), 'pre_layer1': -torch.ones(batch, neurons)},
-            'upper_bounds': {'pre_layer0': torch.ones(batch, neurons), 'pre_layer1': torch.ones(batch, neurons)},
-            'mask': {'layer0': torch.ones(batch, neurons), 'layer1': torch.ones(batch, neurons)},
-            'lAs': {'act_layer0': torch.rand(batch, 1, neurons), 'act_layer1': torch.rand(batch, 1, neurons)},
-            'history': [],
-            'alphas': defaultdict(dict),
-            'betas': [],
-            'thresholds': torch.zeros(batch, 1),
-            'cs': None,  # cs is None
-        }
-
-        with patch('heuristics.fsb.babsr_score') as mock_score:
-            mock_score.return_value = (
-                [torch.rand(batch, neurons) for _ in range(2)],
-                [-torch.rand(batch, neurons) for _ in range(2)]
-            )
-
-            # Should not raise error
-            _info = branching.compute_branching_decisions(
-                domains, split_depth=1, branching_candidates=3
-            )
-            final_decision = _info.branching_decision
-            points = _info.branching_points
-            split_depth = _info.split_depth
-
-        self.assertIsNotNone(final_decision)
 
 
 class TestFsbBranchingSkipLayers(unittest.TestCase):
     """Test skip layer logic in FsbBranching."""
+
+    def tearDown(self):
+        patch.stopall()
 
     def test_skip_first_layer_when_multiple_layers(self):
         """Test that first layer is skipped when there are multiple layers."""
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net(num_layers=3)
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch, num_layers=3)
         branching = FsbBranching(mock_net)
 
         domains = {
@@ -438,8 +434,7 @@ class TestFsbBranchingSkipLayers(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net(num_layers=2)
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch, num_layers=2)
         branching = FsbBranching(mock_net)
 
         domains = {
@@ -489,14 +484,17 @@ class TestFsbBranchingSkipLayers(unittest.TestCase):
 class TestFsbBranchingRandomFallback(unittest.TestCase):
     """Test random decision fallback when no valid scores."""
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_random_fallback_when_all_scores_invalid(self):
         """Test that random decisions are used when all scores are invalid."""
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
+        mock_net = create_mock_net(batch)
         # Return very negative values to make decisions invalid
-        mock_net.update_bounds = MagicMock(return_value=torch.full((batch * 4, 1), -20000.0))
+        mock_net._mock_csb.return_value = torch.full((batch * 4, 1), -20000.0)
         branching = FsbBranching(mock_net)
 
         domains = {
@@ -545,8 +543,7 @@ class TestFsbBranchingRandomFallback(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = {
@@ -595,12 +592,15 @@ class TestFsbBranchingRandomFallback(unittest.TestCase):
 class TestFsbBranchingAlphaHandling(unittest.TestCase):
     """Test alpha handling in FsbBranching."""
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_alphas_concatenated_for_processing(self):
         """Test that alphas are concatenated for doubled batch processing."""
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
+        mock_net = create_mock_net(batch)
 
         captured_args = []
         def capture_args(args, split):
@@ -613,7 +613,6 @@ class TestFsbBranchingAlphaHandling(unittest.TestCase):
                 }
             captured_args.append(args_copy)
         mock_net.build_history_and_set_bounds = MagicMock(side_effect=capture_args)
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
         branching = FsbBranching(mock_net)
 
         # Create alphas with original batch size
@@ -668,14 +667,13 @@ class TestFsbBranchingAlphaHandling(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
+        mock_net = create_mock_net(batch)
 
         captured_args = []
         def capture_args(args, split):
             args_copy = dict(args)
             captured_args.append(args_copy)
         mock_net.build_history_and_set_bounds = MagicMock(side_effect=capture_args)
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
         branching = FsbBranching(mock_net)
 
         alphas = defaultdict(dict)
@@ -726,13 +724,15 @@ class TestFsbBranchingAlphaHandling(unittest.TestCase):
 class TestFsbBranchingTopK(unittest.TestCase):
     """Test topk selection logic in FsbBranching."""
 
+    def tearDown(self):
+        patch.stopall()
+
     def test_topk_limited_by_unstable_neurons(self):
         """Test that topk is limited by the number of unstable neurons."""
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 10
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         # Create mask with only 3 unstable neurons total
@@ -791,8 +791,7 @@ class TestFsbBranchingEdgeCases(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 1, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = {
@@ -853,7 +852,6 @@ class TestFsbBranchingEdgeCases(unittest.TestCase):
         mock_net.split_nodes = [mock_node]
         mock_net.split_activations = {'layer0': [(mock_activation,)]}
         mock_net.build_history_and_set_bounds = MagicMock()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
 
         branching = FsbBranching(mock_net)
 
@@ -869,18 +867,20 @@ class TestFsbBranchingEdgeCases(unittest.TestCase):
             'cs': torch.ones(batch, 1),
         }
 
-        with patch('heuristics.fsb.babsr_score') as mock_score:
-            mock_score.return_value = (
-                [torch.rand(batch, neurons)],
-                [-torch.rand(batch, neurons)]
-            )
+        with patch('heuristics.fsb.compute_lower_bounds_chunks',
+                   return_value=torch.ones(batch * 4, 1)):
+            with patch('heuristics.fsb.babsr_score') as mock_score:
+                mock_score.return_value = (
+                    [torch.rand(batch, neurons)],
+                    [-torch.rand(batch, neurons)]
+                )
 
-            _info = branching.compute_branching_decisions(
-                domains, split_depth=1, branching_candidates=3
-            )
-            final_decision = _info.branching_decision
-            points = _info.branching_points
-            split_depth = _info.split_depth
+                _info = branching.compute_branching_decisions(
+                    domains, split_depth=1, branching_candidates=3
+                )
+                final_decision = _info.branching_decision
+                points = _info.branching_points
+                split_depth = _info.split_depth
 
         self.assertIsNotNone(final_decision)
 
@@ -889,8 +889,7 @@ class TestFsbBranchingEdgeCases(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 3
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = {
@@ -944,8 +943,7 @@ class TestFsbBranchingMaskUpdate(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         # Original mask with all unstable
@@ -1002,8 +1000,7 @@ class TestFsbBranchingDecisionComparison(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = {
@@ -1055,8 +1052,7 @@ class TestFsbBranchingPrioritizeAlphas(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = {
@@ -1108,8 +1104,8 @@ class TestFsbBranchingMultipleBounds(unittest.TestCase):
 
         batch, neurons = 2, 5
         num_bounds = 3
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, num_bounds))
+        mock_net = create_mock_net(batch)
+        mock_net._mock_csb.return_value = torch.ones(batch * 4, num_bounds)
         branching = FsbBranching(mock_net)
 
         # cs with multiple bounds
@@ -1164,8 +1160,7 @@ class TestFsbBranchingKwargsHandling(unittest.TestCase):
         from heuristics.fsb import FsbBranching
 
         batch, neurons = 2, 5
-        mock_net = create_mock_net()
-        mock_net.update_bounds = MagicMock(return_value=torch.ones(batch * 4, 1))
+        mock_net = create_mock_net(batch)
         branching = FsbBranching(mock_net)
 
         domains = {

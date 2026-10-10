@@ -8,7 +8,7 @@ general:
   sparse_alpha: true  # Enable/disable sparse alpha.
   sparse_interm: true  # Enable/disable sparse intermediate bounds.
   save_adv_example: false  # Save returned adversarial example in file.
-  verify_onnxruntime_output: false  # Check if the inference results of counterexample are the same on both PyTorch and ONNXRuntime.
+  verify_onnxruntime_output: false  # Validate counterexamples with ONNXRuntime; fail if validation cannot run.
   eval_adv_example: false  # Whether to validate the saved adversarial example.
   onnx_adv_example: false  # Whether to use the ONNX inference result for saving adversarial examples.
   show_adv_example: false  # Print the adversarial example.
@@ -16,7 +16,6 @@ general:
   reset_seed_after_precompile: false  # Reset the random seed after precompilation to ensure reproducibility.
   prepare_only: false  # Prepare to run the instance (e.g., cache vnnlib and converted onnx files) without running the actual verification.
   complete_verifier: bab  # Complete verification verifier. "bab": branch and bound with beta-CROWN or GCP-CROWN; "mip": mixed integer programming (MIP) formulation; "bab-refine": branch and bound with intermediate layer bounds computed by MIP; "Customized": customized verifier, need to specially def by user.
-  enable_incomplete_verification: true  # Enable/Disable initial alpha-CROWN incomplete verification (disable this can save GPU memory).
   csv_name: null  # Name of .csv file containing a list of properties to verify (VNN-COMP specific).
   results_file: out.txt  # Path to results file.
   root_path: ''  # Root path of the specification folder if using vnnlib.
@@ -31,7 +30,6 @@ model:
   name: null  # Model name. Will be evaluated as a python statement.
   path: null  # Load pretrained model from this specified path.
   onnx_path: null  # Path to .onnx model file.
-  onnx_path_prefix: ''  # Add a prefix to .onnx model path to correct malformed csv files.
   cache_onnx_conversion: false  # Cache the model converted from ONNX.
   onnx_quirks: null  # Load onnx model with quirks to workaround onnx model issue. This string will be passed to onnx2pytorch as the 'quirks' argument, and it is typically a literal of a python dict, e.g., "{'Reshape': {'fix_batch_size: True'}}".
   input_shape: null  # Specified input shape of the model.Usually the shape can be automatically determined from dataset or onnx model, but some onnx models may have an incompatible shape (without batch dim). You can specify shape explicitly here.The shape should be (-1, input_shape) like (-1, 3, 32, 32) and -1 indicates the batch dim.
@@ -39,6 +37,7 @@ model:
   onnx_optimization_flags: []  # Onnx graph optimization config.
   onnx_vnnlib_joint_optimization_flags: none  # Joint optimization that changes both onnx model and vnnlib.
   check_optimized: false  # Check the optimized onnx file instead the original one when converting to pytorch. This is used when input shape is changed during optimization.
+  use_ort_optimized_model: false  # Load the ONNX Runtime optimized graph before ONNX-to-PyTorch conversion.
   flatten_final_output: false  # Manually add a flatten layer at the end of the model.
   optimize_graph: null  # Specify a custom function for optimizing the graph on the BoundedModule.
   with_jacobian: false  # Indicate that the model contains JacobianOP.
@@ -60,7 +59,6 @@ specification:
   epsilon: null  # Set perturbation size (Lp norm). If not set, a default value may be used based on dataset loader.
   epsilon_min: 0.0  # Set an optional minimum perturbation size (Lp norm).
   vnnlib_path: null  # Path to .vnnlib specification file. Will override any Lp/robustness verification arguments.
-  vnnlib_path_prefix: ''  # Add a prefix to .vnnlib specs path to correct malformed csv files.
   shrink_eps: null  # Shrink the input bounds.
   rhs_offset: null  # Adding an offset to RHS.
 solver:
@@ -68,7 +66,6 @@ solver:
   auto_enlarge_batch_size: true  # Disable automatic increase of batch size based on --batch_size in bab when current VRAM usage < 45%%; only supports input_split.
   batched_crown_auto_enlarge_max_vram_ratio: 0.9  # Automatically increase batch size based on --batch_size in bab if current VRAM usage < (batched_crown_auto_enlarge_max_vram_ratio / 2)%%, only support batched crown.
   min_batch_size_ratio: 0.1  # The minimum batch size ratio in each iteration (splitting multiple layers if the number of domains is smaller than min_batch_size_ratio * batch_size).
-  use_float64_in_last_iteration: false  # Use double fp (float64) at the last iteration in alpha/beta CROWN.
   early_stop_patience: 10  # Number of iterations that we will start considering early stop if tracking no improvement.
   start_save_best: 0.5  # Start to save best optimized bounds when i > int(iteration*start_save_best). Early iterations are skipped for better efficiency.
   bound_prop_method: alpha-crown  # Bound propagation method used for incomplete verification and input split based branch and bound.
@@ -149,6 +146,13 @@ bab:
   sort_domain_interval: -1  # If unsorted domains are used, sort the domains every sort_domain_interval iterations.
   tree_traversal: depth_first  # During BaB, unknown domains can continue being split (deepening the tree, i.e. depth first traversal) or split only when all other unknown domains have the same number of splits (keeping the tree shallow for as long as possible, i.e. breadth first traversal). Depth first traversal minimizes memory access time, breadth first traversal is beneficial for BICCOS.
   hugetensor_allocator: true  # Use the default tensor allocator instead of the HugeTensor allocator.
+  mixed_precision:
+    enable_tf32_branching_decision: true  # Whether to use TF32 precision during branching decision computation.
+    enable_tf32_clip_decision: true  # Whether to use TF32 precision during clip decision computation.
+    enable_bab_bound_mixed_precision: false  # Enable mixed-precision bound computation during BaB. A fp32 bounds is computed for soundness.
+    bab_bound_mixed_precision_dtype: tf32  # Mixed Precision dtype for bound CROWN. A fp32 bounds is computed for soundness. Options: fp16, bf16, tf32, fp16+tf32, bf16+tf32, fp32, none, "".
+    prune_even_under_low_precision: true  # Whether to speculatively prune verified domains to cut workload even under the low-precision iterations of alpha-CROWN using the low-precision. Meaningful only if prune_in_iteration is enabled.
+    low_precision_prune_margin_abs: 0.01  # Additional absolute margin for speculative pruning to decide verified. The default suits TF32 bound error.
   cut:
     enabled: false  # Enable cutting planes using GCP-CROWN.
     cuts_path: null  # For cuts from CPLEX, specify the path for saving intermediate files with generated cuts.
@@ -200,6 +204,13 @@ bab:
       with_input: false  # Using neuron split constraints to improve the interm bounds.
       clip_in_alpha_crown: false  # Using neuron split constraints to improve the interm bounds.
       topk_objective: 20  # Select top-k objective based on their kfsb-score.
+  shared_slope_bab:
+    enabled: false  # Enable the pre-β-CROWN shared-slope BaB. It builds a same-slope CROWN relaxation from the BaB initialization bounds, then runs the factored dual BaB.
+    iteration: 1  # Dual-ascent steps per domain in the factored dual kernel (1 warm-started step is the default; more tightens each bound).
+    line_search_buckets: 256  # Number of line-search buckets for the compiled dual kernel.
+    slope_iteration: 80  # Adam iterations for per-neuron ReLU slope optimization when building the relaxation state.
+    shared_slope_iteration: -1  # Slope-search iterations for the shared multi-query state. Negative means 0 for multiple queries and slope_iteration for one.
+    shared_max_domains: 250000  # Maximum number of domains in the shared multi-query attempt before per-query fallback.
   branching:
     method: kfsb  # Branching heuristic. babsr is fast but less accurate; fsb is slow but most accurate; kfsb is usually a balance; kfsb-intercept-only is faster but may lead to worse branching; sb is fast smart branching which relies on the A matrix.
     candidates: 3  # Number of candidates to consider when using fsb or kfsb. More candidates lead to slower but better branching.
@@ -210,6 +221,7 @@ bab:
     branching_input_iterations: 30  # Number of iterations to run input split before we run relu split.
     branching_relu_iterations: 50  # Number of iterations to run relu split before we run input split.
     save_visited_domains_to: ''  # Save visited domains to the specified path for visualization.
+    decision_sub_batch_size: null  # Maximum sub-batch size when computing bounds for branching candidates (only applies to KFSB and FSB). Useful to avoid OOM.
     nonlinear_split:
       method: bbps  # Branching heuristic for the general nonlinear functions (either the default BBPS heuristic, or a BaBSR-like as a baseline).
       disable: false  # Disable GenBaB even if there are non-ReLU functions to split.
@@ -289,7 +301,7 @@ attack:
   pgd_loss: default_pgd_loss  # Customized pgd loss.
   cex_path: ./test_cex.txt  # Save path for counter-examples.
   attack_mode: PGD  # Attack algorithm, including vanilla PGD and PGD with diversified output (Tashiro et al.), and GAMA loss (Sriramanan et al.).
-  attack_tolerance: 0.0  # Tolerance of floating point error when checking whether attack is successful or not.
+  attack_tolerance: 0.0  # Tolerance when checking whether attack is successful. Positive values relax the check; negative values make it stricter.
   attack_func: attack_with_general_specs  # The specific customized attack.
   gama_lambda: 10.0  # Regularization parameter in GAMA attack.
   gama_decay: 0.9  # Decay of regularization parameter in GAMA attack.

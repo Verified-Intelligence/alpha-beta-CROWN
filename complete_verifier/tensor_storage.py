@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from abc import ABC, abstractmethod
@@ -194,7 +194,9 @@ class TensorStorage(ABC):
                  dtype=None, device='cpu', concat_dim=0, use_hugepage='auto'):
         """
         full_shape is the tensor shape you want to store using this object, including the "batch" dimension.
-        dtype is tensor type (default float32).
+        dtype is the storage tensor type. It defaults to the input tensor's
+        dtype when full_shape is a tensor, or the process default dtype when
+        full_shape only describes a shape.
         initial_size is the initial size of the storage. It will go up exponentially until reaching a batch size of "switching_size".
         switching_size is the point where exponential growth changes to linear growth.
         device is storage device, and for CPU memory it will be pinned.
@@ -207,7 +209,7 @@ class TensorStorage(ABC):
         else:
             data = None
         if dtype is None:
-            dtype = torch.get_default_dtype()
+            dtype = data.dtype if data is not None else torch.get_default_dtype()
         self.shape = list(full_shape)  # Full shape, with batch size that will become dynamic.
         self.dtype = dtype
         self.device = device

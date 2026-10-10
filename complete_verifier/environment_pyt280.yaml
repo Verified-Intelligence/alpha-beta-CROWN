@@ -202,6 +202,7 @@ dependencies:
       - nvidia-nvtx-cu12==12.8.90
       - onnx==1.19.1
       - git+https://github.com/Verified-Intelligence/onnx2pytorch@8afb2243fddd1a4732883f1e2959f7e83f8201c5#egg=onnx2pytorch
+      - vnnlib==1.0.2
       - onnxoptimizer==0.3.13
       - onnxruntime==1.23.2
       - onnxsim==0.4.36

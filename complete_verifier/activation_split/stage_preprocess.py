@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 from branching_domains import (
@@ -121,6 +121,7 @@ def branch_and_bound_preprocess(
         final_name=const_args.final_name,
         net_c=const_args.net_c,
         net_x=const_args.net_x,
+        dtype_map=const_args.dtype_map,
         timer=stats.timer,
         device=const_args.device,
         beta_bias=branching_decision_data.branching_points is not None,

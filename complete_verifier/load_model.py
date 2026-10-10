@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import hashlib
@@ -110,35 +110,214 @@ def unzip_and_optimize_onnx(path, onnx_optimization_flags: Optional[List[str]] =
                 return onnx_model  # Fallback to unoptimized model
 
 
-def inference_onnx(path, input):
+def _run_onnx_outputs(path, inputs):
     # Workaround for onnx bug, see issue #150
     options = ort.SessionOptions()
     options.inter_op_num_threads = 1
     options.intra_op_num_threads = 1
-    sess = ort.InferenceSession(unzip_and_optimize_onnx(path).SerializeToString(),
-                                sess_options=options)
-    assert len(sess.get_inputs()) == len(sess.get_outputs()) == 1
-    input_info = sess.get_inputs()[0]
-    if "float" in input_info.type:
-        # ONNX input is float, convert to float32
-        input = input.astype(np.float32)
-    elif "double" in input_info.type:
-        # ONNX input is double, convert to float64
-        input = input.astype(np.float64)
-    res = sess.run(None, {input_info.name: input})[0]
-    return res
+    sess = ort.InferenceSession(
+        unzip_and_optimize_onnx(path).SerializeToString(),
+        sess_options=options)
+
+    input_infos = sess.get_inputs()
+    if not isinstance(inputs, (list, tuple)):
+        inputs = [inputs]
+    assert len(input_infos) == len(inputs)
+    feed_dict = {}
+    for input_info, input_value in zip(input_infos, inputs):
+        if "float" in input_info.type:
+            # ONNX input is float, convert to float32
+            input_value = input_value.astype(np.float32)
+        elif "double" in input_info.type:
+            # ONNX input is double, convert to float64
+            input_value = input_value.astype(np.float64)
+        feed_dict[input_info.name] = input_value
+    return sess.run(None, feed_dict)
+
+
+def inference_onnx(path, input):
+    outputs = _run_onnx_outputs(path, input)
+    assert len(outputs) == 1
+    return outputs[0]
+
+
+def export_ort_optimized_model(path, output_path=None):
+    """Export the ONNX Runtime EXTENDED-optimized graph for ``path``."""
+    if output_path is None:
+        stem, ext = os.path.splitext(path)
+        output_path = f'{stem}.abcrown_ort_extended{ext or ".onnx"}'
+    if (os.path.exists(output_path)
+            and os.path.getmtime(output_path) >= os.path.getmtime(path)):
+        return output_path
+
+    options = ort.SessionOptions()
+    options.graph_optimization_level = (
+        ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED)
+    options.optimized_model_filepath = output_path
+    options.inter_op_num_threads = 1
+    options.intra_op_num_threads = 1
+    ort.InferenceSession(
+        path, sess_options=options, providers=['CPUExecutionProvider'])
+    return output_path
+
+
+def _remove_batch_dim(shape):
+    """Return the shape used by verifier after removing a leading batch dim."""
+    shape = tuple(shape)
+    # ONNX shapes usually include a leading batch dimension. A leading 0 or 1
+    # is treated as batch and removed. For nn4sys pensieve parallel, the first
+    # dimension can be larger than 1 and is part of the input, so keep it.
+    if shape and shape[0] <= 1:
+        return shape[1:]
+    return shape
+
+
+def _onnx_feed_input_shapes(onnx_model):
+    """Return per-example shapes for non-initializer ONNX graph inputs."""
+    # Find real ONNX inputs by excluding initializers from graph.input.
+    # https://github.com/onnx/onnx/issues/2657
+    input_all = [node.name for node in onnx_model.graph.input]
+    input_initializer = [node.name for node in onnx_model.graph.initializer]
+    feed_names = set(input_all) - set(input_initializer)
+    feed_inputs = [node for node in onnx_model.graph.input if node.name in feed_names]
+
+    if not feed_inputs:
+        # If no feed input is found, use the first graph input to get a shape.
+        feed_inputs = [onnx_model.graph.input[0]]
+
+    return [
+        _remove_batch_dim(tuple(
+            d.dim_value for d in feed_input.type.tensor_type.shape.dim))
+        for feed_input in feed_inputs
+    ]
+
+
+def _forward_pytorch_model(model, inputs):
+    if len(inputs) == 1:
+        output = model(inputs[0])
+    else:
+        output = model(*inputs)
+    if isinstance(output, (list, tuple)):
+        return list(output)
+    return [output]
+
+
+def _print_conversion_mismatch(output_pytorch, output_onnx):
+    print('\n**************************')
+    print('Model might not be converted correctly. Please check onnx conversion carefully.')
+    print('Output by pytorch:', output_pytorch)
+    print('Output by onnx:', output_onnx)
+    diff = torch.tensor(output_pytorch - output_onnx).abs().reshape(-1)
+    print('Max error:', diff.max())
+    index = diff.argmax()
+    print('Max error index:', diff.argmax())
+    print(f'Output by pytorch at {index}: ',
+          torch.tensor(output_pytorch).reshape(-1)[index])
+    print(f'Output by onnx at {index}: ',
+          torch.tensor(output_onnx).reshape(-1)[index])
+    print('**************************\n')
+
+
+def check_onnx_conversion(
+        pytorch_model, model_path, input_shapes, x=None,
+        onnx_optimization_flags=None, onnx_model=None):
+    conversion_check_result = True
+    try:
+        # FIXME dtype of dummy may not match the onnx model, which can cause
+        # runtime error.
+        if x is not None:
+            assert len(input_shapes) == 1
+            torch_inputs = [x.reshape(1, *input_shapes[0])]
+        else:
+            torch_inputs = [
+                torch.randn([1, *input_shape])
+                for input_shape in input_shapes
+            ]
+        output_pytorch = [
+            output.detach().cpu().numpy()
+            for output in _forward_pytorch_model(pytorch_model, torch_inputs)
+        ]
+        onnx_inputs = [
+            torch_input.detach().cpu().numpy()
+            for torch_input in torch_inputs
+        ]
+        try:
+            output_onnx = _run_onnx_outputs(model_path, onnx_inputs)
+        except ort.capi.onnxruntime_pybind11_state.InvalidArgument:
+            if len(torch_inputs) != 1:
+                raise
+            # ONNX model might have shape problems. Remove the batch dimension
+            # and try again.
+            try:
+                output_onnx = _run_onnx_outputs(
+                    model_path, onnx_inputs[0].squeeze(0))
+            except Exception:
+                try:
+                    # Still failing: try reshaping the input to
+                    # (batch, flattened_dim, 1).
+                    reshaped_input = torch_inputs[0].flatten(1).unsqueeze(-1)
+                    output_onnx = _run_onnx_outputs(
+                        model_path, reshaped_input.cpu().numpy())
+                except Exception as e:
+                    print(
+                        f'Failed to run inference on ONNX model {model_path} '
+                        f'with input shape {torch_inputs[0].shape}')
+                    print('Please check the ONNX model and input shape.')
+                    raise e
+
+        if onnx_optimization_flags is not None and (
+                'remove_relu_in_last_layer' in onnx_optimization_flags):
+            output_pytorch = [
+                output.clip(min=0) for output in output_pytorch
+            ]
+        conversion_check_result = (
+            len(output_pytorch) == len(output_onnx)
+            and all(
+                np.allclose(torch_output, onnx_output, 1e-4, 1e-5)
+                for torch_output, onnx_output in zip(
+                    output_pytorch, output_onnx)
+            )
+        )
+    except:  # pylint: disable=broad-except
+        warnings.warn('Not able to check model\'s conversion correctness')
+        print('\n*************Error traceback*************')
+        import traceback; print(traceback.format_exc())
+        print('*****************************************\n')
+    if not conversion_check_result:
+        _print_conversion_mismatch(output_pytorch[0], output_onnx[0])
+
+        if (onnx_model is not None
+                and arguments.Config["model"]["debug_onnx"]
+                and len(torch_inputs) == 1):
+            debug_onnx(onnx_model, pytorch_model, onnx_inputs[0])
+    return conversion_check_result
 
 
 @torch.no_grad()
 def load_model_onnx(path, quirks=None, x=None):
     start_time = time.time()
+    use_ort_optimized_model = arguments.Config["model"]["use_ort_optimized_model"]
     onnx_optimization_flags = arguments.Config['model']['onnx_optimization_flags']
+
+    if use_ort_optimized_model:
+        # Convert the graph exported by ONNX Runtime, and use that same graph
+        # as the ONNX Runtime reference for conversion checking.
+        conversion_onnx_path = export_ort_optimized_model(path)
+        reference_onnx_path = conversion_onnx_path
+    else:
+        # Convert the original ONNX graph. The reference graph can be the
+        # separately optimized file when the existing check_optimized option is set.
+        conversion_onnx_path = path
+        reference_onnx_path = (
+            path + '.optimized'
+            if arguments.Config['model']['check_optimized'] else path
+        )
 
     if arguments.Config['model']['cache_onnx_conversion']:
         cached_onnx_suffix = ".cached"
-        cached_onnx_filename = f'{path}{cached_onnx_suffix}'
+        cached_onnx_filename = f'{conversion_onnx_path}{cached_onnx_suffix}'
 
-        with open(path, "rb") as file:
+        with open(conversion_onnx_path, "rb") as file:
             curfile_sha256 = hashlib.sha256(file.read()).hexdigest()
 
         if os.path.exists(cached_onnx_filename):
@@ -152,6 +331,8 @@ def load_model_onnx(path, quirks=None, x=None):
                 read_error = True
             if not read_error:
                 if curfile_sha256 == old_file_sha256:
+                    pytorch_model.eval()
+                    pytorch_model.to(dtype=torch.get_default_dtype())
                     end_time = time.time()
                     print(f'Cached converted model loaded in {end_time - start_time:.4f} seconds')
                     return pytorch_model, onnx_shape
@@ -171,33 +352,20 @@ def load_model_onnx(path, quirks=None, x=None):
             raise
         assert isinstance(config_quirks, dict)
         deep_update(quirks, config_quirks)
-    print(f'Loading onnx {path} with quirks {quirks}')
 
-    onnx_model = unzip_and_optimize_onnx(path, onnx_optimization_flags)
+    print(f'Loading onnx {conversion_onnx_path} with quirks {quirks}')
+    onnx_model = unzip_and_optimize_onnx(
+        conversion_onnx_path, onnx_optimization_flags)
 
     if arguments.Config["model"]["input_shape"] is None:
-        # find the input shape from onnx_model generally
-        # https://github.com/onnx/onnx/issues/2657
-        input_all = [node.name for node in onnx_model.graph.input]
-        input_initializer = [node.name for node in onnx_model.graph.initializer]
-        net_feed_input = list(set(input_all) - set(input_initializer))
-        net_feed_input = [node for node in onnx_model.graph.input if node.name in net_feed_input]
-
-        if len(net_feed_input) != 1:
-            # in some rare case, we use the following way to find input shape
-            # but this is not always true (collins-rul-cnn)
-            net_feed_input = [onnx_model.graph.input[0]]
-
-        onnx_input_dims = net_feed_input[0].type.tensor_type.shape.dim
-        onnx_shape = tuple(d.dim_value for d in onnx_input_dims)
+        onnx_input_shapes = _onnx_feed_input_shapes(onnx_model)
     else:
         # User specify input_shape
-        onnx_shape = arguments.Config['model']['input_shape']
-
-    # remove batch information
-    # for nn4sys pensieve parallel, the first dimension of the input size is not batch, do not remove
-    if onnx_shape[0] <= 1:
-        onnx_shape = onnx_shape[1:]
+        onnx_input_shapes = [
+            _remove_batch_dim(arguments.Config['model']['input_shape'])]
+    # load_model_onnx returns one input shape. Conversion checking below uses
+    # all ONNX feed shapes; VNN-LIB 2 loaders use metadata for multi-input layout.
+    onnx_shape = onnx_input_shapes[0]
 
     try:
         pytorch_model = onnx2pytorch.ConvertModel(
@@ -206,63 +374,16 @@ def load_model_onnx(path, quirks=None, x=None):
         print('\n\nA possible onnx2pytorch version error!')
         print('If you see "unexpected keyword argument \'quirks\'", that indicates your onnx2pytorch version is incompatible.')
         print('Please uninstall onnx2pytorch in your python environment (e.g., run "pip uninstall onnx2pytorch"), and then reinstall using:\n')
-        print('pip install git+https://github.com/Verified-Intelligence/onnx2pytorch@fe7281b9b6c8c28f61e72b8f3b0e3181067c7399\n\n')
+        print('pip install git+https://github.com/Verified-Intelligence/onnx2pytorch@bae71f32f65534b7b13aa3a40d797919a94ace45\n\n')
         print('The error below may not a bug of alpha-beta-CROWN. See instructions above.')
         raise(e)
     pytorch_model.eval()
     pytorch_model.to(dtype=torch.get_default_dtype())
 
-    conversion_check_result = True
-    try:
-        # check conversion correctness
-        # FIXME dtype of dummy may not match the onnx model, which can cause runtime error
-        if x is not None:
-            x = x.reshape(1, *onnx_shape)
-        else:
-            x = torch.randn([1, *onnx_shape])
-        output_pytorch = pytorch_model(x).numpy()
-        model_path = path + '.optimized' if arguments.Config['model']['check_optimized'] else path
-        try:
-            output_onnx = inference_onnx(model_path, x.numpy())
-        except ort.capi.onnxruntime_pybind11_state.InvalidArgument:
-            # ONNX model might have shape problems. Remove the batch dimension and try again.
-            try:
-                output_onnx = inference_onnx(model_path, x.numpy().squeeze(0))
-            except Exception:
-                try:
-                    # Still failing: try reshaping the input to (batch, flattened_dim, 1)
-                    output_onnx = inference_onnx(model_path, x.flatten(1).unsqueeze(-1).numpy())
-                except Exception as e:
-                    print(f'Failed to run inference on ONNX model {model_path} with input shape {x.shape}')
-                    print('Please check the ONNX model and input shape.')
-                    raise e
-
-        if 'remove_relu_in_last_layer' in onnx_optimization_flags:
-            output_pytorch = output_pytorch.clip(min=0)
-        conversion_check_result = np.allclose(
-            output_pytorch, output_onnx, 1e-4, 1e-5)
-    except:  # pylint: disable=broad-except
-        warnings.warn('Not able to check model\'s conversion correctness')
-        print('\n*************Error traceback*************')
-        import traceback; print(traceback.format_exc())
-        print('*****************************************\n')
-    if not conversion_check_result:
-        print('\n**************************')
-        print('Model might not be converted correctly. Please check onnx conversion carefully.')
-        print('Output by pytorch:', output_pytorch)
-        print('Output by onnx:', output_onnx)
-        diff = torch.tensor(output_pytorch - output_onnx).abs().reshape(-1)
-        print('Max error:', diff.max())
-        index = diff.argmax()
-        print('Max error index:', diff.argmax())
-        print(f'Output by pytorch at {index}: ',
-              torch.tensor(output_pytorch).reshape(-1)[index])
-        print(f'Output by onnx at {index}: ',
-              torch.tensor(output_onnx).reshape(-1)[index])
-        print('**************************\n')
-
-        if arguments.Config["model"]["debug_onnx"]:
-            debug_onnx(onnx_model, pytorch_model, x.numpy())
+    check_onnx_conversion(
+        pytorch_model, reference_onnx_path, onnx_input_shapes, x=x,
+        onnx_optimization_flags=onnx_optimization_flags,
+        onnx_model=onnx_model)
 
     # TODO merge into the unzip_and_optimize_onnx()
     if arguments.Config["model"]["flatten_final_output"]:

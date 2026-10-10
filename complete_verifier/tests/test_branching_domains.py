@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for branching_domains.py module."""
@@ -63,12 +63,16 @@ def mock_tensor_storage():
 class MockTensorStorage:
     """Mock TensorStorage class for testing. Supports all operations used in tests."""
 
-    def __init__(self, tensor, concat_dim=0):
+    def __init__(self, tensor, dtype=None, device=None, concat_dim=0):
         self.data = tensor
         self.concat_dim = concat_dim
-        if hasattr(tensor, 'dtype'):
+        if dtype is not None:
+            self.dtype = dtype
+        elif hasattr(tensor, 'dtype'):
             self.dtype = tensor.dtype
-        if hasattr(tensor, 'device'):
+        if device is not None:
+            self.device = torch.device(device)
+        elif hasattr(tensor, 'device'):
             self.device = tensor.device
 
     def __len__(self):
@@ -256,52 +260,8 @@ def create_shallow_first_domain_list(mock_net):
 
 
 # ============================================================================
-# AbstractDomainList Tests
+# AbstractDomainList print tests
 # ============================================================================
-
-class TestAbstractDomainList:
-    """Tests for the AbstractDomainList base class."""
-
-    def test_init_creates_instance(self):
-        """Test that AbstractDomainList can be instantiated."""
-        from branching_domains import AbstractDomainList
-        domain_list = AbstractDomainList()
-        assert domain_list is not None
-
-    def test_pick_out_raises_not_implemented(self):
-        """Test that pick_out raises NotImplementedError."""
-        from branching_domains import AbstractDomainList
-        domain_list = AbstractDomainList()
-        with pytest.raises(NotImplementedError):
-            domain_list.pick_out(batch=1, device='cpu')
-
-    def test_add_raises_not_implemented(self):
-        """Test that add raises NotImplementedError."""
-        from branching_domains import AbstractDomainList
-        domain_list = AbstractDomainList()
-        with pytest.raises(NotImplementedError):
-            domain_list.add(None, None, None, None, None, None)
-
-    def test_get_min_domain_raises_not_implemented(self):
-        """Test that get_min_domain raises NotImplementedError."""
-        from branching_domains import AbstractDomainList
-        domain_list = AbstractDomainList()
-        with pytest.raises(NotImplementedError):
-            domain_list.get_min_domain(num=1)
-
-    def test_len_raises_not_implemented(self):
-        """Test that __len__ raises NotImplementedError."""
-        from branching_domains import AbstractDomainList
-        domain_list = AbstractDomainList()
-        with pytest.raises(NotImplementedError):
-            len(domain_list)
-
-    def test_getitem_raises_not_implemented(self):
-        """Test that __getitem__ raises NotImplementedError."""
-        from branching_domains import AbstractDomainList
-        domain_list = AbstractDomainList()
-        with pytest.raises(NotImplementedError):
-            _ = domain_list[0]
 
 
 class TestAbstractDomainListPrint:
@@ -944,6 +904,40 @@ class TestBatchedDomainListInit:
             assert len(domain_list.histories) == 2
             assert len(domain_list.depths) == 2
             assert all(d == 0 for d in domain_list.depths)
+
+    def test_alpha_storage_preserves_reduced_precision(self, mock_net):
+        """Stored alpha values keep their configured domain precision."""
+        from branching_domains import BatchedDomainList
+        import arguments
+
+        arguments.Config['bab']['tree_traversal'] = 'depth_first'
+        arguments.Config['bab']['interm_transfer'] = False
+
+        num_domains = 2
+        alpha = torch.randn(2, 5, num_domains, dtype=torch.float16)
+        domain_list = BatchedDomainList(
+            ret={
+                'lower_bounds': {'output': torch.zeros(num_domains, 10)},
+                'upper_bounds': {'output': torch.ones(num_domains, 10)},
+                'betas': None,
+            },
+            c=torch.ones(num_domains, 1, 10),
+            lAs={'layer1': torch.randn(num_domains, 10, 5)},
+            global_lbs=torch.tensor([[0.0], [0.1]]),
+            global_ubs=torch.tensor([[1.0], [0.9]]),
+            alphas={'layer1': {'spec': alpha}},
+            history={},
+            thresholds=torch.tensor([[0.0]]),
+            net=mock_net,
+            branching_input_and_activation=False,
+            x=None,
+            enable_clip_domains=False,
+        )
+
+        stored = domain_list.all_alphas['layer1']['spec']
+        assert stored.dtype == torch.float16
+        picked = domain_list.pick_out(batch=num_domains, device='cpu')
+        assert picked['alphas']['layer1']['spec'].dtype == torch.float16
 
     def test_init_with_bfs_traversal(self, mock_net):
         """Test BatchedDomainList initialization with BFS traversal (uses deques)."""

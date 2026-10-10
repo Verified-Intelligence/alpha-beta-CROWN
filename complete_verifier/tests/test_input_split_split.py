@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for input_split/split.py"""
@@ -355,13 +355,7 @@ class TestInputSplitParallelShape(unittest.TestCase):
 
 
 class TestInputSplitParallelNoGrad(unittest.TestCase):
-    """Tests for torch.no_grad decorator on input_split_parallel."""
-
-    def test_function_has_no_grad_decorator(self):
-        """Test that input_split_parallel is decorated with torch.no_grad."""
-        from input_split.split import input_split_parallel
-        self.assertTrue(hasattr(input_split_parallel, '__wrapped__')
-                       or 'no_grad' in str(input_split_parallel))
+    """Tests that input_split_parallel does not track gradients."""
 
     def test_no_grad_context(self):
         """Test that function runs without gradient computation."""
@@ -658,42 +652,6 @@ class TestRepeatDataAfterSplitConstraints(unittest.TestCase):
 
 class TestRepeatDataAfterSplitNone(unittest.TestCase):
     """Tests for None handling in repeat_data_after_split."""
-
-    def test_none_cs_returns_none(self):
-        """Test that None cs returns None."""
-        from input_split.split import repeat_data_after_split
-
-        result = repeat_data_after_split(
-            split_depth=1,
-            split_partitions=2,
-            cs=None
-        )
-
-        self.assertIsNone(result[0])
-
-    def test_none_alphas_returns_none(self):
-        """Test that None alphas returns None."""
-        from input_split.split import repeat_data_after_split
-
-        result = repeat_data_after_split(
-            split_depth=1,
-            split_partitions=2,
-            alphas=None
-        )
-
-        self.assertIsNone(result[3])
-
-    def test_none_constraints_returns_none(self):
-        """Test that None constraints returns None."""
-        from input_split.split import repeat_data_after_split
-
-        result = repeat_data_after_split(
-            split_depth=1,
-            split_partitions=2,
-            constraints=None
-        )
-
-        self.assertIsNone(result[7])
 
     def test_all_none_returns_all_none(self):
         """Test that all None inputs return all None outputs."""

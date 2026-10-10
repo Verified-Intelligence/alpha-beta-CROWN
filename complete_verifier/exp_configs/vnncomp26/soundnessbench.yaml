@@ -1,0 +1,25 @@
+general:
+  root_path: ../../vnncomp2026_benchmarks/benchmarks/soundnessbench_2026/1.0
+  csv_name: instances.csv
+  complete_verifier: skip
+  onnx_adv_example: True
+  # reset_seed_after_precompile: True
+solver:
+  bound_prop_method: crown
+specification:
+  shrink_eps: 1e-10
+attack:
+  pgd_order: after
+  # Leaner restart pool (512) keeps each round cheap so the iterated-local-search
+  # hops (which crack the hardest decoy-basin instances) solve in ONE round
+  # instead of two -- ~36-64s instead of ~110-145s, fitting a tight budget.
+  pgd_restarts: 512
+  pgd_steps: 1000
+  pgd_lr_decay: 0.997
+  attack_mode: diversed_PGD
+  # time_budget is the wall-clock attack budget in seconds; set it below the
+  # per-instance timeout minus a small margin for overhead (e.g. 140 for a 150s
+  # timeout). ils_hops/ils_hop_steps control the decoy-basin escape (10x800 is
+  # the sweet spot). Optional kwargs: margin_buffer (default 5e-8), seed_offset
+  # (default 0; bump to retry a stochastically-missed instance).
+  attack_func: Customized("custom_soundness_attack", "soundness_attack", time_budget=140.0, seed_offset=3, ils_hops=16, ils_hop_steps=800, drill_steps=1000, ort_intra_op=4)

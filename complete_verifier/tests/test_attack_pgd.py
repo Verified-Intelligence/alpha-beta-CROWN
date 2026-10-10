@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -240,14 +240,21 @@ class TestDefaultPgdLoss(unittest.TestCase):
 
         from attack.attack_pgd import default_pgd_loss
 
-        # This test verifies the function runs with non-zero tolerance
+        output = torch.zeros(self.batch_size, self.num_restarts, self.num_or, self.num_output)
+        C_mat = torch.zeros(self.batch_size, self.num_or * self.num_and, self.num_output)
+        rhs_mat = torch.zeros(self.batch_size, self.num_or * self.num_and)
+
         loss, loss_gamma = default_pgd_loss(
-            None, self.output, self.C_mat, self.rhs_mat,
-            self.or_spec_size, gama_lambda=0, mode='hinge'
+            None, output, C_mat, rhs_mat,
+            self.or_spec_size, gama_lambda=0, threshold=-1.0, mode='hinge'
         )
 
-        self.assertIsNotNone(loss)
-        self.assertIsNotNone(loss_gamma)
+        # raw_margin = C @ output - rhs = 0. With tolerance 0.1,
+        # adjusted_margin = raw_margin - tolerance = -0.1.
+        # No clipping occurs, so the negated loss is exactly 0.1.
+        expected = torch.full_like(loss, tolerance)
+        self.assertTrue(torch.allclose(loss, expected, atol=1e-6))
+        self.assertTrue(torch.allclose(loss_gamma, expected.sum(), atol=1e-6))
 
     @patch('attack.attack_pgd.arguments.Config', new_callable=dict)
     def test_sanity_check_disables_clamping(self, mock_config):
@@ -368,6 +375,48 @@ class TestTestConditions(unittest.TestCase):
 
         # Inputs are outside bounds, so should fail
         self.assertTrue((~result).all())
+
+    @patch('attack.attack_pgd.arguments.Config', new_callable=dict)
+    def test_attack_tolerance_relaxes_success_condition(self, mock_config):
+        """A positive margin within attack_tolerance is accepted."""
+        mock_config['attack'] = {'attack_tolerance': 1e-3}
+
+        from attack.attack_pgd import test_conditions
+
+        input_tensor = torch.rand(self.batch_size, self.num_restarts, self.num_or, *self.input_shape)
+        output = torch.zeros(self.batch_size, self.num_restarts, self.num_or, self.num_output)
+        data_min = torch.zeros(self.batch_size, 1, self.num_or, *self.input_shape)
+        data_max = torch.ones(self.batch_size, 1, self.num_or, *self.input_shape)
+        C_mat = torch.zeros(self.batch_size, self.num_or * self.num_and, self.num_output)
+        rhs_mat = torch.full((self.batch_size, self.num_or * self.num_and), -5e-4)
+
+        result = test_conditions(
+            input_tensor, output, data_min, data_max,
+            C_mat, rhs_mat, self.or_spec_size
+        )
+
+        self.assertTrue(result.all())
+
+    @patch('attack.attack_pgd.arguments.Config', new_callable=dict)
+    def test_negative_attack_tolerance_makes_success_condition_stricter(self, mock_config):
+        """A negative tolerance preserves the legacy stricter attack check."""
+        mock_config['attack'] = {'attack_tolerance': -1e-3}
+
+        from attack.attack_pgd import test_conditions
+
+        input_tensor = torch.rand(self.batch_size, self.num_restarts, self.num_or, *self.input_shape)
+        output = torch.zeros(self.batch_size, self.num_restarts, self.num_or, self.num_output)
+        data_min = torch.zeros(self.batch_size, 1, self.num_or, *self.input_shape)
+        data_max = torch.ones(self.batch_size, 1, self.num_or, *self.input_shape)
+        C_mat = torch.zeros(self.batch_size, self.num_or * self.num_and, self.num_output)
+        rhs_mat = torch.full((self.batch_size, self.num_or * self.num_and), 5e-4)
+
+        result = test_conditions(
+            input_tensor, output, data_min, data_max,
+            C_mat, rhs_mat, self.or_spec_size
+        )
+
+        self.assertFalse(result.any())
 
     @patch('attack.attack_pgd.arguments.Config', new_callable=dict)
     def test_single_or_spec(self, mock_config):
@@ -758,6 +807,56 @@ class TestPgdAttackWithGeneralSpecs(unittest.TestCase):
         )
 
         self.assertIsNotNone(result)
+
+    @patch('builtins.print')
+    @patch('attack.attack_pgd.arguments.Config', new_callable=dict)
+    @patch('attack.attack_pgd.tqdm', lambda x: x)
+    def test_early_stop_rejected_candidate_continues_pgd(
+            self, mock_config, mock_print):
+        """Concrete-validation failure should not stop PGD early."""
+        import attack.attack_pgd as attack_pgd
+
+        def always_early_stop_condition(inputs, *args, **kwargs):
+            return torch.ones(
+                inputs.shape[0], dtype=torch.bool, device=inputs.device)
+
+        config = self._get_mock_config()
+        config['attack']['pgd_steps'] = 3
+        config['attack']['pgd_early_stop'] = True
+        config['attack']['early_stop_condition'] = (
+            'always_early_stop_condition')
+        mock_config.update(config)
+
+        attack_pgd.always_early_stop_condition = always_early_stop_condition
+        try:
+            X = torch.rand(self.batch_size, self.num_or, *self.input_shape)
+            data_min = torch.zeros(
+                self.batch_size, self.num_or, *self.input_shape)
+            data_max = torch.ones(
+                self.batch_size, self.num_or, *self.input_shape)
+            C_mat = torch.randn(
+                self.batch_size, self.num_or * self.num_and, self.num_output)
+            rhs_mat = torch.randn(
+                self.batch_size, self.num_or * self.num_and)
+            alpha = 0.01
+
+            with patch.object(
+                    attack_pgd.attack_utils,
+                    'are_attack_counterexamples_valid',
+                    return_value=False) as validator:
+                result = attack_pgd.pgd_attack_with_general_specs(
+                    self.model, X, data_min, data_max, C_mat, rhs_mat,
+                    self.or_spec_size, alpha, use_adam=True,
+                    initialization='uniform', num_restarts=2, pgd_steps=3,
+                    vnnlib=[([[0.0, 1.0]], [])],
+                )
+        finally:
+            del attack_pgd.always_early_stop_condition
+
+        self.assertIsNotNone(result)
+        self.assertEqual(validator.call_count, 3)
+        mock_print.assert_any_call(
+            "PGD early stop candidate rejected by concrete validation, continuing PGD.")
 
     @patch('attack.attack_pgd.arguments.Config', new_callable=dict)
     @patch('attack.attack_pgd.tqdm', lambda x: x)

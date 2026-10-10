@@ -9,32 +9,101 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import arguments
+import ast
 import os
 import csv
 import re
 import torch
 import numpy as np
-from load_model import load_model, load_model_onnx, Customized  # pylint: disable=unused-import
+from load_model import (  # pylint: disable=unused-import
+    load_model, load_model_onnx, Customized)
 from read_vnnlib import read_vnnlib
+from read_vnnlib2 import is_vnnlib2_file, read_vnnlib2
+from vnnlib2_wrappers import VNNLib2Wrapper
 from data_utils import load_eran_dataset, load_sdp_dataset
 from data_utils import load_sampled_dataset, load_generic_dataset
 from data_utils import load_pkl_dataset
 from utils import get_save_path, expand_path
-from specifications import construct_vnnlib
+from specifications import VNNLibEntries, construct_vnnlib
 
 
 def default_onnx_and_vnnlib_loader(file_root, onnx_path, vnnlib_path):
+    vnnlib_abs_path = os.path.join(file_root, vnnlib_path)
+    if is_vnnlib2_file(vnnlib_abs_path):
+        return vnnlib2_onnx_and_vnnlib_loader(file_root, onnx_path, vnnlib_path)
+
     vnnlib = read_vnnlib(os.path.join(file_root, vnnlib_path))
     model_ori, onnx_shape = load_model_onnx(
         os.path.join(file_root, onnx_path), x=torch.tensor(vnnlib[0][0])[:, 0])
     shape = (-1, *onnx_shape)  # add the batch dim to onnx_shape
     model_ori, vnnlib = joint_optimization_with_onnx_and_vnnlib(model_ori, shape, vnnlib,
                                                                 arguments.Config['model']['onnx_vnnlib_joint_optimization_flags'])
-    return model_ori, shape, vnnlib
+    return model_ori, shape, VNNLibEntries(vnnlib)
+
+
+def _parse_network_path_mapping(onnx_path):
+    """Parse an optional ONNX-path value containing named network paths.
+
+    The loader normally receives a single ONNX path. For specifications with
+    multiple declared networks, the same argument may be a Python literal list
+    of ``(network_name, path)`` pairs. Return ``None`` for the single-path form.
+    """
+    stripped = onnx_path.strip()
+    if not stripped.startswith("["):
+        return None
+    parsed = ast.literal_eval(stripped)
+    return dict(parsed)
+
+
+def _single_onnx_path(onnx_path):
+    """Return a real ONNX path, or None for a named multi-network mapping."""
+    if _parse_network_path_mapping(onnx_path) is not None:
+        return None
+    return onnx_path
+
+
+def vnnlib2_onnx_and_vnnlib_loader(file_root, onnx_path, vnnlib_path):
+    """Load a VNN-LIB 2.0 query through a verifier-compatible wrapper."""
+    vnnlib, metadata = read_vnnlib2(os.path.join(file_root, vnnlib_path))
+
+    # The ONNX path argument is normally a single model path. For multi-network
+    # specs it can instead be a named mapping, e.g. [('f', 'f.onnx')].
+    network_paths = _parse_network_path_mapping(onnx_path)
+    if network_paths is None:
+        # Single-network VNN-LIB 2 specs use the same path shape as VNN-LIB 1.
+        if len(metadata.networks) != 1:
+            raise ValueError(
+                'Multiple declare-network entries require a named ONNX path mapping.')
+        network_paths = {metadata.networks[0].name: onnx_path}
+
+    models = {}
+    metadata.network_paths = {}
+    for network in metadata.networks:
+        path = network_paths.get(network.name)
+        # If an equal-to network omits its own path, reuse the referenced
+        # network path. Explicit entries still take precedence.
+        if path is None and network.relation and network.relation[0] == 'equal-to':
+            path = network_paths.get(network.relation[1])
+        if path is None:
+            raise ValueError(
+                f'Missing ONNX path for VNN-LIB network {network.name}')
+        abs_path = os.path.join(file_root, path.strip())
+        # The returned ONNX input shape is inferred with verifier-side
+        # heuristics and may not match the VNN-LIB 2 declarations, so this
+        # loader uses only the converted model here.
+        model, _ = load_model_onnx(abs_path)
+        models[network.name] = model
+        metadata.network_paths[network.name] = abs_path
+
+    # The wrapper exposes all declared networks as one verifier model by
+    # flattening their inputs/outputs and adding query-computed outputs if needed.
+    model_ori = VNNLib2Wrapper(models, metadata)
+    shape = (-1, metadata.total_input_size)
+    return model_ori, shape, VNNLibEntries(vnnlib, metadata)
 
 
 def load_verification_dataset():
@@ -110,17 +179,14 @@ def load_verification_dataset():
 
 def load_model_and_vnnlib(file_root, csv_item):
     onnx_path, vnnlib_path, arguments.Config["bab"]["timeout"] = csv_item
-    onnx_path = os.path.join(
-        arguments.Config["model"]["onnx_path_prefix"], onnx_path.strip())
-    vnnlib_path = os.path.join(
-        arguments.Config["specification"]["vnnlib_path_prefix"],
-        vnnlib_path.strip())
+    onnx_path = onnx_path.strip()
+    vnnlib_path = vnnlib_path.strip()
     print(f'Using onnx {onnx_path}')
     print(f'Using vnnlib {vnnlib_path}')
     model_ori, shape, vnnlib = eval(  # pylint: disable=eval-used
         arguments.Config["model"]["onnx_loader"]
     )(file_root, onnx_path, vnnlib_path)
-    return model_ori, shape, vnnlib, onnx_path
+    return model_ori, shape, vnnlib, _single_onnx_path(onnx_path)
 
 
 def parse_run_mode():

@@ -9,13 +9,13 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import torch
 from typing import TYPE_CHECKING, Any, Mapping, Tuple, Optional
 from torch import Tensor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from auto_LiRPA.utils import transfer
 import arguments
 from utils import convert_history_from_list
@@ -45,6 +45,45 @@ class IntermBoundsInfo:
     def __iter__(self):
         yield self.lower_bound
         yield self.upper_bound
+
+
+@dataclass(slots = True)
+class AggregateSplitList:
+    """
+    An efficient list of activation splits,
+    each activation split defines the position, direction,
+    and the value of the split.
+    Used to hold all splits of a batch of domains for one splitable layer.
+
+    Format:
+
+    the t-th split is defined by the following:
+    - batch_ids[t]: domain index this entry came from.
+    - indexes[t]: 1-D long tensor of flat neuron indices split in that domain.
+    - directions[t]: 1-D tensor aligned with indexes[t]; > 0 means the split
+      keeps x >= value (raises the lower bound), otherwise x <= value
+      (lowers the upper bound).
+    - values[t]: 1-D tensor of split points aligned with indexes[t]
+      (0 for ReLU splits).
+    """
+
+    batch_ids: list[int] = field(default_factory=list)
+    values: list[Tensor] = field(default_factory=list)
+    indexes: list[Tensor] = field(default_factory=list)
+    directions: list[Tensor] = field(default_factory=list)
+
+    def append(self, batch_id: int, values: Tensor, indexes: Tensor,
+               directions: Tensor) -> None:
+        self.batch_ids.append(batch_id)
+        self.values.append(values)
+        self.indexes.append(indexes)
+        self.directions.append(directions)
+
+    def __iter__(self):
+        yield self.batch_ids
+        yield self.values
+        yield self.indexes
+        yield self.directions
 
 
 class WorkingIntermBoundsInfo(dict[str, IntermBoundsInfo]):
@@ -239,62 +278,83 @@ class WorkingIntermBoundsInfo(dict[str, IntermBoundsInfo]):
             lower_bounds[i] = ref_static_lbs[i][:batch].clone()
             upper_bounds[i] = ref_static_ubs[i][:batch].clone()
 
-            # Lists to collect data for vectorized update
-            lb_batch_ids, lb_counts, lb_neuron_indices, lb_values = [], [], [], []
-            ub_batch_ids, ub_counts, ub_neuron_indices, ub_values = [], [], [], []
-
-            for j, hist in enumerate(histories):
-                if i in hist:
-                    hist[i] = convert_history_from_list(hist[i])
-                    indices, directions, values = hist[i][0], hist[i][1], hist[i][2]
-                    assert indices.shape[0] == directions.shape[0] == values.shape[0], (
-                        f"Indices, directions, and values must have the same length. "
-                        f"Got {indices.shape[0]}, {directions.shape[0]}, {values.shape[0]}."
-                    )
-
-                    # Create masks for lower and upper bounds
-                    lb_mask = directions > 0
-                    ub_mask = ~lb_mask
-
-                    # Append data for lower bound updates
-                    lb_count = lb_mask.sum()
-                    if lb_count > 0:
-                        lb_batch_ids.append(j)
-                        lb_counts.append(lb_count)
-                        lb_neuron_indices.append(indices[lb_mask])
-                        lb_values.append(values[lb_mask])
-
-                    # Append data for upper bound updates
-                    ub_count = ub_mask.sum()
-                    if ub_count > 0:
-                        ub_batch_ids.append(j)
-                        ub_counts.append(ub_count)
-                        ub_neuron_indices.append(indices[ub_mask])
-                        ub_values.append(values[ub_mask])
-
-            # Perform vectorized update for lower bounds
-            if lb_batch_ids:
-                lb_batch_indices = torch.repeat_interleave(
-                    torch.tensor(lb_batch_ids, device=device),
-                    torch.stack(lb_counts).to(device),
+        # Key idea: writing each domain's splits into the bound tensors one
+        # domain at a time costs O(batch) tiny tensor ops per layer. Instead,
+        # first bucket all histories by layer in plain Python (Pass 1), then
+        # update each layer's bounds with one batched indexing op per bound
+        # side (Pass 2), reducing tensor ops from O(batch * layers) to
+        # O(layers).
+        #
+        # Pass 1: a single sweep over domains, aggregating each (domain,
+        # layer) split entry into that layer's AggregateSplitList. No tensor
+        # ops happen here. Layers not in ref_static_lbs are skipped, matching
+        # the original loop which only visited layers in the template.
+        aggregated = {i: AggregateSplitList() for i in ref_static_lbs}
+        for j, hist in enumerate(histories):
+            for i in hist:
+                layer_agg = aggregated.get(i)
+                if layer_agg is None:
+                    continue
+                hist[i] = convert_history_from_list(hist[i])
+                indices, directions, values = hist[i][0], hist[i][1], hist[i][2]
+                assert indices.shape[0] == directions.shape[0] == values.shape[0], (
+                    f"Indices, directions, and values must have the same length. "
+                    f"Got {indices.shape[0]}, {directions.shape[0]}, {values.shape[0]}."
                 )
-                neuron_indices = torch.cat(lb_neuron_indices).to(
-                    device, non_blocking=True
+                if indices.shape[0] == 0:
+                    continue
+                layer_agg.append(
+                    batch_id=j, values=values, indexes=indices,
+                    directions=directions,
                 )
-                vals = torch.cat(lb_values).to(device, non_blocking=True)
-                lower_bounds[i].view(batch, -1)[lb_batch_indices, neuron_indices] = vals
 
-            # Perform vectorized update for upper bounds
-            if ub_batch_ids:
-                ub_batch_indices = torch.repeat_interleave(
-                    torch.tensor(ub_batch_ids, device=device),
-                    torch.stack(ub_counts).to(device),
-                )
-                neuron_indices = torch.cat(ub_neuron_indices).to(
-                    device, non_blocking=True
-                )
-                vals = torch.cat(ub_values).to(device, non_blocking=True)
-                upper_bounds[i].view(batch, -1)[ub_batch_indices, neuron_indices] = vals
+        # Pass 2: per layer, concatenate the aggregated chunks and write all
+        # split values of all domains into the flattened bound tensors with
+        # one advanced-indexing assignment per bound side.
+        for i, layer_agg in aggregated.items():
+            if not layer_agg.batch_ids:
+                continue
+            all_indices = torch.cat(layer_agg.indexes)
+            all_directions = torch.cat(layer_agg.directions)
+            all_values = torch.cat(layer_agg.values)
+            # The masks and batch ids below are built on CPU and mixed with
+            # history tensors in one indexing expression, so histories must
+            # live on CPU.
+            assert all_indices.device.type == 'cpu', (
+                'from_histories requires history tensors on CPU, '
+                f'got {all_indices.device}.'
+            )
+            # all_batch[k] is the batch row (domain) that the k-th element of
+            # the concatenated all_indices/all_values belongs to: chunk t
+            # contributed indexes[t].shape[0] splits, so its batch id is
+            # repeated that many times. (all_batch[k], all_indices[k]) is
+            # then the (row, flat neuron) coordinate receiving all_values[k].
+            all_batch = torch.repeat_interleave(
+                torch.tensor(layer_agg.batch_ids, dtype=torch.long),
+                torch.tensor(
+                    [chunk.shape[0] for chunk in layer_agg.indexes],
+                    dtype=torch.long,
+                ),
+            )
+            lb_mask = all_directions > 0
+            ub_mask = ~lb_mask
+
+            # Only view() a layer's bounds when there is something to scatter:
+            # bounds of untouched layers may be non-contiguous (e.g. channels
+            # last in patches mode) and would fail the view.
+            if lb_mask.any():
+                lb_flat = lower_bounds[i].view(batch, -1)
+                lb_flat[
+                    all_batch[lb_mask].to(device, non_blocking=True),
+                    all_indices[lb_mask].to(device, non_blocking=True),
+                ] = all_values[lb_mask].to(device, non_blocking=True)
+
+            if ub_mask.any():
+                ub_flat = upper_bounds[i].view(batch, -1)
+                ub_flat[
+                    all_batch[ub_mask].to(device, non_blocking=True),
+                    all_indices[ub_mask].to(device, non_blocking=True),
+                ] = all_values[ub_mask].to(device, non_blocking=True)
 
         return WorkingIntermBoundsInfo(
             {
@@ -371,6 +431,15 @@ class WorkingIntermBoundsInfo(dict[str, IntermBoundsInfo]):
             new_masks[k] = mask
         return new_masks
 
+    def to_dict_of_list(self):
+        """Convert self to dict of list format for easier storage."""
+        return {
+            k: [
+                v.lower_bound.detach() if isinstance(v.lower_bound, torch.Tensor) else v.lower_bound,
+                v.upper_bound.detach() if isinstance(v.upper_bound, torch.Tensor) else v.upper_bound,
+            ]
+            for k, v in self.items()
+        }
 
 @dataclass
 class IntermBoundsFactory:

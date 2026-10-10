@@ -9,13 +9,13 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import sys
 import os
 
-__version__ = '0.7.2'
+__version__ = '0.8.0'
 
 print("Adding complete_verifier to sys.path")
 sys.path = [os.path.dirname(__file__)] + sys.path

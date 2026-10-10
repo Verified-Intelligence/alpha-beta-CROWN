@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 import multiprocessing
@@ -47,8 +47,10 @@ from state import (
     BatchedlA,
     IntermBoundsFactory,
 )
+from state.alpha import resolve_alpha_storage_dtype
 from prune import PruneAfterCROWN
 from beta_CROWN_solver_utils import build_history_and_set_bounds_static
+from heuristics.branching_heuristics import reads_saved_A
 from heuristics.nonlinear import precompute_A
 from domain_clipper import DomainClipper
 from cuts.cplex_cut_recorder import CplexCutRecorder
@@ -182,6 +184,13 @@ class LiRPANet:
     def split_nodes(self):
         return self.net.split_nodes
 
+    def get_split_node_dtype_map(self):
+        """Return the computation dtype owned by each split node."""
+        return {
+            node.name: self.net.get_output_dtype(node)
+            for node in self.net.split_nodes
+        }
+
     @torch.no_grad()
     def get_primal_upper_bound(self, A):
         assert self.x.ptb.norm == torch.inf, (
@@ -203,22 +212,16 @@ class LiRPANet:
             return masks
         for node in self.net.get_splittable_activations():
             mask = []
-            for idx in node.requires_input_bounds:
-                input_node = node.inputs[idx]
-                if not input_node.perturbed or input_node.lower is None and input_node.upper is None:
+            for idx, input_node in enumerate(node.inputs):
+                if not input_node.perturbed:
+                    continue
+                if input_node.lower is None and input_node.upper is None:
                     mask.append(None)
                 else:
                     mask.append(node.get_split_mask(
                         input_node.lower, input_node.upper, idx))
             masks[node.name] = mask
         return masks
-
-    def expand_x_diff_batch(self, x_L, x_U):
-        """Create a new BoundedTensor with new x_L and x_U."""
-        new_data = (x_L + x_U) / 2
-        ptb = PerturbationLpNorm(norm=self.x.ptb.norm, x_L=x_L, x_U=x_U)
-        new_x = BoundedTensor(new_data, ptb)
-        return new_x
 
     def prune_setting(self, d, beta, beta_bias, lb_last, ub_last,
                         batch_mask, enable_opt_interm_bounds):
@@ -230,7 +233,8 @@ class LiRPANet:
         if beta:
             # nums_effective_beta_per_domain = self.beta_set_net_from_d(d, bias=beta_bias)
             full_beta_info, nums_effective_beta_per_domain = BetaFullData.from_domain_dict(
-                d, bias=beta_bias, device=self.device
+                d, bias=beta_bias,
+                dtype_map=self.get_split_node_dtype_map(), device=self.device
             )
             full_beta_info.attach_to_net(self)
             AlphaValueData.from_domain_dict(d).attach_to_net(self)
@@ -263,10 +267,8 @@ class LiRPANet:
         Consider use activation_split.update_bounds_phases.py: update_bounds_pre, update_bounds_core, update_bounds_post
 
         This legacy function is only allowed for existing calls in:
-
         * bab.py:multi_tree_bab shortcut=False
         * heuristics/fsb.py:compute_branching_decisions shortcut=True
-        * heuristics/ksfb.py:compute_branching_decisions shortcut=True
         * heuristics/nonlinear/bbps.py:_compute_actual_bounds shortcut=True
 
         """
@@ -279,7 +281,8 @@ class LiRPANet:
         )
 
         assert (not shortcut) or assert_allowed_caller(
-            ["compute_branching_decisions", "_compute_actual_bounds"]
+            ["compute_branching_decisions", "_compute_actual_bounds",
+             "_run_update_bounds_reference"]
         ), (
             "Misuse of legacy update_bounds() function with shortcut=True."
             "=========================================="
@@ -287,8 +290,8 @@ class LiRPANet:
             "=========================================="
         )
 
-        deterministic_opt = arguments.Config['general']['deterministic_opt']
         solver_args = arguments.Config['solver']
+        reproduce_alpha_bounds = solver_args['reproduce_alpha_bounds']
         beta_args = solver_args['beta-crown']
         bab_args = arguments.Config['bab']
         if beta is None:
@@ -315,7 +318,8 @@ class LiRPANet:
         if beta:
             # nums_effective_beta_per_domain = self.beta_set_net_from_d(d, bias=beta_bias)
             beta_full_data, nums_effective_beta_per_domain = BetaFullData.from_domain_dict(
-                d, bias=beta_bias, device=self.device
+                d, bias=beta_bias,
+                dtype_map=self.get_split_node_dtype_map(), device=self.device
             )
             beta_full_data.attach_to_net(self)
             self.net.cut_used = (
@@ -393,10 +397,9 @@ class LiRPANet:
         ######### Clip and Verify Domains Start ########
         if enable_clip_domains and self.domain_clipper is not None:
             if self.domain_clipper.clip_input_domain:
-                ret_clipper = self.domain_clipper.domain_clip_ReLU(d, new_x,
-                                                        interm_bounds)
-                new_x_Ls, new_x_Us, interm_bounds, d, batch_mask = ret_clipper
-                new_x = self.expand_x_diff_batch(new_x_Ls, new_x_Us)
+                new_x, interm_bounds, d, batch_mask = (
+                    self.domain_clipper.domain_clip_ReLU(
+                        d, new_x, interm_bounds))
                 if self.domain_clipper.prune and batch_mask is not None:
                     ret_prune = self.prune_setting(d, beta, beta_bias, lb_last, ub_last,
                                                 batch_mask, enable_opt_interm_bounds)
@@ -454,10 +457,14 @@ class LiRPANet:
             self.timer.add('transfer')
             self.timer.start('finalize')
             if alpha:
+                alpha_storage_dtype = resolve_alpha_storage_dtype(
+                    arguments.Config["solver"]["alpha-crown"]["alpha_dtype"],
+                    reproduce_alpha_bounds=reproduce_alpha_bounds,
+                )
                 ret_alphas = AlphaValueData.from_net(
                     self,
                     starting_node_scope="all",
-                ).to(device="cpu", dtype=None if deterministic_opt else torch.float16)
+                ).to(device="cpu", dtype=alpha_storage_dtype)
             else:
                 ret_alphas = {}
             if beta:
@@ -479,7 +486,7 @@ class LiRPANet:
                 ub = lb + torch.inf
             ret_l = {self.final_name: lb.detach().to('cpu')}
             ret_u = {self.final_name: ub.detach().to('cpu')}
-            if not deterministic_opt:
+            if not reproduce_alpha_bounds:
                 ret_l[self.final_name] = torch.max(
                     ret_l[self.final_name], lb_last.cpu())
                 if not get_upper_bound:
@@ -513,13 +520,12 @@ class LiRPANet:
             'x_Us': x_Us if new_x_Us is None else new_x_Us,
             'input_split_idx': input_split_idx
         }
-
+    
     def get_split_nodes(self, verbose=False):
         if arguments.Config['bab']['branching']['nonlinear_split']['relu_only']:
-            for node in self.net.nodes():
-                if node.splittable and not isinstance(node, BoundRelu):
-                    node.splittable = False
-                    node.force_not_splittable = True
+            self.net.disabled_split_nodes.update(
+                node for node in self.net.nodes()
+                if not isinstance(node, BoundRelu))
         self.net.get_split_nodes()
         self.split_activations = self.net.split_activations
         if verbose:
@@ -531,9 +537,9 @@ class LiRPANet:
                 if node.perturbed and len(node.requires_input_bounds):
                     print('  ', node)
         if not self.nonlinear_split:
-            for node in self.net.nodes():
-                if node.splittable and not isinstance(node, BoundRelu):
-                    self.nonlinear_split = True
+            self.nonlinear_split = any(
+                not isinstance(node, BoundRelu)
+                for node in self.net.get_splittable_activations())
 
     def build(self, x, c, rhs,
               stop_criterion,
@@ -581,7 +587,19 @@ class LiRPANet:
 
         self._set_A_options(return_A=return_A or enable_clip_domains or clip_in_alpha_crown)
         if clip_in_alpha_crown:
-            self.net.set_bound_opts({'clip_in_alpha_crown': True})
+            self.net.set_bound_opts({
+                'clip_in_alpha_crown': True,
+                'clip_in_alpha_crown_disjuncts_separated': (
+                    batch_handler.optimize_disjuncts_separately),
+            })
+
+        # Saved bounds follow the original specification order along dimension 0.
+        # Each list holds CPU snapshots for the batches completed at that stage;
+        # an early PGD return may leave CROWN ahead of alpha-CROWN by one batch.
+        saved_crown_bounds, saved_alpha_bounds = [], []
+        if arguments.Config['general']['save_output']:
+            arguments.Globals['out']['init_crown_bounds'] = None
+            arguments.Globals['out']['init_alpha_crown'] = None
 
         total_batches = batch_handler.total_batches
         for now_batch in range(total_batches):
@@ -612,8 +630,9 @@ class LiRPANet:
                 print('initial CROWN bounds (first 10 items):', lb.flatten()[:10].tolist())
 
                 if arguments.Config['general']['save_output']:
-                    assert total_batches == 1
-                    arguments.Globals['out']['init_crown_bounds'] = lb.cpu()
+                    saved_crown_bounds.append(lb.detach().cpu().clone())
+                    arguments.Globals['out']['init_crown_bounds'] = torch.cat(
+                        saved_crown_bounds, dim=0)
 
                 if bab_args['cut']['enabled']:
                     assert total_batches == 1
@@ -713,11 +732,10 @@ class LiRPANet:
                     starting_node_scope="all" if get_all_alphas else "part",
                 ).to(
                     device="cpu",
-                    dtype=(
-                        torch.float16
-                        if arguments.Config["solver"]["alpha-crown"]["alpha_dtype"]
-                        == "float16"
-                        else None
+                    dtype=resolve_alpha_storage_dtype(
+                        arguments.Config["solver"]["alpha-crown"]["alpha_dtype"],
+                        reproduce_alpha_bounds=arguments.Config[
+                            "solver"]["reproduce_alpha_bounds"],
                     ),
                 )
             else:
@@ -734,13 +752,24 @@ class LiRPANet:
 
             # save initial alpha-crown for tests
             if arguments.Config['general']['save_output'] and bounding_method == 'alpha-crown':
-                assert total_batches == 1
-                arguments.Globals['out']['init_alpha_crown'] = batch_lb[self.final_name].cpu()
+                # Pruned properties have been restored to their original positions.
+                # This also includes batches proved by CROWN without optimization.
+                saved_alpha_bounds.append(
+                    batch_lb[self.final_name].detach().cpu().clone())
+                arguments.Globals['out']['init_alpha_crown'] = torch.cat(
+                    saved_alpha_bounds, dim=0)
 
             batch_handler.add_batch_result(batch_lb, batch_ub, batch_lA, batch_alpha,
                 batch_mask, batch_input_split_idx, A)
 
-        if self.nonlinear_split and global_lb < 0 and self.return_A:
+        # The BBPS branching heuristic reads the A matrices of all split-node
+        # inputs from `self.A_saved`. Compute the missing ones if BaB will use
+        # it, and will run: when the stop criterion (lb vs. rhs) is not met,
+        # and always in solving mode, where the criterion also covers the
+        # objective.
+        if (reads_saved_A(self) and self.return_A
+                and (arguments.Config['solving']['solving_mode']
+                     or not stop_criterion_func(lb).all())):
             assert total_batches == 1
             precompute_A(self.net, A, batch_x,
                          interm_bounds={k: (batch_lb[k], batch_ub[k]) for k in batch_lb})
@@ -899,11 +928,10 @@ class LiRPANet:
                 starting_node_scope="all" if enable_opt_interm_bounds else "part",
             ).to(
                 device="cpu",
-                dtype=(
-                    torch.float16
-                    if arguments.Config["solver"]["alpha-crown"]["alpha_dtype"]
-                    == "float16"
-                    else None
+                dtype=resolve_alpha_storage_dtype(
+                    arguments.Config["solver"]["alpha-crown"]["alpha_dtype"],
+                    reproduce_alpha_bounds=arguments.Config[
+                        "solver"]["reproduce_alpha_bounds"],
                 ),
             )
 
@@ -991,11 +1019,11 @@ class LiRPANet:
         bab_args = arguments.Config['bab']
         crown_args = solver_args[f'{crown_name}-crown']
         opt_bound_args = {
-            'deterministic': arguments.Config['general']['deterministic_opt'],
+            'reproduce_alpha_bounds': (
+                solver_args['reproduce_alpha_bounds']),
             'lr_alpha': crown_args['lr_alpha'],
             'iteration': crown_args['iteration'],
             'lr_decay': crown_args['lr_decay'],
-            'use_float64_in_last_iteration': solver_args['use_float64_in_last_iteration'],
             'start_save_best': solver_args['start_save_best'],
             'loss_reduction_func': reduction_str2func(
                 arguments.Config['general']['loss_reduction_func']),
@@ -1135,7 +1163,11 @@ class BatchHandler:
             self.optimize_disjuncts_separately = True
 
         if clip_in_alpha_crown:
-            self.optimize_disjuncts_separately = True
+            assert self.optimize_disjuncts_separately, (
+                "clip_in_alpha_crown requires optimize_disjuncts_separately "
+                "before batching disjunctive specifications. If this causes "
+                "OOM, reduce build_batch_size to a smaller value."
+            )
 
         # when the x range is not the same, the alpha can be different for different x or batches.
         # example: BoundRelu. alpha shape, alpha_lookup_idx and alpha_indices can be different,

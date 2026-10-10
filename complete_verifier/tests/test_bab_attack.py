@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for attack/bab_attack.py module."""
@@ -435,13 +435,6 @@ class TestPickoutDiveDomains(unittest.TestCase):
         with self.assertRaises(AssertionError):
             pickout_dive_domains(domains, batch=3, device='cpu')
 
-    def test_pickout_function_import(self):
-        """Test that pickout_dive_domains can be imported."""
-        from attack.bab_attack import pickout_dive_domains
-        self.assertIsNotNone(pickout_dive_domains)
-        self.assertTrue(callable(pickout_dive_domains))
-
-
 class TestInitBabAttack(unittest.TestCase):
     """Tests for init_bab_attack function."""
 
@@ -534,17 +527,6 @@ class TestFindPromisingDomainsAttributes(unittest.TestCase):
         # Counter should be 1 now, still less than start_iter=5
         self.assertEqual(find_promising_domains.counter, 1)
         self.assertEqual(result, ([], [], [], []))
-
-
-class TestBeamMipAttackAttributes(unittest.TestCase):
-    """Tests for beam_mip_attack function attributes."""
-
-    def test_started_attribute(self):
-        """Test that started attribute is properly initialized."""
-        from attack.bab_attack import beam_mip_attack
-
-        # The attribute should exist
-        self.assertTrue(hasattr(beam_mip_attack, 'started') or True)
 
 
 class TestAddDiveDomainFromDiveDecisions(unittest.TestCase):

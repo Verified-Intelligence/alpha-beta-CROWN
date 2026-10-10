@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Literal
 import torch
 
 from state.traits_mixin import DictLikeMixIn
+from utils import transfer_obj
 
 if TYPE_CHECKING:
     from beta_CROWN_solver import LiRPANet
@@ -33,6 +34,27 @@ AlphaDataStartingNodeScope = Literal["part", "all"]
 * part: For each layer, starting_nodes=alpha_start_nodes (final node + --optimized_interm)
 * all: For each layer, starting_nodes=all that present in the network
 """
+
+
+def resolve_alpha_storage_dtype(
+    configured_dtype: str,
+    *,
+    reproduce_alpha_bounds: bool,
+) -> torch.dtype | None:
+    """Resolve the dtype used for alpha tensors stored between BaB updates.
+
+    Args:
+        configured_dtype: Value of the ``alpha_dtype`` verifier option.
+        reproduce_alpha_bounds: Whether stored alpha must reproduce the bound
+            that produced it without a lossy dtype conversion.
+
+    Returns:
+        ``torch.float16`` when compact storage is enabled, or ``None`` to
+        preserve the source tensor dtype.
+    """
+    if configured_dtype == "float16" and not reproduce_alpha_bounds:
+        return torch.float16
+    return None
 
 
 @dataclass
@@ -152,9 +174,19 @@ class AlphaValueData(DictLikeMixIn):
         optimizable_activations = net.net.get_enabled_opt_act()
 
         for m in optimizable_activations:
-            if m.name in self._data:
-                for spec_name, alpha in self._data[m.name].items():
-                    m.alpha[spec_name] = alpha.detach().requires_grad_(True)
+            layer_alpha = self._data.get(m.name)
+            if not layer_alpha:
+                continue
+            if m.output_dtype is None:
+                raise RuntimeError(
+                    f'Cannot restore alpha for {m.name} without its '
+                    'graph output dtype.')
+            for spec_name, alpha in layer_alpha.items():
+                # Domain storage may reduce alpha precision; optimization
+                # resumes with the dtype owned by the computation graph.
+                m.alpha[spec_name] = alpha.to(
+                    device=net.device, dtype=m.output_dtype
+                ).detach().requires_grad_(True)
 
     def clone_tensor(self) -> "AlphaValueData":
         """Clone all tensors in the data structure."""
@@ -306,14 +338,15 @@ class AlphaFullInfoData(DictLikeMixIn):
         new_dict = AlphaFullInfoData(_data={})
         for layer_name, layer_alpha in self.items():
             if isinstance(layer_alpha, dict):
-                new_dict[layer_name] = {}
-                for spec_name, spec_content in layer_alpha.items():
-                    if isinstance(spec_content, torch.Tensor):
-                        new_dict[layer_name][spec_name] = spec_content.to(
-                            device=device, dtype=dtype, non_blocking=non_blocking
-                        )
-                    else:
-                        new_dict[layer_name][spec_name] = spec_content
+                new_dict[layer_name] = {
+                    item_name: transfer_obj(
+                        item,
+                        device=device,
+                        dtype=dtype if item_name == 'alpha' else None,
+                        non_blocking=non_blocking,
+                    )
+                    for item_name, item in layer_alpha.items()
+                }
             else:
                 raise ValueError("Unexpected alpha structure.")
         return new_dict

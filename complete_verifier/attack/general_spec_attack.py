@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 
@@ -49,7 +49,7 @@ def default_pgd_loss(origin_out, output, C_mat, rhs_mat, or_spec_size,
     # [batch, num_spec, num_restarts, num_output] @ [batch, num_spec, num_output, 1]
     # -> [batch, num_spec, num_restarts, 1] -> [batch, num_spec, num_restarts]
 
-    loss = lhs_mat - rhs_mat.unsqueeze(2) + arguments.Config["attack"]["attack_tolerance"]
+    loss = lhs_mat - rhs_mat.unsqueeze(2) - arguments.Config["attack"]["attack_tolerance"]
     # [batch, num_spec, num_restarts]
 
     # apply threshold and negative sign to get the final loss value
@@ -93,7 +93,7 @@ def test_conditions(input, output, data_min, data_max, C_mat, rhs_mat, or_spec_s
     # [batch, num_spec, num_restarts, num_output] @ [batch, num_spec, num_output, 1]
     # -> [batch, num_spec, num_restarts, 1] -> [batch, num_spec, num_restarts]
 
-    cond = lhs_mat - rhs_mat.unsqueeze(2) + arguments.Config["attack"]["attack_tolerance"]
+    cond = lhs_mat - rhs_mat.unsqueeze(2) - arguments.Config["attack"]["attack_tolerance"]
     # [batch, num_spec, num_restarts]
 
     # get the indices of the belonging OR clauses for AND clauses.
@@ -200,7 +200,8 @@ def pgd_attack_with_general_specs(model, X, data_min, data_max, C_mat, rhs_mat,
                                     or_spec_size, alpha,
                                     use_adam=True, normalize=lambda x: x,
                                     initialization='uniform', GAMA_loss=False,
-                                    num_restarts=None, pgd_steps=None) -> PGDAttackResult:
+                                    num_restarts=None, pgd_steps=None,
+                                    vnnlib=None) -> PGDAttackResult:
     ''' the functional function for pgd attack
 
     :param model: PyTorch model under attack.
@@ -217,6 +218,7 @@ def pgd_attack_with_general_specs(model, X, data_min, data_max, C_mat, rhs_mat,
     :param GAMA_loss: whether to use GAMA loss
     :param num_restarts: number of restarts
     :param pgd_steps: number of pgd steps
+    :param vnnlib: parsed VNNLIB spec for concrete counterexample validation
     '''
     device = X.device
     attack_iters = arguments.Config["attack"]["pgd_steps"] if pgd_steps is None else pgd_steps
@@ -403,8 +405,12 @@ def pgd_attack_with_general_specs(model, X, data_min, data_max, C_mat, rhs_mat,
                     test_inputs, test_outputs, test_data_min, test_data_max,
                     test_C_mat, test_rhs_mat,
                     test_or_spec_size, model).all():
-                print("pgd early stop")
-                break
+                if attack_utils.are_attack_counterexamples_valid(
+                        test_inputs, test_outputs, vnnlib):
+                    print("pgd early stop")
+                    break
+                print("PGD early stop candidate rejected by concrete "
+                      "validation, continuing PGD.")
 
         if restart_when_stuck:
             old_delta = delta.clone().detach()
@@ -448,9 +454,11 @@ def pgd_attack_with_general_specs(model, X, data_min, data_max, C_mat, rhs_mat,
     adv_margin_best = adv_margin_per_or[batch_indices, best_or_idx]
     # [batch_size]
 
-    # a sanity check. found a successful adv example <==> corrsponding margin <= 0
+    # Sanity check: finalizers return raw margins, so success is margin <= tolerance.
     assert (
-        (attack_success == (adv_margin_best <= 0.0)).all()
+        (attack_success == (
+            adv_margin_best <= arguments.Config["attack"]["attack_tolerance"]
+        )).all()
     ), "result of test_conditions() and adv_example_finalizer() inconsistent."
 
     adv_input_all = None

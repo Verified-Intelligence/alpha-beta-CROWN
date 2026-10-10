@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for load_model.py module."""
@@ -620,6 +620,83 @@ class TestLoadModelOnnx:
 
         assert shape == (3, 28, 28)  # Batch dimension removed
 
+    def test_check_onnx_conversion_multiple_inputs(self, tmp_path):
+        """Test conversion checking for an ONNX model with two inputs."""
+        import onnx
+        import onnx2pytorch
+        from onnx import helper, TensorProto
+        from load_model import check_onnx_conversion
+
+        x1 = helper.make_tensor_value_info('X1', TensorProto.FLOAT, [1, 2])
+        x2 = helper.make_tensor_value_info('X2', TensorProto.FLOAT, [1, 2])
+        y = helper.make_tensor_value_info('Y', TensorProto.FLOAT, [1, 2])
+        node = helper.make_node('Add', ['X1', 'X2'], ['Y'])
+        graph = helper.make_graph([node], 'two_input_graph', [x1, x2], [y])
+        model = helper.make_model(graph)
+
+        onnx_path = str(tmp_path / "two_input_model.onnx")
+        onnx.save(model, onnx_path)
+        pytorch_model = onnx2pytorch.ConvertModel(
+            onnx.load(onnx_path), experimental=True).eval()
+
+        assert check_onnx_conversion(
+            pytorch_model, onnx_path, [(2,), (2,)])
+
+    def test_ort_optimized_path_returns_single_input_shape(self, tmp_path):
+        """Test ORT optimized loading preserves load_model_onnx shape format."""
+        import arguments
+        import onnx
+        from onnx import helper, TensorProto
+        from load_model import load_model_onnx
+
+        x = helper.make_tensor_value_info('X', TensorProto.FLOAT, [1, 2])
+        y = helper.make_tensor_value_info('Y', TensorProto.FLOAT, [1, 2])
+        node = helper.make_node('Identity', ['X'], ['Y'])
+        graph = helper.make_graph([node], 'ort_test_graph', [x], [y])
+        model = helper.make_model(graph)
+
+        onnx_path = str(tmp_path / "ort_model.onnx")
+        onnx.save(model, onnx_path)
+
+        arguments.Config['model']['use_ort_optimized_model'] = True
+        _, shape = load_model_onnx(onnx_path)
+
+        assert shape == (2,)
+
+    def test_ort_optimized_path_uses_conversion_cache(
+            self, tmp_path, monkeypatch):
+        """Test ORT optimized loading can reuse converted-model cache."""
+        import arguments
+        import onnx
+        import load_model as lm
+        from onnx import helper, TensorProto
+        from load_model import load_model_onnx
+
+        x = helper.make_tensor_value_info('X', TensorProto.FLOAT, [1, 2])
+        y = helper.make_tensor_value_info('Y', TensorProto.FLOAT, [1, 2])
+        node = helper.make_node('Identity', ['X'], ['Y'])
+        graph = helper.make_graph([node], 'ort_cache_graph', [x], [y])
+        model = helper.make_model(graph)
+
+        onnx_path = str(tmp_path / "ort_cache_model.onnx")
+        onnx.save(model, onnx_path)
+
+        arguments.Config['model']['use_ort_optimized_model'] = True
+        arguments.Config['model']['cache_onnx_conversion'] = True
+        _, shape = load_model_onnx(onnx_path)
+        assert shape == (2,)
+
+        optimized_path = str(
+            tmp_path / "ort_cache_model.abcrown_ort_extended.onnx")
+        assert os.path.exists(optimized_path + ".cached")
+
+        def fail_convert(*_args, **_kwargs):
+            raise AssertionError("load_model_onnx should have used the cache")
+
+        monkeypatch.setattr(lm.onnx2pytorch, "ConvertModel", fail_convert)
+        _, cached_shape = load_model_onnx(onnx_path)
+        assert cached_shape == (2,)
+
 
 # ============================================================================
 # Edge Cases and Error Handling
@@ -746,6 +823,34 @@ class TestOnnxCaching:
         expected = f"{path}{cached_suffix}"
 
         assert expected == "/path/to/model.onnx.cached"
+
+    def test_cached_model_uses_default_dtype(self, tmp_path):
+        """Cached conversion must follow the requested verification dtype."""
+        import hashlib
+        import arguments
+        from load_model import load_model_onnx
+
+        onnx_path = tmp_path / "model.onnx"
+        onnx_path.write_bytes(b"cached model hash input")
+        model_hash = hashlib.sha256(onnx_path.read_bytes()).hexdigest()
+        cached_model = nn.Linear(2, 1).float()
+        torch.save(
+            (cached_model, (2,), model_hash),
+            str(onnx_path) + ".cached")
+
+        original_dtype = torch.get_default_dtype()
+        try:
+            arguments.Config["model"]["cache_onnx_conversion"] = True
+            torch.set_default_dtype(torch.float64)
+
+            loaded_model, shape = load_model_onnx(str(onnx_path))
+
+            assert shape == (2,)
+            assert {
+                parameter.dtype for parameter in loaded_model.parameters()
+            } == {torch.float64}
+        finally:
+            torch.set_default_dtype(original_dtype)
 
 
 if __name__ == '__main__':

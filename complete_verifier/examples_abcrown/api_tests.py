@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Small API compatibility smoke tests for ABCrownSolver."""
@@ -109,7 +109,6 @@ def test_vectorized_classification() -> None:
         ConfigBuilder.from_defaults()
         .set("attack/pgd_order", "skip")
         .set("general/complete_verifier", "skip")
-        .set("general/enable_incomplete_verification", True)
         .set("general/enable_complete_verification", False)
     )
     solver = ABCrownSolver(spec, model, config=cfg)
@@ -135,7 +134,6 @@ def test_vectorized_expression_spec() -> None:
         ConfigBuilder.from_defaults()
         .set("attack/pgd_order", "skip")
         .set("general/complete_verifier", "skip")
-        .set("general/enable_incomplete_verification", True)
         .set("general/enable_complete_verification", False)
     )
     solver = ABCrownSolver(spec, model, config=cfg)
@@ -162,7 +160,6 @@ def test_expression_spec() -> None:
         ConfigBuilder.from_defaults()
         .set("attack/pgd_order", "skip")
         .set("general/complete_verifier", "skip")
-        .set("general/enable_incomplete_verification", True)
         .set("general/enable_complete_verification", False)
     )
     solver = ABCrownSolver(spec, model, config=cfg)
@@ -241,7 +238,6 @@ def test_config_update() -> None:
         ConfigBuilder.from_defaults()
         .set("attack/pgd_order", "skip")
         .set("general/complete_verifier", "skip")
-        .set("general/enable_incomplete_verification", True)
         .set("general/enable_complete_verification", False)
         .update({"solver": {"batch_size": 4}})
     )
@@ -494,7 +490,6 @@ def test_optimization_history() -> None:
     cfg = (
         ConfigBuilder.from_defaults()
         .set("general/device", "cpu")
-        .set("general/enable_incomplete_verification", True)
         .set("attack/input_split_check_adv/pgd_steps", 20)
         .set("attack/input_split_check_adv/max_num_domains", 16)
         .set("bab/timeout", 0.5)

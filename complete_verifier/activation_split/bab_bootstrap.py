@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -47,6 +47,7 @@ from utils import (
 from prune import prune_alphas
 import arguments
 from bab import multi_tree_bab
+from shared_slope_bab.branch_and_bound import shared_slope_bab
 from activation_split.decision_precompute import compute_first_iteration_decision
 from activation_split.stage_arguments import (
     PreprocessConstArguments,
@@ -68,7 +69,7 @@ def general_bab(
     c,
     rhs,
     *,
-    reference_dict=None,
+    reference_dict,
     timeout=None,
     max_iterations=None,
 ):
@@ -97,8 +98,6 @@ def general_bab(
     stop_criterion = stop_criterion_batch_any
     stop_criterion_func = stop_criterion(rhs)
 
-    if reference_dict is None:
-        reference_dict = {}
     refined_lower_bounds = reference_dict.get("lower_bounds", None)
     refined_upper_bounds = reference_dict.get("upper_bounds", None)
     reference_lA = reference_dict.get("lA", None)
@@ -106,25 +105,18 @@ def general_bab(
     refined_betas = reference_dict.get("refined_betas", None)
 
     # ============ Initialize LiRPANet for ReLU BaB iteration ============
-    # Since we always enable incomplete verification by default,
-    # it always has refined bounds.
-    if refined_lower_bounds is None or refined_upper_bounds is None:
-        # FIXME: This branch should not be used by default and is only for backup.
-        # Maybe it can be removed in the future.
-        assert arguments.Config["general"]["enable_incomplete_verification"] is False
-        _, ret = net.build(x, c, rhs, stop_criterion)
-    else:
-        ret = net.build_with_refined_bounds(
-            x,
-            c,
-            rhs,
-            stop_criterion,
-            refined_lower_bounds,
-            refined_upper_bounds,
-            reference_lA,
-            reference_alphas,
-            refined_betas,
-        )
+    # Initialize BaB with bounds produced by incomplete verification.
+    ret = net.build_with_refined_bounds(
+        x,
+        c,
+        rhs,
+        stop_criterion,
+        refined_lower_bounds,
+        refined_upper_bounds,
+        reference_lA,
+        reference_alphas,
+        refined_betas,
+    )
 
     (global_ub, global_lb, updated_mask, lA, alpha) = (
         ret["global_ub"],
@@ -158,6 +150,24 @@ def general_bab(
 
     if stop_criterion_func(global_lb).all():
         return all_label_global_lb, 0, "safe"
+
+    # ---- Shared-slope BaB on the relaxed network's affine form ----
+    # Builds one error column per unstable neuron and optimizes per-neuron slopes.
+    if bab_args["shared_slope_bab"]["enabled"]:
+        visited = 0
+        try:
+            global_lb, visited, status = shared_slope_bab(
+                net, x, c, rhs, ret, timeout=timeout)
+        except torch.OutOfMemoryError as e:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            oom_msg = str(e).splitlines()[0]
+            print(f"[Shared-slope BaB] CUDA OOM; fall through to beta-CROWN ({oom_msg})")
+            status = "unknown"
+        all_label_global_lb = torch.min(global_lb - rhs).item()
+        if status == "safe":
+            print("[Shared-slope BaB] all specs verified")
+            return all_label_global_lb, visited, "safe"
 
     # If we are not optimizing intermediate layer bounds, we do not need to
     # save all the intermediate alpha.
@@ -251,6 +261,7 @@ def general_bab(
     total_round = 0
     result = None
     timer = stats.timer
+    net.timer = timer
 
     compute_first_iteration_decision(
         net=net,

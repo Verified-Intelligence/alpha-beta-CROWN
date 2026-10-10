@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """Unit tests for specifications.py"""
@@ -17,6 +17,7 @@ import os
 import sys
 import unittest
 import pytest
+from types import SimpleNamespace
 
 import torch
 import numpy as np
@@ -28,7 +29,7 @@ from specifications import (
     shrink_vnnlib, add_rhs_offset_legacy, BatchedSpecs,
     Specification, SpecificationVerifiedAcc, SpecificationTarget,
     SpecificationRunnerup, SpecificationAllPositive, construct_vnnlib,
-    vnnlibHandler
+    VNNLibEntries, vnnlibHandler
 )
 
 
@@ -85,17 +86,13 @@ class TestShrinkVnnlib(unittest.TestCase):
         self.assertAlmostEqual(result[1][0][0][0], -0.5)
         self.assertAlmostEqual(result[1][0][0][1], 0.5)
 
-    def test_shrink_zero_eps_raises(self):
-        """Test that zero shrink_eps raises assertion."""
+    def test_shrink_requires_positive_eps(self):
+        """Test the positive epsilon precondition."""
         vnnlib = [[[(0.0, 1.0)], []]]
-        with self.assertRaises(AssertionError):
-            shrink_vnnlib(vnnlib, 0.0)
-
-    def test_shrink_negative_eps_raises(self):
-        """Test that negative shrink_eps raises assertion."""
-        vnnlib = [[[(0.0, 1.0)], []]]
-        with self.assertRaises(AssertionError):
-            shrink_vnnlib(vnnlib, -0.1)
+        for shrink_eps in (0.0, -0.1):
+            with self.subTest(shrink_eps=shrink_eps):
+                with self.assertRaises(AssertionError):
+                    shrink_vnnlib(vnnlib, shrink_eps)
 
 
 class TestAddRhsOffsetLegacy(unittest.TestCase):
@@ -286,13 +283,6 @@ class TestSpecificationBase:
         assert spec.num_outputs == arguments.Config['data']['num_outputs']
         assert isinstance(spec.rhs, np.ndarray)
         assert spec.rhs[0] == arguments.Config['bab']['decision_thresh']
-
-    def test_specification_construct_vnnlib_not_implemented(self):
-        """Test that construct_vnnlib raises NotImplementedError."""
-        spec = Specification()
-        with pytest.raises(NotImplementedError):
-            spec.construct_vnnlib()
-
 
 # ============================================================================
 # SpecificationVerifiedAcc Tests (pytest)
@@ -778,6 +768,40 @@ class TestVnnlibHandlerPytest:
         assert handler.total_num_or == 2
         assert handler.or_spec_size[0].item() == 2
         assert handler.or_spec_size[1].item() == 1
+
+    def test_open_input_bounds_shift_without_changing_rhs(self):
+        """Test input strictness consumed by the closed verifier box format."""
+        import arguments
+
+        arguments.Config['specification']['norm'] = float('inf')
+
+        x_range = np.array([[0.0, 1.0], [2.0, 3.0]])
+        c = np.array([[1.0, 0.0], [0.0, 1.0]])
+        rhs = np.array([0.0, 1.0])
+        branch_strictness = SimpleNamespace(
+            input_lower=np.array([True, False]),
+            input_upper=np.array([False, True]),
+            specs=[np.array([True, False])],
+        )
+        metadata = SimpleNamespace(strictness=[branch_strictness])
+        vnnlib = VNNLibEntries([(x_range, [(c, rhs)])], metadata)
+        vnnlib_shape = [-1, 2]
+
+        handler = vnnlibHandler(vnnlib, vnnlib_shape)
+
+        np_dtype = (
+            np.float64 if torch.get_default_dtype() == torch.float64
+            else np.float32
+        )
+        expected_data_min = torch.tensor(
+            [[np.nextafter(np_dtype(0.0), np_dtype(np.inf)), 2.0]])
+        expected_data_max = torch.tensor(
+            [[1.0, np.nextafter(np_dtype(3.0), np_dtype(-np.inf))]])
+        expected_rhs = torch.tensor([0.0, 1.0])
+
+        torch.testing.assert_close(handler.data_min, expected_data_min)
+        torch.testing.assert_close(handler.data_max, expected_data_max)
+        torch.testing.assert_close(handler.rhs, expected_rhs)
 
 
 # ============================================================================

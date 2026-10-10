@@ -9,7 +9,7 @@
 ##   See CONTRIBUTORS for all current and past developers in the team. ##
 ##                                                                     ##
 ##     This program is licensed under the BSD 3-Clause License,        ##
-##        contained in the LICENCE file in this directory.             ##
+##        contained in the LICENSE file in the repository root.       ##
 ##                                                                     ##
 #########################################################################
 """
@@ -487,11 +487,53 @@ class TestClipDomains(unittest.TestCase):
         thresholds = torch.zeros(batch, num_spec)
 
         with patch('builtins.print') as mock_print:
-            new_x_L, new_x_U = clip_domains(x_L, x_U, thresholds, lA, lbias)
+            new_x_L, new_x_U = clip_domains(
+                x_L, x_U, thresholds, lA, lbias)
 
-        # Should return original bounds
-        self.assertTrue(torch.allclose(new_x_L, x_L))
-        self.assertTrue(torch.allclose(new_x_U, x_U))
+        self.assertTrue((new_x_L > new_x_U).any(1).all())
+
+    def test_mixed_batch_marks_only_verified_domains_empty(self):
+        """Test that verified domains are empty and unverified domains remain."""
+        x_L = torch.zeros(2, 1)
+        x_U = torch.ones(2, 1)
+        lA = torch.ones(2, 1, 1)
+        lbias = torch.tensor([[10.0], [-1.0]])
+        thresholds = torch.zeros(2, 1)
+
+        new_x_L, new_x_U = clip_domains(
+            x_L, x_U, thresholds, lA, lbias)
+
+        torch.testing.assert_close(
+            (new_x_L <= new_x_U).all(1), torch.tensor([False, True]))
+
+    def test_verified_zero_slope_domain_is_empty(self):
+        """A flat affine certificate still removes the verified domain."""
+        x_L = torch.zeros(2, 1)
+        x_U = torch.ones(2, 1)
+        lA = torch.zeros(2, 1, 1)
+        lbias = torch.tensor([[1.0], [-1.0]])
+        thresholds = torch.zeros(2, 1)
+
+        new_x_L, new_x_U = clip_domains(
+            x_L, x_U, thresholds, lA, lbias)
+
+        torch.testing.assert_close(
+            (new_x_L <= new_x_U).all(1), torch.tensor([False, True]))
+
+    def test_verified_nonzero_slope_rounding_to_point_is_empty(self):
+        """A certified domain remains empty when clipping rounds to a point."""
+        x_L = torch.tensor([[-4.0]], dtype=torch.float16)
+        x_U = torch.tensor([[-3.5]], dtype=torch.float16)
+        lA = torch.tensor([[[-4.0]]], dtype=torch.float16)
+        lbias = torch.tensor([[-6.0]], dtype=torch.float16)
+        # The affine lower bound is 8. The threshold is one FP16 ULP below it,
+        # but the clipping candidate rounds back to the upper input endpoint.
+        thresholds = torch.tensor([[7.99609375]], dtype=torch.float16)
+
+        new_x_L, new_x_U = clip_domains(
+            x_L, x_U, thresholds, lA, lbias)
+
+        self.assertTrue((new_x_L > new_x_U).all())
 
     def test_with_dm_lb_provided(self):
         """Test when dm_lb is provided instead of computed from lbias."""

@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "abcrown"
-version = "0.7.0"
+version = "0.8.0"
 description = "alpha-beta-CROWN: An Efficient, Scalable and GPU Accelerated Neural Network Verifier (winner of VNN-COMP 2021, 2022, 2023, 2024, 2025)"
-readme = "README_abcrown.md"
+readme = "README.md"
 requires-python = "~=3.11.0"
 license = { text = "BSD-3-Clause" }
 authors = [
@@ -26,6 +26,10 @@ keywords = [
 ]
 dependencies = [
     # --- auto_LiRPA ---
+    # NOTE: torch/torchvision below are the DEFAULT build, installed by a plain
+    # `uv sync` (resolved from PyPI). To match a specific host CUDA driver, sync
+    # with the matching extra instead, e.g. `uv sync --extra cu130`. See the
+    # [project.optional-dependencies] and [tool.uv.sources] sections below.
     "torch==2.11.0",
     "torchvision>=0.21.0",
     "numpy>=2.0.0",
@@ -37,7 +41,7 @@ dependencies = [
     # --- abcrown ---
     "gurobipy<13.0.0",
     "onnx>=1.20.1",
-    "onnx2pytorch @ git+https://github.com/Verified-Intelligence/onnx2pytorch@0826948e0d50cd09d909b7f26b2ee9ca2d3d71b3",
+    "onnx2pytorch @ git+https://github.com/Verified-Intelligence/onnx2pytorch@bae71f32f65534b7b13aa3a40d797919a94ace45",
     "onnxoptimizer>=0.4.2",
     "onnxruntime>=1.24.1",
     "onnxscript>=0.7.0",
@@ -49,6 +53,7 @@ dependencies = [
     "sortedcontainers>=2.4.0",
     "sympy>=1.14.0",
     "termcolor>=3.3.0",
+    "vnnlib>=1.0.2",
     # --- dev / test ---
     "pylint>=2.3.0",
     "pytest>=8.0",
@@ -57,12 +62,86 @@ dependencies = [
     "pytest-order>=1.0.0",
 ]
 
+[project.optional-dependencies]
+# Select the PyTorch CUDA build that matches the host GPU driver by syncing with
+# the corresponding extra, e.g. `uv sync --extra cu130`. These extras are mutually
+# exclusive (see [tool.uv].conflicts) and each redirects torch/torchvision to the
+# matching PyTorch index (see [tool.uv.sources]). Pick the highest build the host
+# driver supports (CUDA is backward compatible): a driver reporting CUDA 13.0 OR
+# 13.2 both use cu130; there is no separate "cu132" PyTorch build.
+cpu = [
+    "torch==2.11.0",
+    "torchvision>=0.21.0",
+]
+cu126 = [
+    "torch==2.11.0",
+    "torchvision>=0.21.0",
+]
+cu128 = [
+    "torch==2.11.0",
+    "torchvision>=0.21.0",
+]
+cu130 = [
+    "torch==2.11.0",
+    "torchvision>=0.21.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/Verified-Intelligence/alpha-beta-CROWN"
 Repository = "https://github.com/Verified-Intelligence/alpha-beta-CROWN"
 Documentation = "https://github.com/Verified-Intelligence/alpha-beta-CROWN/blob/main/complete_verifier/docs/abcrown_api.md"
 
+[tool.uv]
+# The cpu/cuXXX extras above are mutually exclusive: at most one may be enabled
+# per environment/lockfile resolution.
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cu126" },
+        { extra = "cu128" },
+        { extra = "cu130" },
+    ],
+]
+
+[tool.uv.sources]
+# When one of the cpu/cuXXX extras is enabled, pull torch/torchvision from the
+# matching PyTorch index below instead of PyPI. With no extra enabled, they are
+# resolved from the default index (PyPI) as listed in [project.dependencies].
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu128", extra = "cu128" },
+    { index = "pytorch-cu130", extra = "cu130" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu126", extra = "cu126" },
+    { index = "pytorch-cu128", extra = "cu128" },
+    { index = "pytorch-cu130", extra = "cu130" },
+]
+
+# `explicit = true` restricts each index to only the packages routed here via
+# [tool.uv.sources] (torch/torchvision) — never used for any other dependency.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
 [tool.setuptools.packages.find]
 include = ["abcrown", "auto_LiRPA*", "complete_verifier*"]
 exclude = ["complete_verifier.auto_LiRPA*"]
-
