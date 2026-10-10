@@ -88,7 +88,7 @@ def test_conditions(input, output, data_min, data_max, C_mat, rhs_mat, or_spec_s
     cond_value = torch.matmul(C_mat, output.unsqueeze(-1)).squeeze(-1) - rhs_mat - arguments.Config["attack"]["attack_tolerance"]
     # [batch_size, restarts, num_or, num_and_spec]
     cond_value = cond_value.amax(dim=-1, keepdim=False)
-    cond = cond_value < 0.0
+    cond = cond_value <= 0.0
     # [batch_size, restarts, num_or]
 
     valid = ((input <= data_max) & (input >= data_min))
