@@ -800,7 +800,7 @@ class ConfigHandler:
         h = ["bab", "branching"]
         self.add_argument("--branching_method", default="kfsb",
                           choices=["babsr", "fsb", "kfsb", "kfsb-intercept-only",
-                                   "random", "intercept", "naive", "sb",
+                                   "random", "intercept", "interval-sensitivity", "naive", "sb",
                                    "nonlinear", "brute-force"],
                           help='Branching heuristic. babsr is fast but less accurate; fsb is slow but most accurate; kfsb is usually a balance; kfsb-intercept-only is faster but may lead to worse branching; sb is fast smart branching which relies on the A matrix.',
                           hierarchy=h + ["method"])
