@@ -146,7 +146,7 @@ def attack_with_general_specs(model, x, data_min, data_max, C_mat, rhs_mat, or_s
     # Step 5: Check if the clean input is already adversarial
     # [1, num_or, *input_shape], [1, num_or, num_output], [1, num_spec], [1, num_or]
     adv_input_per_or, adv_output_per_or, adv_margin_per_spec, adv_margin_per_or = eval(arguments.Config["attack"]["adv_example_finalizer"])(
-        model, batched_x, torch.zeros_like(batched_x), batched_data_max, batched_data_min, batched_C_mat, batched_rhs_mat, or_spec_size
+        model, batched_x, torch.zeros_like(batched_x), batched_data_min, batched_data_max, batched_C_mat, batched_rhs_mat, or_spec_size
     )
 
     # Unsqueeze data to match API requirements of different versions of test_conditions().
